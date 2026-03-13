@@ -6,9 +6,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from pykrx import stock
 
-st.set_page_config(page_title="조현웅 주식 포트폴리오 분석기", layout="wide")
+st.set_page_config(page_title="조현웅 주식 포트폴리오 분석", layout="wide")
 
-st.title("📈 조현웅 주식 포트폴리오 분석기")
+st.title("📈 조현웅 주식 포트폴리오 분석")
 st.caption("보유 종목: KODEX 200 ETF / 삼성전자 / SK하이닉스")
 
 
@@ -607,3 +607,4 @@ st.write("※ 코드 안에서는 금액을 쉼표 없이 숫자로 입력하고
 st.write("※ 리밸런싱 금액이 양수이면 추가 매수, 음수이면 비중 축소 검토 의미입니다.")
 st.write("※ 추가 투자금 배분 기능은 매도 없이 신규 자금만 투입하는 상황을 가정한 참고용 계산입니다.")
 st.write("※ 손익과 수익률은 수익일 때 빨간색, 손실일 때 파란색으로 표시됩니다.")
+
