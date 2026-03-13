@@ -17,9 +17,9 @@ WATCHLIST = {
 
 # 기본 포트폴리오 (수량/매입가는 수정하세요)
 portfolio = pd.DataFrame([
-    {"ticker": "069500", "name": "KODEX 200", "quantity": 3, "buy_price": 330000},
-    {"ticker": "005930", "name": "삼성전자", "quantity": 10, "buy_price": 72000},
-    {"ticker": "000660", "name": "SK하이닉스", "quantity": 5, "buy_price": 190000}
+    {"ticker": "069500", "name": "KODEX 200", "quantity": 94, "buy_price": 84026},
+    {"ticker": "005930", "name": "삼성전자", "quantity": 27, "buy_price": 187700},
+    {"ticker": "000660", "name": "SK하이닉스", "quantity": 1, "buy_price": 941000}
 ])
 
 
