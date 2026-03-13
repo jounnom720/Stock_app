@@ -1,162 +1,609 @@
-import streamlit as st
-import pandas as pd
-from pykrx import stock
+import math
 from datetime import datetime, timedelta
+
+import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
+from pykrx import stock
 
-st.set_page_config(page_title="Jone 주식 분석기", layout="wide")
+st.set_page_config(page_title="조현웅 주식 포트폴리오 분석기", layout="wide")
 
-st.title("📈 Jone 포트폴리오 분석기")
+st.title("📈 조현웅 주식 포트폴리오 분석기")
+st.caption("보유 종목: KODEX 200 ETF / 삼성전자 / SK하이닉스")
 
-# 보유 종목
-WATCHLIST = {
+
+# -----------------------------------
+# 기본 보유 종목
+# -----------------------------------
+관심종목 = {
     "069500": "KODEX 200",
     "005930": "삼성전자",
-    "000660": "SK하이닉스"
+    "000660": "SK하이닉스",
 }
 
-# 기본 포트폴리오 (수량/매입가는 수정하세요)
-portfolio = pd.DataFrame([
-    {"ticker": "069500", "name": "KODEX 200", "quantity": 94, "buy_price": 84026},
-    {"ticker": "005930", "name": "삼성전자", "quantity": 27, "buy_price": 187700},
-    {"ticker": "000660", "name": "SK하이닉스", "quantity": 1, "buy_price": 941000}
+기본포트폴리오 = pd.DataFrame([
+    {"종목코드": "069500", "종목명": "KODEX 200", "보유수량": 94, "매입단가": 84026},
+    {"종목코드": "005930", "종목명": "삼성전자", "보유수량": 20, "매입단가": 72000},
+    {"종목코드": "000660", "종목명": "SK하이닉스", "보유수량": 10, "매입단가": 190000},
 ])
 
 
-def get_price(ticker):
-    today = datetime.today().strftime("%Y%m%d")
-    df = stock.get_market_ohlcv_by_date(today, today, ticker)
-    if df.empty:
+# -----------------------------------
+# 표시용 함수
+# -----------------------------------
+def 금액표시(값):
+    if pd.isna(값):
+        return "-"
+    return f"{값:,.0f}원"
+
+
+def 숫자표시(값):
+    if pd.isna(값):
+        return "-"
+    return f"{값:,.0f}"
+
+
+def 비율표시(값):
+    if pd.isna(값):
+        return "-"
+    return f"{값:.2f}%"
+
+
+def 손익색상(값):
+    if pd.isna(값):
+        return ""
+    if 값 > 0:
+        return "color: red; font-weight: bold;"
+    if 값 < 0:
+        return "color: blue; font-weight: bold;"
+    return ""
+
+
+def 수익률색상(값):
+    if pd.isna(값):
+        return ""
+    if 값 > 0:
+        return "color: red; font-weight: bold;"
+    if 값 < 0:
+        return "color: blue; font-weight: bold;"
+    return ""
+
+
+def 손익문자열(값):
+    if pd.isna(값):
+        return "-"
+    if 값 > 0:
+        return f"+{값:,.0f}"
+    if 값 < 0:
+        return f"{값:,.0f}"
+    return f"{값:,.0f}"
+
+
+def 수익률문자열(값):
+    if pd.isna(값):
+        return "-"
+    if 값 > 0:
+        return f"+{값:.2f}%"
+    if 값 < 0:
+        return f"{값:.2f}%"
+    return f"{값:.2f}%"
+
+
+# -----------------------------------
+# 데이터 조회 함수
+# -----------------------------------
+def 현재가가져오기(종목코드):
+    오늘 = datetime.today().strftime("%Y%m%d")
+    try:
+        데이터 = stock.get_market_ohlcv_by_date(오늘, 오늘, 종목코드)
+        if 데이터.empty:
+            return None
+        return float(데이터.iloc[-1]["종가"])
+    except Exception:
         return None
-    return df.iloc[-1]["종가"]
 
 
-def get_history(ticker):
+def 과거가격가져오기(종목코드, 개월수=6):
+    종료일 = datetime.today()
+    시작일 = 종료일 - timedelta(days=30 * 개월수)
 
-    end = datetime.today()
-    start = end - timedelta(days=180)
-
-    df = stock.get_market_ohlcv_by_date(
-        start.strftime("%Y%m%d"),
-        end.strftime("%Y%m%d"),
-        ticker
+    데이터 = stock.get_market_ohlcv_by_date(
+        시작일.strftime("%Y%m%d"),
+        종료일.strftime("%Y%m%d"),
+        종목코드,
     )
 
-    df = df.rename(columns={"종가": "Close"})
-    df["MA20"] = df["Close"].rolling(20).mean()
+    if 데이터.empty:
+        return 데이터
 
-    return df
+    데이터 = 데이터.copy()
+    데이터["20일평균"] = 데이터["종가"].rolling(20).mean()
+    데이터["60일평균"] = 데이터["종가"].rolling(60).mean()
+
+    변화량 = 데이터["종가"].diff()
+    상승분 = 변화량.clip(lower=0)
+    하락분 = -변화량.clip(upper=0)
+
+    평균상승 = 상승분.rolling(14).mean()
+    평균하락 = 하락분.rolling(14).mean()
+
+    rs = 평균상승 / 평균하락
+    데이터["RSI(14)"] = 100 - (100 / (1 + rs))
+
+    return 데이터
 
 
-# 현재 가격 요약
-st.subheader("현재 주가")
+# -----------------------------------
+# 계산 함수
+# -----------------------------------
+def 포트폴리오계산(원본포트폴리오):
+    계산표 = 원본포트폴리오.copy()
 
-cols = st.columns(3)
+    계산표["종목코드"] = 계산표["종목코드"].astype(str).str.zfill(6)
+    계산표["보유수량"] = pd.to_numeric(계산표["보유수량"], errors="coerce").fillna(0)
+    계산표["매입단가"] = pd.to_numeric(계산표["매입단가"], errors="coerce").fillna(0)
 
-prices = {}
+    계산표["현재가"] = 계산표["종목코드"].apply(현재가가져오기)
+    계산표["평가금액"] = 계산표["현재가"] * 계산표["보유수량"]
+    계산표["투자원금"] = 계산표["매입단가"] * 계산표["보유수량"]
+    계산표["평가손익"] = 계산표["평가금액"] - 계산표["투자원금"]
 
-for i, ticker in enumerate(WATCHLIST):
+    계산표["수익률"] = 계산표.apply(
+        lambda 행: (행["평가손익"] / 행["투자원금"] * 100) if 행["투자원금"] not in [0, None] else 0,
+        axis=1,
+    )
 
-    name = WATCHLIST[ticker]
-    price = get_price(ticker)
+    총평가금액 = 계산표["평가금액"].sum()
+    if 총평가금액 != 0:
+        계산표["현재비중"] = 계산표["평가금액"] / 총평가금액 * 100
+    else:
+        계산표["현재비중"] = 0.0
 
-    prices[ticker] = price
+    return 계산표
 
-    with cols[i]:
-        if price:
-            st.metric(name, f"{price:,.0f}원")
+
+def 리밸런싱계산(계산표, 목표비중사전):
+    결과표 = 계산표.copy()
+    총평가금액 = 결과표["평가금액"].sum()
+
+    결과표["목표비중"] = 결과표["종목코드"].map(목표비중사전).fillna(0.0)
+    결과표["비중차이"] = 결과표["현재비중"] - 결과표["목표비중"]
+    결과표["목표평가금액"] = 총평가금액 * 결과표["목표비중"] / 100
+    결과표["리밸런싱금액"] = 결과표["목표평가금액"] - 결과표["평가금액"]
+
+    결과표["정확계산수량"] = 결과표.apply(
+        lambda 행: (행["리밸런싱금액"] / 행["현재가"])
+        if pd.notna(행["현재가"]) and 행["현재가"] not in [0, None] else 0,
+        axis=1,
+    )
+
+    결과표["주문참고수량"] = 결과표["정확계산수량"].round().astype(int)
+
+    def 권장문구(행):
+        수량 = int(행["주문참고수량"])
+        금액 = 행["리밸런싱금액"]
+
+        if 수량 > 0:
+            return f"{abs(수량):,}주 추가 매수 검토"
+        if 수량 < 0:
+            return f"{abs(수량):,}주 비중 축소 검토"
+        if pd.notna(행["현재가"]) and abs(금액) < 행["현재가"] * 0.5:
+            return "거의 적정 비중"
+        return "소액 조정 가능"
+
+    결과표["권장방향"] = 결과표.apply(권장문구, axis=1)
+
+    return 결과표, 총평가금액
+
+
+def 추가투자금배분계산(계산표, 목표비중사전, 추가투자금):
+    결과표 = 계산표.copy()
+
+    if 추가투자금 <= 0:
+        결과표["부족금액"] = 0.0
+        결과표["추천배정금액"] = 0.0
+        결과표["추천매수수량"] = 0
+        결과표["실사용금액"] = 0.0
+        결과표["추가매수의견"] = "추가 투자금 없음"
+        return 결과표, 추가투자금, 추가투자금
+
+    현재총평가금액 = 결과표["평가금액"].sum()
+    목표총자산 = 현재총평가금액 + 추가투자금
+
+    결과표["목표비중"] = 결과표["종목코드"].map(목표비중사전).fillna(0.0)
+    결과표["추가투자후목표금액"] = 목표총자산 * 결과표["목표비중"] / 100
+    결과표["부족금액"] = (결과표["추가투자후목표금액"] - 결과표["평가금액"]).clip(lower=0)
+
+    부족금액합계 = 결과표["부족금액"].sum()
+
+    if 부족금액합계 == 0:
+        결과표["추천배정금액"] = 0.0
+        결과표["추천매수수량"] = 0
+        결과표["실사용금액"] = 0.0
+        결과표["추가매수의견"] = "현재 비중이 목표 수준과 유사"
+        return 결과표, 0.0, 추가투자금
+
+    결과표["추천배정금액"] = 결과표["부족금액"] / 부족금액합계 * 추가투자금
+
+    def 매수가능수량계산(행):
+        현재가 = 행["현재가"]
+        배정금액 = 행["추천배정금액"]
+
+        if pd.isna(현재가) or 현재가 in [0, None]:
+            return 0
+        return math.floor(배정금액 / 현재가)
+
+    결과표["추천매수수량"] = 결과표.apply(매수가능수량계산, axis=1)
+    결과표["실사용금액"] = 결과표["추천매수수량"] * 결과표["현재가"]
+    총실사용금액 = 결과표["실사용금액"].sum()
+    남는현금 = 추가투자금 - 총실사용금액
+
+    def 추가매수의견생성(행):
+        수량 = int(행["추천매수수량"])
+        if 수량 > 0:
+            return f"{수량:,}주 추가 매수 추천"
+        if 행["추천배정금액"] > 0:
+            return "배정금액은 있으나 1주 매수 금액 부족"
+        return "추가 매수 우선순위 낮음"
+
+    결과표["추가매수의견"] = 결과표.apply(추가매수의견생성, axis=1)
+
+    return 결과표, 총실사용금액, 남는현금
+
+
+# -----------------------------------
+# 그래프 함수
+# -----------------------------------
+def 가격그래프(데이터, 종목명):
+    그림 = go.Figure()
+
+    그림.add_trace(go.Scatter(
+        x=데이터.index,
+        y=데이터["종가"],
+        mode="lines",
+        name="종가",
+    ))
+    그림.add_trace(go.Scatter(
+        x=데이터.index,
+        y=데이터["20일평균"],
+        mode="lines",
+        name="20일 평균",
+    ))
+    그림.add_trace(go.Scatter(
+        x=데이터.index,
+        y=데이터["60일평균"],
+        mode="lines",
+        name="60일 평균",
+    ))
+
+    그림.update_layout(
+        title=f"{종목명} 주가 추이",
+        xaxis_title="날짜",
+        yaxis_title="가격",
+        height=500,
+    )
+    return 그림
+
+
+def 거래량그래프(데이터, 종목명):
+    그림 = go.Figure()
+
+    그림.add_trace(go.Bar(
+        x=데이터.index,
+        y=데이터["거래량"],
+        name="거래량",
+    ))
+
+    그림.update_layout(
+        title=f"{종목명} 거래량",
+        xaxis_title="날짜",
+        yaxis_title="거래량",
+        height=300,
+    )
+    return 그림
+
+
+def 비중그래프(계산표):
+    그림 = go.Figure(go.Pie(
+        labels=계산표["종목명"],
+        values=계산표["평가금액"],
+        hole=0.45,
+    ))
+    그림.update_layout(title="현재 포트폴리오 비중")
+    return 그림
+
+
+def 목표비중비교그래프(리밸런싱표):
+    그림 = go.Figure()
+
+    그림.add_trace(go.Bar(
+        x=리밸런싱표["종목명"],
+        y=리밸런싱표["현재비중"],
+        name="현재 비중",
+    ))
+    그림.add_trace(go.Bar(
+        x=리밸런싱표["종목명"],
+        y=리밸런싱표["목표비중"],
+        name="목표 비중",
+    ))
+
+    그림.update_layout(
+        title="현재 비중 vs 목표 비중",
+        xaxis_title="종목",
+        yaxis_title="비중(%)",
+        barmode="group",
+        height=420,
+    )
+    return 그림
+
+
+# -----------------------------------
+# 상단 현재가 요약
+# -----------------------------------
+st.subheader("현재 주가 요약")
+
+요약칸 = st.columns(3)
+
+for i, 종목코드 in enumerate(관심종목):
+    종목명 = 관심종목[종목코드]
+    현재가 = 현재가가져오기(종목코드)
+
+    with 요약칸[i]:
+        if 현재가 is not None:
+            st.metric(종목명, 금액표시(현재가))
         else:
-            st.metric(name, "데이터 없음")
+            st.metric(종목명, "데이터 없음")
 
 
-# 포트폴리오 계산
+# -----------------------------------
+# 개별 종목 분석
+# -----------------------------------
+st.markdown("---")
+st.subheader("개별 종목 분석")
 
-st.subheader("포트폴리오 현황")
+선택종목명 = st.selectbox("분석할 종목 선택", list(관심종목.values()))
+선택종목코드 = [코드 for 코드, 이름 in 관심종목.items() if 이름 == 선택종목명][0]
 
-portfolio["current_price"] = portfolio["ticker"].apply(lambda x: prices.get(x))
-portfolio["eval_amount"] = portfolio["current_price"] * portfolio["quantity"]
-portfolio["invest_amount"] = portfolio["buy_price"] * portfolio["quantity"]
+가격데이터 = 과거가격가져오기(선택종목코드, 개월수=6)
 
-portfolio["profit"] = portfolio["eval_amount"] - portfolio["invest_amount"]
-portfolio["return"] = portfolio["profit"] / portfolio["invest_amount"] * 100
+if 가격데이터.empty:
+    st.warning("가격 데이터를 불러오지 못했습니다.")
+else:
+    최신값 = 가격데이터.iloc[-1]
+    이전값 = 가격데이터.iloc[-2] if len(가격데이터) >= 2 else 최신값
 
-total_eval = portfolio["eval_amount"].sum()
+    가격변화 = 최신값["종가"] - 이전값["종가"]
+    등락률 = (가격변화 / 이전값["종가"] * 100) if 이전값["종가"] != 0 else 0
 
-portfolio["weight"] = portfolio["eval_amount"] / total_eval * 100
+    칸1, 칸2, 칸3, 칸4 = st.columns(4)
+    칸1.metric("현재가", 금액표시(최신값["종가"]), f"{가격변화:,.0f}원")
+    칸2.metric("등락률", 비율표시(등락률))
+    칸3.metric("거래량", 숫자표시(최신값["거래량"]))
+    칸4.metric("RSI(14)", f"{최신값['RSI(14)']:.2f}" if pd.notna(최신값["RSI(14)"]) else "-")
 
-st.dataframe(portfolio)
+    st.plotly_chart(가격그래프(가격데이터, 선택종목명), use_container_width=True)
+    st.plotly_chart(거래량그래프(가격데이터, 선택종목명), use_container_width=True)
 
-# 그래프
+    st.markdown("### 최근 가격 데이터")
+    표시용가격데이터 = 가격데이터.tail(20).copy()
+    st.dataframe(
+        표시용가격데이터[["시가", "고가", "저가", "종가", "거래량", "20일평균", "60일평균", "RSI(14)"]].style.format({
+            "시가": "{:,.0f}",
+            "고가": "{:,.0f}",
+            "저가": "{:,.0f}",
+            "종가": "{:,.0f}",
+            "거래량": "{:,.0f}",
+            "20일평균": "{:,.0f}",
+            "60일평균": "{:,.0f}",
+            "RSI(14)": "{:.2f}",
+        }),
+        use_container_width=True,
+    )
 
-st.subheader("주가 그래프")
 
-select = st.selectbox(
-    "종목 선택",
-    portfolio["name"]
+# -----------------------------------
+# 포트폴리오 입력/수정
+# -----------------------------------
+st.markdown("---")
+st.subheader("포트폴리오 입력 정보")
+
+st.write("아래 표에서 보유수량과 매입단가를 직접 수정할 수 있습니다. 금액은 숫자만 입력하시고, 쉼표는 넣지 마세요.")
+
+수정포트폴리오 = st.data_editor(
+    기본포트폴리오,
+    num_rows="dynamic",
+    use_container_width=True,
 )
 
-ticker = portfolio[portfolio["name"] == select]["ticker"].values[0]
 
-df = get_history(ticker)
+# -----------------------------------
+# 포트폴리오 계산 결과
+# -----------------------------------
+계산포트폴리오 = 포트폴리오계산(수정포트폴리오)
 
-fig = go.Figure()
+st.markdown("---")
+st.subheader("포트폴리오 현황")
 
-fig.add_trace(go.Scatter(
-    x=df.index,
-    y=df["Close"],
-    name="가격"
-))
+if 계산포트폴리오.empty:
+    st.warning("포트폴리오 데이터를 계산할 수 없습니다.")
+else:
+    총투자원금 = 계산포트폴리오["투자원금"].sum()
+    총평가금액 = 계산포트폴리오["평가금액"].sum()
+    총평가손익 = 계산포트폴리오["평가손익"].sum()
+    총수익률 = (총평가손익 / 총투자원금 * 100) if 총투자원금 != 0 else 0
 
-fig.add_trace(go.Scatter(
-    x=df.index,
-    y=df["MA20"],
-    name="20일 평균"
-))
+    위칸1, 위칸2, 위칸3, 위칸4 = st.columns(4)
+    위칸1.metric("총 투자원금", 금액표시(총투자원금))
+    위칸2.metric("총 평가금액", 금액표시(총평가금액))
+    위칸3.metric("총 평가손익", 손익문자열(총평가손익) + "원")
+    위칸4.metric("총 수익률", 수익률문자열(총수익률))
 
-st.plotly_chart(fig, use_container_width=True)
+    포트폴리오표시 = 계산포트폴리오[[
+        "종목명", "보유수량", "매입단가", "현재가",
+        "투자원금", "평가금액", "평가손익", "수익률", "현재비중"
+    ]].copy()
+
+    st.dataframe(
+        포트폴리오표시.style
+        .format({
+            "보유수량": "{:,.0f}",
+            "매입단가": "{:,.0f}",
+            "현재가": "{:,.0f}",
+            "투자원금": "{:,.0f}",
+            "평가금액": "{:,.0f}",
+            "평가손익": 손익문자열,
+            "수익률": 수익률문자열,
+            "현재비중": "{:.2f}",
+        })
+        .map(손익색상, subset=["평가손익"])
+        .map(수익률색상, subset=["수익률"]),
+        use_container_width=True,
+    )
+
+    st.plotly_chart(비중그래프(계산포트폴리오), use_container_width=True)
 
 
+# -----------------------------------
 # 리밸런싱
+# -----------------------------------
+st.markdown("---")
+st.subheader("목표 비중 대비 리밸런싱")
 
-st.subheader("리밸런싱 계산")
+st.write("목표 비중의 합계는 100이 되어야 합니다.")
 
-col1, col2, col3 = st.columns(3)
+목표칸1, 목표칸2, 목표칸3 = st.columns(3)
 
-with col1:
-    w1 = st.number_input("KODEX200 목표 비중", value=50)
+with 목표칸1:
+    목표_KODEX200 = st.number_input("KODEX 200 목표 비중(%)", min_value=0.0, max_value=100.0, value=50.0, step=1.0)
 
-with col2:
-    w2 = st.number_input("삼성전자 목표 비중", value=25)
+with 목표칸2:
+    목표_삼성전자 = st.number_input("삼성전자 목표 비중(%)", min_value=0.0, max_value=100.0, value=25.0, step=1.0)
 
-with col3:
-    w3 = st.number_input("SK하이닉스 목표 비중", value=25)
+with 목표칸3:
+    목표_SK하이닉스 = st.number_input("SK하이닉스 목표 비중(%)", min_value=0.0, max_value=100.0, value=25.0, step=1.0)
 
-target = {
-    "069500": w1,
-    "005930": w2,
-    "000660": w3
+목표비중합계 = 목표_KODEX200 + 목표_삼성전자 + 목표_SK하이닉스
+
+목표비중사전 = {
+    "069500": 목표_KODEX200,
+    "005930": 목표_삼성전자,
+    "000660": 목표_SK하이닉스,
 }
 
-portfolio["target_weight"] = portfolio["ticker"].map(target)
+if abs(목표비중합계 - 100.0) > 0.001:
+    st.error(f"목표 비중의 합계가 100%가 되어야 합니다. 현재 합계: {목표비중합계:.2f}%")
+else:
+    리밸런싱표, 현재총평가금액 = 리밸런싱계산(계산포트폴리오, 목표비중사전)
 
-portfolio["target_amount"] = total_eval * portfolio["target_weight"] / 100
+    결과칸1, 결과칸2, 결과칸3 = st.columns(3)
+    결과칸1.metric("현재 총 평가금액", 금액표시(현재총평가금액))
+    결과칸2.metric("목표 비중 합계", 비율표시(목표비중합계))
+    결과칸3.metric("리밸런싱 대상 종목 수", f"{len(리밸런싱표):,}개")
 
-portfolio["rebalance_amount"] = portfolio["target_amount"] - portfolio["eval_amount"]
+    st.plotly_chart(목표비중비교그래프(리밸런싱표), use_container_width=True)
 
-portfolio["rebalance_shares"] = portfolio["rebalance_amount"] / portfolio["current_price"]
+    st.markdown("### 리밸런싱 계산표")
+    리밸런싱표시 = 리밸런싱표[[
+        "종목명", "현재가", "현재비중", "목표비중", "비중차이",
+        "평가금액", "목표평가금액", "리밸런싱금액",
+        "정확계산수량", "주문참고수량", "권장방향"
+    ]].copy()
 
-portfolio["rebalance_shares"] = portfolio["rebalance_shares"].round()
+    st.dataframe(
+        리밸런싱표시.style
+        .format({
+            "현재가": "{:,.0f}",
+            "현재비중": "{:.2f}",
+            "목표비중": "{:.2f}",
+            "비중차이": 수익률문자열,
+            "평가금액": "{:,.0f}",
+            "목표평가금액": "{:,.0f}",
+            "리밸런싱금액": 손익문자열,
+            "정확계산수량": "{:.2f}",
+            "주문참고수량": "{:,.0f}",
+        })
+        .map(수익률색상, subset=["비중차이"])
+        .map(손익색상, subset=["리밸런싱금액"]),
+        use_container_width=True,
+    )
 
-st.subheader("리밸런싱 결과")
+    st.markdown("### 해석 가이드")
+    해석표 = pd.DataFrame({
+        "종목명": 리밸런싱표["종목명"],
+        "현재 비중": 리밸런싱표["현재비중"],
+        "목표 비중": 리밸런싱표["목표비중"],
+        "비중 차이": 리밸런싱표["비중차이"],
+        "리밸런싱 금액": 리밸런싱표["리밸런싱금액"],
+        "주문 참고 수량": 리밸런싱표["주문참고수량"],
+        "권장 방향": 리밸런싱표["권장방향"],
+    })
 
-result = portfolio[[
-    "name",
-    "weight",
-    "target_weight",
-    "rebalance_amount",
-    "rebalance_shares"
-]]
+    st.dataframe(
+        해석표.style.format({
+            "현재 비중": "{:.2f}",
+            "목표 비중": "{:.2f}",
+            "비중 차이": "{:.2f}",
+            "리밸런싱 금액": "{:,.0f}",
+            "주문 참고 수량": "{:,.0f}",
+        }),
+        use_container_width=True,
+    )
 
-st.dataframe(result)
+    # -----------------------------------
+    # 추가 투자금 배분 계산
+    # -----------------------------------
+    st.markdown("---")
+    st.subheader("추가 투자금 배분 계산")
 
-st.write("양수 = 추가 매수 / 음수 = 비중 축소")
+    st.write("매도 없이 추가 자금만 투입한다고 가정하고, 목표 비중에 더 가까워지도록 종목별 추가 매수 금액과 수량을 계산합니다.")
+
+    추가투자금 = st.number_input(
+        "추가 투자금 입력(원)",
+        min_value=0,
+        value=1000000,
+        step=100000,
+    )
+
+    추가배분표, 총실사용금액, 남는현금 = 추가투자금배분계산(
+        계산포트폴리오,
+        목표비중사전,
+        추가투자금,
+    )
+
+    추가칸1, 추가칸2, 추가칸3 = st.columns(3)
+    추가칸1.metric("입력한 추가 투자금", 금액표시(추가투자금))
+    추가칸2.metric("실제 매수 사용 금액", 금액표시(총실사용금액))
+    추가칸3.metric("남는 현금", 금액표시(남는현금))
+
+    st.markdown("### 추가 투자금 배분표")
+    추가배분표시 = 추가배분표[[
+        "종목명", "현재가", "현재비중", "목표비중",
+        "부족금액", "추천배정금액", "추천매수수량", "실사용금액", "추가매수의견"
+    ]].copy()
+
+    st.dataframe(
+        추가배분표시.style
+        .format({
+            "현재가": "{:,.0f}",
+            "현재비중": "{:.2f}",
+            "목표비중": "{:.2f}",
+            "부족금액": "{:,.0f}",
+            "추천배정금액": "{:,.0f}",
+            "추천매수수량": "{:,.0f}",
+            "실사용금액": "{:,.0f}",
+        })
+        .map(손익색상, subset=["부족금액", "추천배정금액"]),
+        use_container_width=True,
+    )
+
+    st.markdown("### 추가 투자금 해석")
+    st.write("1. **부족금액**: 목표 비중에 도달하기 위해 더 필요하다고 계산된 금액입니다.")
+    st.write("2. **추천배정금액**: 입력한 추가 투자금을 부족 비중에 따라 나눈 금액입니다.")
+    st.write("3. **추천매수수량**: 현재가 기준으로 실제 매수 가능한 정수 수량입니다.")
+    st.write("4. **남는 현금**: 1주 단위로 계산하고 남은 금액입니다.")
+
+st.markdown("---")
+st.write("※ 코드 안에서는 금액을 쉼표 없이 숫자로 입력하고, 화면에서는 천 단위 쉼표로 표시합니다.")
+st.write("※ 리밸런싱 금액이 양수이면 추가 매수, 음수이면 비중 축소 검토 의미입니다.")
+st.write("※ 추가 투자금 배분 기능은 매도 없이 신규 자금만 투입하는 상황을 가정한 참고용 계산입니다.")
+st.write("※ 손익과 수익률은 수익일 때 빨간색, 손실일 때 파란색으로 표시됩니다.")
