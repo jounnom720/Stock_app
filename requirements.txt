@@ -1,4 +1,9 @@
 streamlit
-pykrx
 pandas
+numpy
 plotly
+pykrx
+yfinance
+requests
+beautifulsoup4
+lxml
