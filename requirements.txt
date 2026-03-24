@@ -1,9 +1,0 @@
-pandas
-requests
-plotly
-pykrx
-beautifulsoup4
-lxml
-openpyxl
-setuptools
-streamlit-plotly-events
