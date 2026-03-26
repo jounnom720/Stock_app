@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+openpyxl
+plotly
+pykrx
+requests
+beautifulsoup4
+yfinance
+streamlit-plotly-events
