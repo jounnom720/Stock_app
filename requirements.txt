@@ -1,10 +1,13 @@
-streamlit
+setuptools
+wheel
 pandas
 numpy
-openpyxl
-plotly
-pykrx
 requests
 beautifulsoup4
+lxml
+openpyxl
+plotly
 yfinance
+streamlit
 streamlit-plotly-events
+pykrx
