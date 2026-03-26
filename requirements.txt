@@ -1,0 +1,14 @@
+setuptools
+wheel
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+openpyxl
+plotly
+yfinance
+streamlit==1.19.0
+streamlit-plotly-events
+pykrx==1.0.45
+altair==4.2.2
