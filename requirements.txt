@@ -10,4 +10,4 @@ plotly
 yfinance
 streamlit
 streamlit-plotly-events
-pykrx
+pykrx==1.0.45
