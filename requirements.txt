@@ -4,3 +4,5 @@ numpy
 plotly
 yfinance
 openpyxl
+pykrx
+setuptools
