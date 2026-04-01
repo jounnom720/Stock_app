@@ -1,8 +1,5 @@
 streamlit
 pandas
 numpy
-plotly
-yfinance
 openpyxl
-requests
-beautifulsoup4
+yfinance
