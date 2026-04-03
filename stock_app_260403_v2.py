@@ -45,7 +45,7 @@ if 모바일여부():
     st.title("📈 투자 분석 시스템")
     st.caption("모바일 조회용 간소화 화면")
 else:
-    st.title("📈 투자 분석 시스템 v4.21 final v7.1")
+    st.title("📈 투자 분석 시스템 final v7.1")
     
 
 
