@@ -1,7 +1,12 @@
 streamlit
 pandas
 numpy
-yfinance
-openpyxl
 plotly
+gspread
+google-auth
+openpyxl
+requests
+beautifulsoup4
+streamlit-plotly-events
 python-docx
+setuptools
