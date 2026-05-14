@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.42-force-fresh-validation-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.43-hide-internal-backup-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -853,9 +853,11 @@ def 구글시트저장용정리(df, sheet_name=""):
     """Google Sheets 저장 직전 표시 형식을 안정화합니다.
     - 종목코드: 6자리 문자열 유지(005930 등 앞자리 0 보존)
     - 날짜형 컬럼: YYYY-MM-DD 문자열로 저장해 00:00:00 표시 방지
+    - 내부 관리 컬럼은 Google Sheets에 노출하지 않음
     - 저장 방식은 RAW로 처리해 Google Sheets 자동 숫자/날짜 변환을 최소화
     """
     작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+    작업 = 구글시트내부관리컬럼제거(작업)
     작업 = 작업.replace({pd.NA: "", np.nan: "", None: ""}).fillna("")
 
     날짜형키워드 = ["거래일자", "기준일", "만기일", "반영일자", "저장일자", "작성일자"]
@@ -962,12 +964,56 @@ def 구글시트워크시트포맷적용(ws, df):
 
 
 # -----------------------------------
+# v5.14.43 내부 관리 컬럼 숨김/정리
+# - _입력원본순서 같은 내부 컬럼은 앱 계산에는 사용하되 Google Sheets 운영 시트/백업 시트에는 노출하지 않습니다.
+# -----------------------------------
+GOOGLE_SHEETS_INTERNAL_COLUMNS = ["_입력원본순서", "입력원본순서"]
+
+
+def 구글시트내부관리컬럼제거(df):
+    """Google Sheets 저장 전 사용자에게 보일 필요가 없는 내부 관리 컬럼을 제거합니다."""
+    작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+    제거대상 = [열 for 열 in GOOGLE_SHEETS_INTERNAL_COLUMNS if 열 in 작업.columns]
+    if 제거대상:
+        작업 = 작업.drop(columns=제거대상, errors="ignore")
+    return 작업
+
+
+def 구글시트워크시트내부컬럼삭제(ws):
+    """백업 시트에 복제된 내부 관리 컬럼을 삭제합니다."""
+    try:
+        values = ws.get_all_values()
+        if not values:
+            return 0
+        headers = [str(x).strip() for x in values[0]]
+        삭제인덱스 = []
+        for idx, header in enumerate(headers, start=1):
+            if header in GOOGLE_SHEETS_INTERNAL_COLUMNS:
+                삭제인덱스.append(idx)
+        삭제수 = 0
+        # 뒤에서부터 삭제해야 앞쪽 삭제로 인덱스가 밀리지 않습니다.
+        for idx in sorted(삭제인덱스, reverse=True):
+            try:
+                if hasattr(ws, "delete_columns"):
+                    ws.delete_columns(idx)
+                else:
+                    ws.delete_cols(idx)
+                삭제수 += 1
+            except Exception:
+                pass
+        return 삭제수
+    except Exception:
+        return 0
+
+
+
+# -----------------------------------
 # v5.14.36 Google Sheets 거래이력 자동 백업
 # - 저장 직전 현재 거래이력 worksheet를 복제합니다.
 # - 백업명: 거래이력_backup_YYYYMMDD_vN
 # - 백업 실패 시 원본 보호를 위해 저장을 중단합니다.
 # -----------------------------------
-GOOGLE_SHEETS_BACKUP_KEEP_COUNT = 20
+GOOGLE_SHEETS_BACKUP_KEEP_COUNT = 10
 
 
 def 구글시트백업시트명생성(spreadsheet, source_sheet_name="거래이력"):
@@ -1057,7 +1103,11 @@ def 구글시트거래이력자동백업(spreadsheet, source_sheet_name="거래�
 
         backup_sheet_name = 구글시트백업시트명생성(spreadsheet, source_sheet_name)
         try:
-            source_ws.duplicate(new_sheet_name=backup_sheet_name)
+            backup_ws = source_ws.duplicate(new_sheet_name=backup_sheet_name)
+            try:
+                구글시트워크시트내부컬럼삭제(backup_ws)
+            except Exception:
+                pass
         except Exception as e:
             return False, f"백업 시트 생성 실패({backup_sheet_name}): {type(e).__name__}: {e}"
 
