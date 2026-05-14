@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.36-sheets-auto-backup"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.37-reload-validate-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -1103,17 +1103,54 @@ def 구글시트데이터프레임저장(sheet_name, df):
     except Exception as e:
         return False, f"Google Sheets 저장 오류({sheet_name}): {type(e).__name__}: {e}"
 
+def 거래이력세션캐시초기화():
+    """Google Sheets 외부 수정사항을 다시 읽기 위해 거래이력 관련 세션/계산 캐시를 초기화합니다."""
+    초기화키목록 = [
+        "portfolio_df_v1",
+        "trade_history_df_v1",
+        "trade_history_edit_df_v1",
+        "trade_history_editor_df_v1",
+        "trade_history_df_v22",
+        "trade_history_calc_df_v1",
+        "trade_history_signature_v1",
+        "trade_history_last_saved_signature_v1",
+        "trade_history_changed_v1",
+        "trade_editor_last_input_fp_v1",
+        "trade_editor_last_output_fp_v1",
+        "trade_calc_cache_key_v1",
+        "trade_calc_cache_df_v1",
+        "trade_check_cache_df_v1",
+        "portfolio_cache_key_v1",
+        "portfolio_cache_df_v1",
+        "portfolio_holding_cache_df_v1",
+        "portfolio_option_cache_v1",
+    ]
+    for key in 초기화키목록:
+        try:
+            st.session_state.pop(key, None)
+        except Exception:
+            pass
+
+
 def 구글시트캐시초기화():
     try:
         st.session_state.pop("google_sheets_last_error", None)
     except Exception:
         pass
     try:
-        pass
+        구글시트데이터프레임읽기.clear()
     except Exception:
         pass
     try:
-        구글시트데이터프레임읽기.clear()
+        거래이력통합점검표캐시.clear()
+    except Exception:
+        pass
+    try:
+        포트폴리오계산캐시.clear()
+    except Exception:
+        pass
+    try:
+        거래이력세션캐시초기화()
     except Exception:
         pass
 
@@ -2402,6 +2439,10 @@ def 거래이력자동저장실행(df):
         return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
 
     편집df = 거래이력편집용자동보정(df)
+    저장전검증표 = 거래이력통합점검표캐시(json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True))
+    if 저장전검증표 is not None and not 저장전검증표.empty:
+        대표오류 = 저장전검증표.iloc[0].to_dict()
+        return False, f"거래이력 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
     저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_TRADE_SHEET, 편집df)
     if 저장성공:
         meta = 거래이력저장메타생성(편집df, source="google_sheets")
@@ -2417,6 +2458,10 @@ def 최근업로드거래이력저장(df, 파일명=""):
         return False, f"Google Sheets 연결 실패로 업로드 반영을 중단했습니다: {info.get('메시지', '')}"
 
     편집df = 거래이력편집용자동보정(df)
+    저장전검증표 = 거래이력통합점검표캐시(json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True))
+    if 저장전검증표 is not None and not 저장전검증표.empty:
+        대표오류 = 저장전검증표.iloc[0].to_dict()
+        return False, f"거래이력 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
     저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_TRADE_SHEET, 편집df)
     if 저장성공:
         거래이력복원메타저장(거래이력저장메타생성(편집df, source="google_sheets_latest_uploaded", file_name=파일명 or ""))
@@ -2584,9 +2629,13 @@ def 거래이력세션반영(df, 저장강제=False, 자동저장허용=True):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def 거래이력통합점검표캐시(거래이력json문자열):
+    """거래이력 입력 원본 기준 검증표를 생성합니다.
+    계산대상만 검증하면 '지출'처럼 잘못된 거래구분 행이 계산에서 제외되며 오류도 숨겨질 수 있으므로,
+    반드시 편집 원본 전체를 JSON으로 받아 검증합니다.
+    """
     try:
         원본 = json.loads(거래이력json문자열)
-        작업df = 거래이력정규화(pd.DataFrame(원본))
+        작업df = 거래이력표준열맞추기(pd.DataFrame(원본))
     except Exception:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
@@ -2954,10 +3003,12 @@ def 거래이력편집반영최적화(편집입력df):
 
     계산용거래이력 = st.session_state.get("trade_history_calc_df_v1", 거래이력계산대상추출(편집df))
     계산지문 = 거래이력서명생성(계산용거래이력)
+    검증json = json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True)
+    검증지문 = 거래이력서명생성(편집df)
 
-    if 계산지문 != st.session_state.get("trade_calc_cache_key_v1", ""):
-        통합점검표 = 거래이력통합점검표캐시(계산지문)
-        st.session_state["trade_calc_cache_key_v1"] = 계산지문
+    if 검증지문 != st.session_state.get("trade_calc_cache_key_v1", ""):
+        통합점검표 = 거래이력통합점검표캐시(검증json)
+        st.session_state["trade_calc_cache_key_v1"] = 검증지문
         st.session_state["trade_calc_cache_df_v1"] = 계산용거래이력.copy()
         st.session_state["trade_check_cache_df_v1"] = 통합점검표.copy()
     else:
