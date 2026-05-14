@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.38-quota-date-validate-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.39-validation-cache-refresh-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -729,15 +729,7 @@ def 구글시트사이드바간단표시():
                 st.caption(f"마지막 연결 {연결시각} · {시도횟수}회 시도")
             if st.button("Google Sheets 새로고침", key="google_sheets_refresh_compact_v51423", use_container_width=True):
                 구글시트캐시초기화()
-                # 거래이력/비주식자산 세션 캐시도 함께 초기화
-                for k in [
-                    "portfolio_df_v1",
-                    "trade_history_df_v1",
-                    "trade_history_edit_df_v1",
-                    "irp_non_stock_assets_df_v512",
-                ]:
-                    if k in st.session_state:
-                        del st.session_state[k]
+                st.session_state["google_sheets_manual_refresh_requested_v51439"] = 서울현재시각ISO()
                 st.rerun()
         else:
             st.caption(f"Google Sheets 미연결 · 데이터 보호 안전모드")
@@ -747,14 +739,7 @@ def 구글시트사이드바간단표시():
             if st.button("Google Sheets 재연결", key="google_sheets_reconnect_compact_v51434", use_container_width=True):
                 구글시트캐시초기화()
                 st.session_state.pop("google_sheets_startup_warmup_done_v51434", None)
-                for k in [
-                    "portfolio_df_v1",
-                    "trade_history_df_v1",
-                    "trade_history_edit_df_v1",
-                    "irp_non_stock_assets_df_v512",
-                ]:
-                    if k in st.session_state:
-                        del st.session_state[k]
+                st.session_state["google_sheets_manual_reconnect_requested_v51439"] = 서울현재시각ISO()
                 st.rerun()
     except Exception as e:
         st.caption(f"Google Sheets 상태 확인 오류: {e}")
@@ -1121,6 +1106,11 @@ def 거래이력세션캐시초기화():
         "trade_calc_cache_key_v1",
         "trade_calc_cache_df_v1",
         "trade_check_cache_df_v1",
+        "trade_validation_cache_json_v1",
+        "trade_validation_cache_fp_v1",
+        "trade_validation_cache_df_v1",
+        "trade_input_validation_df_v1",
+        "trade_last_validation_result_v1",
         "portfolio_cache_key_v1",
         "portfolio_cache_df_v1",
         "portfolio_holding_cache_df_v1",
@@ -1134,6 +1124,9 @@ def 거래이력세션캐시초기화():
 
 
 def 구글시트캐시초기화():
+    """Google Sheets 새로고침 시 데이터·계산·검증 캐시를 모두 비웁니다.
+    v5.14.39: 검증표 stale cache 방지를 위해 거래이력 검증 관련 키까지 함께 초기화합니다.
+    """
     try:
         st.session_state.pop("google_sheets_last_error", None)
     except Exception:
@@ -3113,13 +3106,24 @@ def 거래이력편집반영최적화(편집입력df):
     검증json = json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True)
     검증지문 = 거래이력서명생성(편집df)
 
-    if 검증지문 != st.session_state.get("trade_calc_cache_key_v1", ""):
+    # v5.14.39: 검증 결과는 반드시 현재 편집df의 JSON 지문 기준으로 재계산합니다.
+    # 이전 버전에서는 계산 캐시 키와 검증 캐시 키를 함께 사용하면서,
+    # Google Sheets 외부 수정 후 화면 데이터는 최신인데 검증표만 과거 상태가 남는 경우가 있었습니다.
+    # 따라서 검증 캐시는 별도 JSON 키로 관리하고, 키가 다르면 즉시 새로 계산합니다.
+    이전검증json = st.session_state.get("trade_validation_cache_json_v1", "")
+    if 검증json != 이전검증json:
         통합점검표 = 거래이력통합점검표캐시(검증json)
-        st.session_state["trade_calc_cache_key_v1"] = 검증지문
-        st.session_state["trade_calc_cache_df_v1"] = 계산용거래이력.copy()
+        st.session_state["trade_validation_cache_json_v1"] = 검증json
+        st.session_state["trade_validation_cache_fp_v1"] = 검증지문
+        st.session_state["trade_validation_cache_df_v1"] = 통합점검표.copy()
         st.session_state["trade_check_cache_df_v1"] = 통합점검표.copy()
     else:
-        통합점검표 = st.session_state.get("trade_check_cache_df_v1", pd.DataFrame()).copy()
+        통합점검표 = st.session_state.get("trade_validation_cache_df_v1", pd.DataFrame()).copy()
+
+    # 계산 캐시는 계산 대상 거래이력 기준으로 별도 관리합니다.
+    if 검증지문 != st.session_state.get("trade_calc_cache_key_v1", ""):
+        st.session_state["trade_calc_cache_key_v1"] = 검증지문
+        st.session_state["trade_calc_cache_df_v1"] = 계산용거래이력.copy()
 
     포트폴리오캐시키 = 계산지문 + f"|{st.session_state.get('price_refresh_token_v51', 0)}"
     if 포트폴리오캐시키 != st.session_state.get("portfolio_cache_key_v1", ""):
