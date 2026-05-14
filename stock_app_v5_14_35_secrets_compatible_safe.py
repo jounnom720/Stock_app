@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.41-blank-row-validation-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.42-force-fresh-validation-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -108,6 +108,33 @@ APP_VERSION = "v5.14.41-blank-row-validation-safe"  # v5.14.35 기반 / Google S
 # -----------------------------------
 
 st.set_page_config(page_title=f"투자 분석 시스템 {APP_VERSION}", layout="wide")
+
+# v5.14.42: 배포 후 브라우저/세션에 남아 있던 과거 편집·검증 캐시 강제 초기화
+try:
+    _RUNNING_APP_VERSION_KEY = "running_app_version_v51442"
+    if st.session_state.get(_RUNNING_APP_VERSION_KEY) != APP_VERSION:
+        for _k in [
+            "trade_editor_last_input_fp_v1",
+            "trade_editor_last_output_fp_v1",
+            "trade_history_editor_df_v1",
+            "trade_history_df_v22",
+            "trade_history_calc_df_v1",
+            "trade_history_signature_v1",
+            "trade_validation_cache_json_v1",
+            "trade_validation_cache_fp_v1",
+            "trade_validation_cache_df_v1",
+            "trade_check_cache_df_v1",
+            "trade_calc_cache_key_v1",
+            "trade_calc_cache_df_v1",
+            "portfolio_cache_key_v1",
+            "portfolio_cache_df_v1",
+            "portfolio_holding_cache_df_v1",
+            "portfolio_option_cache_v1",
+        ]:
+            st.session_state.pop(_k, None)
+        st.session_state[_RUNNING_APP_VERSION_KEY] = APP_VERSION
+except Exception:
+    pass
 
 # -----------------------------------
 # v5.13.7 안정화 스타일 세트
@@ -1511,66 +1538,75 @@ def 거래이력자동보정(df):
 
 
 def 거래이력행입력값존재여부(행):
-    """동적 편집 표가 자동으로 만드는 완전 빈 신규 행은 검증 대상에서 제외합니다.
+    """st.data_editor가 만드는 가짜 빈 신규 행을 실제 거래로 보지 않습니다.
 
-    v5.14.41 핵심 보정:
-    - st.data_editor는 빈 신규 입력행에도 거래수량/거래단가를 0 또는 0.0처럼 넣어 반환할 수 있습니다.
-    - 이 0만 보고 입력된 행으로 판단하면 실제 Google Sheets에는 없는 빈 행이
-      거래일자 NaT, 거래구분 공란, 거래수량 0 오류로 계속 검출됩니다.
-    - 따라서 종목코드/종목명/거래일자/거래구분/운용사/비고 같은 식별·문자 필드가 모두 비어 있고
-      수량·단가만 0 또는 공란이면 완전 빈 행으로 보고 제외합니다.
-    - 다만 종목이나 거래구분 등 하나라도 입력된 상태에서 수량/단가가 0이면 실제 오류로 검증합니다.
+    v5.14.42 핵심 보정:
+    - 날짜 NaT, 거래구분 공란, 수량 0, 단가 0 형태로 반환되는 빈 입력 대기행을 제외합니다.
+    - 종목코드/종목명/거래일자/거래구분/운용사/비고 중 하나라도 값이 있으면 실제 입력행으로 봅니다.
+    - 수량·단가만 0이면 빈 행으로 봅니다. 단, 수량·단가가 0이 아닌 값이면 실제 입력행으로 봅니다.
     """
-    문자열 = ["종목코드", "종목명", "거래일자", "거래구분", "운용사", "비고"]
-    숫자열 = ["거래수량", "거래단가"]
-
-    def _비어있음(값):
+    def _값비어있음(값):
         try:
             if pd.isna(값):
                 return True
         except Exception:
             pass
         문자 = str(값).strip()
-        return 문자 in ["", "None", "none", "nan", "NaN", "NaT", "nat", "NULL", "null"]
+        if 문자.endswith('.0') and 문자.replace('.', '', 1).isdigit():
+            # 종목코드 같은 값은 여기에서 비어 있다고 판단하지 않습니다.
+            pass
+        return 문자 in ["", "None", "none", "nan", "NaN", "NaT", "nat", "NULL", "null", "<NA>"]
 
-    # 문자/식별 필드가 하나라도 있으면 사용자가 작성한 행으로 보고 검증합니다.
-    for 열 in 문자열:
-        if 열 in 행.index if hasattr(행, "index") else True:
-            값 = 행.get(열, "")
-            if not _비어있음(값):
-                return True
-
-    # 문자 필드가 전부 비어 있을 때는 숫자 칸이 0인지 아닌지만 확인합니다.
-    # 0/0.0은 data_editor 빈 행 기본값일 수 있으므로 입력값으로 보지 않습니다.
-    for 열 in 숫자열:
-        값 = 행.get(열, "")
-        if _비어있음(값):
-            continue
+    def _숫자0또는공란(값):
+        if _값비어있음(값):
+            return True
         try:
             숫자 = pd.to_numeric(pd.Series([값]), errors="coerce").iloc[0]
             if pd.isna(숫자):
-                continue
-            if float(숫자) != 0.0:
                 return True
+            return float(숫자) == 0.0
         except Exception:
-            문자 = str(값).strip()
-            if 문자 not in ["0", "0.0", "0.00"]:
-                return True
+            문자 = str(값).strip().replace(',', '')
+            return 문자 in ["0", "0.0", "0.00", "0.000000"]
 
-    return False
+    문자열 = ["종목코드", "종목명", "거래일자", "거래구분", "운용사", "비고"]
+    for 열 in 문자열:
+        try:
+            값 = 행.get(열, "")
+        except Exception:
+            값 = ""
+        if not _값비어있음(값):
+            return True
 
+    수량0 = _숫자0또는공란(행.get("거래수량", "") if hasattr(행, 'get') else "")
+    단가0 = _숫자0또는공란(행.get("거래단가", "") if hasattr(행, 'get') else "")
+    return not (수량0 and 단가0)
+
+
+def 거래이력빈입력행제거(df):
+    """검증·계산·표시 전에 st.data_editor의 가짜 빈 입력행을 강제로 제거합니다."""
+    if df is None:
+        return pd.DataFrame(columns=거래이력표준열 if '거래이력표준열' in globals() else [])
+    작업 = pd.DataFrame(df).copy()
+    if 작업.empty:
+        return 작업
+    표준열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"]
+    for 열 in 표준열:
+        if 열 not in 작업.columns:
+            작업[열] = None if 열 in ["거래일자", "거래수량", "거래단가"] else ""
+    try:
+        마스크 = 작업.apply(거래이력행입력값존재여부, axis=1)
+        작업 = 작업.loc[마스크].copy()
+    except Exception:
+        pass
+    return 작업.reset_index(drop=True)
 
 def 거래이력검증표생성(df):
     if df is None or df.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
     점검결과 = []
-    원본작업 = df.reset_index(drop=True).copy()
-    try:
-        입력행마스크 = 원본작업.apply(거래이력행입력값존재여부, axis=1)
-        원본작업 = 원본작업.loc[입력행마스크].copy()
-    except Exception:
-        pass
+    원본작업 = 거래이력빈입력행제거(df)
     if 원본작업.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
@@ -1672,7 +1708,7 @@ def 거래이력편집용자동보정(df):
     if df is None:
         return pd.DataFrame(columns=["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"])
 
-    작업 = df.copy()
+    작업 = 거래이력빈입력행제거(df)
 
     표준열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"]
     for 열 in 표준열:
@@ -1760,12 +1796,7 @@ def 거래이력이상치점검표생성(df):
     if df is None or df.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
-    원본작업 = df.reset_index(drop=True).copy()
-    try:
-        입력행마스크 = 원본작업.apply(거래이력행입력값존재여부, axis=1)
-        원본작업 = 원본작업.loc[입력행마스크].copy()
-    except Exception:
-        pass
+    원본작업 = 거래이력빈입력행제거(df)
     if 원본작업.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
@@ -2768,6 +2799,7 @@ def 거래이력비교지문(df):
                 return ""
 
 def 거래이력세션반영(df, 저장강제=False, 자동저장허용=True):
+    df = 거래이력빈입력행제거(df)
     편집df = 거래이력편집용자동보정(df)
     계산df = 거래이력계산대상추출(편집df)
 
@@ -2821,7 +2853,7 @@ def 거래이력통합점검표직접생성(편집df):
     화면 표시·저장 판단에 쓰는 검증은 cache_data가 아닌 현재 df 직접 계산을 우선합니다.
     """
     try:
-        작업df = 거래이력표준열맞추기(pd.DataFrame() if 편집df is None else pd.DataFrame(편집df).copy())
+        작업df = 거래이력표준열맞추기(거래이력빈입력행제거(pd.DataFrame() if 편집df is None else pd.DataFrame(편집df).copy()))
     except Exception:
         작업df = pd.DataFrame() if 편집df is None else pd.DataFrame(편집df).copy()
 
@@ -3172,20 +3204,17 @@ def 거래이력편집반영최적화(편집입력df):
     입력지문 = 거래이력비교지문(편집입력df)
     이전입력지문 = st.session_state.get("trade_editor_last_input_fp_v1", "")
 
-    if 입력지문 == 이전입력지문 and "trade_history_editor_df_v1" in st.session_state:
-        편집df = st.session_state.get("trade_history_editor_df_v1", pd.DataFrame()).copy()
-        거래이력변경됨 = False
-        자동저장성공 = True
-        자동저장메시지 = "변경 없음"
-    else:
-        편집df = 거래이력편집용자동보정(편집입력df.reset_index(drop=True))
-        편집df, 거래이력변경됨, 자동저장성공, 자동저장메시지 = 거래이력세션반영(
-            편집df,
-            저장강제=False,
-            자동저장허용=True,
-        )
-        st.session_state["trade_editor_last_input_fp_v1"] = 입력지문
-        st.session_state["trade_editor_last_output_fp_v1"] = 거래이력비교지문(편집df)
+    # v5.14.42: 같은 입력 지문이라도 과거 trade_history_editor_df_v1을 재사용하지 않습니다.
+    # st.data_editor의 빈 신규 행/이전 검증 상태가 세션에 남아 검증표만 과거 오류를 계속 표시하는 문제를 막기 위해
+    # 매 실행마다 현재 편집입력df를 기준으로 정규화·빈행 제거·검증을 다시 수행합니다.
+    편집df = 거래이력편집용자동보정(pd.DataFrame() if 편집입력df is None else 편집입력df.reset_index(drop=True))
+    편집df, 거래이력변경됨, 자동저장성공, 자동저장메시지 = 거래이력세션반영(
+        편집df,
+        저장강제=False,
+        자동저장허용=True,
+    )
+    st.session_state["trade_editor_last_input_fp_v1"] = 거래이력비교지문(편집입력df)
+    st.session_state["trade_editor_last_output_fp_v1"] = 거래이력비교지문(편집df)
 
     계산용거래이력 = st.session_state.get("trade_history_calc_df_v1", 거래이력계산대상추출(편집df))
     계산지문 = 거래이력서명생성(계산용거래이력)
