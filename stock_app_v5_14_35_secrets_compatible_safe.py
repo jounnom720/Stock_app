@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.43-hide-internal-backup-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.44-grouped-portfolio-weight-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -6634,34 +6634,76 @@ def 캔들분석결과가져오기(데이터, 선택날짜, 선택행):
     }
 
 
+def 포트폴리오상품구분라벨(행):
+    """포트폴리오 비중 표시용 상품 구분 라벨입니다.
+    - ETF를 먼저 보여주고, 그 다음 개별주식을 보여주기 위한 내부 정렬 기준으로 사용합니다.
+    - 화면 표시에는 'ETF', '개별주식' 두 가지로 단순화합니다.
+    """
+    try:
+        코드 = 행.get("종목코드", "") if isinstance(행, pd.Series) else ""
+        이름 = 행.get("종목명", "") if isinstance(행, pd.Series) else ""
+        구분 = 종목구분판단(코드, 이름)
+        if 구분 == "etf":
+            return "ETF"
+        return "개별주식"
+    except Exception:
+        이름 = "" if not isinstance(행, pd.Series) else str(행.get("종목명", "")).upper()
+        if any(키 in 이름 for 키 in ["KODEX", "TIGER", "ACE", "KBSTAR", "ARIRANG", "HANARO", "SOL", "KOSEF"]):
+            return "ETF"
+        return "개별주식"
+
+
+def 포트폴리오비중정렬(계산표):
+    """ETF → 개별주식 순서로 묶고, 각 그룹 안에서는 비중/평가금액 내림차순으로 정렬합니다."""
+    작업 = pd.DataFrame() if 계산표 is None else 계산표.copy()
+    if 작업.empty:
+        return 작업
+
+    for 열 in ["종목명", "종목코드"]:
+        if 열 not in 작업.columns:
+            작업[열] = ""
+
+    작업["평가금액"] = pd.to_numeric(작업.get("평가금액", 0), errors="coerce").fillna(0)
+    if "현재비중" in 작업.columns:
+        작업["현재비중"] = pd.to_numeric(작업.get("현재비중"), errors="coerce").fillna(0)
+    else:
+        총평가금액 = float(작업["평가금액"].sum())
+        작업["현재비중"] = np.where(총평가금액 > 0, 작업["평가금액"] / 총평가금액 * 100, 0)
+
+    작업 = 작업[작업["평가금액"] > 0].copy()
+    if 작업.empty:
+        return 작업
+
+    작업["구분"] = 작업.apply(포트폴리오상품구분라벨, axis=1)
+    작업["_구분순서"] = 작업["구분"].map({"ETF": 0, "개별주식": 1}).fillna(9)
+    작업 = 작업.sort_values(["_구분순서", "현재비중", "평가금액", "종목명"], ascending=[True, False, False, True]).reset_index(drop=True)
+    return 작업
+
+
 def 비중그래프(계산표):
-    작업 = 계산표.copy()
+    작업 = 포트폴리오비중정렬(계산표)
     if 작업 is None or 작업.empty:
         그림 = go.Figure()
         그림.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10), title="현재 포트폴리오 비중")
         return 그림
 
-    작업 = 작업.copy()
-    작업["평가금액"] = pd.to_numeric(작업["평가금액"], errors="coerce").fillna(0)
-    작업 = 작업[작업["평가금액"] > 0].copy()
-    작업 = 작업.sort_values("평가금액", ascending=False)
-
     그림 = go.Figure(
         go.Pie(
             labels=작업["종목명"],
             values=작업["평가금액"],
+            customdata=작업[["구분", "현재비중"]],
             hole=0.52,
             sort=False,
             direction="clockwise",
             textinfo="percent",
             textposition="inside",
             insidetextorientation="auto",
-            hovertemplate="%{label}<br>평가금액: %{value:,.0f}원<br>비중: %{percent}<extra></extra>",
+            hovertemplate="%{customdata[0]} · %{label}<br>평가금액: %{value:,.0f}원<br>비중: %{customdata[1]:.2f}%<extra></extra>",
         )
     )
     그림.update_traces(marker=dict(line=dict(color="#0b1220", width=1.2)))
     그림.update_layout(
-        title=dict(text="현재 포트폴리오 비중", x=0.02, xanchor="left", y=0.97),
+        title=dict(text="현재 포트폴리오 비중 · ETF → 개별주식", x=0.02, xanchor="left", y=0.97),
         height=430,
         margin=dict(l=10, r=10, t=52, b=10),
         legend=dict(orientation="v", yanchor="top", y=0.98, xanchor="left", x=1.02, font=dict(size=13)),
@@ -10324,11 +10366,9 @@ if 선택섹터 == "포트폴리오 현황":
                 config={"displaylogo": False, "responsive": True},
             )
         with 비중요약칸:
-            비중요약표 = 계산포트폴리오.copy()
-            비중요약표 = 비중요약표[["종목명", "현재비중", "평가금액"]].copy()
-            비중요약표["현재비중"] = pd.to_numeric(비중요약표["현재비중"], errors="coerce").fillna(0)
-            비중요약표["평가금액"] = pd.to_numeric(비중요약표["평가금액"], errors="coerce").fillna(0)
-            비중요약표 = 비중요약표[비중요약표["평가금액"] > 0].sort_values(["현재비중", "평가금액"], ascending=[False, False]).reset_index(drop=True)
+            비중요약표 = 포트폴리오비중정렬(계산포트폴리오)
+            표시열 = [열 for 열 in ["구분", "종목명", "현재비중", "평가금액"] if 열 in 비중요약표.columns]
+            비중요약표 = 비중요약표[표시열].copy() if not 비중요약표.empty else pd.DataFrame(columns=["구분", "종목명", "현재비중", "평가금액"])
 
             if not 비중요약표.empty:
                 최대행 = 비중요약표.iloc[0]
