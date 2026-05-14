@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.44-grouped-portfolio-weight-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.45-operating-status-ui-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -770,6 +770,56 @@ def 구글시트사이드바간단표시():
                 st.rerun()
     except Exception as e:
         st.caption(f"Google Sheets 상태 확인 오류: {e}")
+
+
+
+def 운영상태요약카드(현재거래건수=None, 위치="sidebar"):
+    """Cloud 운영 상태를 한눈에 확인하는 경량 UI입니다.
+    - 추가 Google Sheets 읽기를 하지 않고 session_state에 이미 있는 값만 표시합니다.
+    - quota 부담을 줄이기 위해 새로고침/저장 과정에서 갱신된 상태값을 재사용합니다.
+    """
+    try:
+        연결됨 = bool(st.session_state.get("google_sheets_connected", False))
+        문서명 = st.session_state.get("google_sheet_title", "")
+        마지막연결 = (
+            st.session_state.get("google_sheets_last_connected_at")
+            or st.session_state.get("google_sheet_last_connected_at")
+            or ""
+        )
+        마지막저장조회 = st.session_state.get("trade_history_last_loaded_at_v1", "")
+        최근백업명 = st.session_state.get("google_sheets_last_backup_name", "")
+        최근백업시각 = st.session_state.get("google_sheets_last_backup_at", "")
+        마지막오류 = st.session_state.get("google_sheets_last_error", "")
+
+        if 현재거래건수 is None:
+            try:
+                현재거래건수 = len(st.session_state.get("trade_history_df_v22", pd.DataFrame()))
+            except Exception:
+                현재거래건수 = "-"
+
+        상태라벨 = "정상" if 연결됨 else "안전모드"
+        상태아이콘 = "✅" if 연결됨 else "⚠️"
+        백업표시 = 최근백업명 if 최근백업명 else "이번 세션 백업 없음"
+
+        st.markdown("##### 운영 상태")
+        if 연결됨:
+            st.success(f"{상태아이콘} Google Sheets 연결: {상태라벨}")
+        else:
+            st.warning(f"{상태아이콘} Google Sheets 연결: {상태라벨}")
+            if 마지막오류:
+                st.caption(f"최근 오류: {마지막오류}")
+
+        st.caption(f"문서: {문서명 if 문서명 else '-'}")
+        st.caption(f"마지막 연결: {마지막연결 if 마지막연결 else '-'}")
+        st.caption(f"현재 거래이력: {현재거래건수}건")
+        if 마지막저장조회:
+            st.caption(f"마지막 저장 조회: {마지막저장조회}")
+        st.caption(f"최근 백업: {백업표시}")
+        if 최근백업시각:
+            st.caption(f"백업 시각: {최근백업시각}")
+    except Exception as e:
+        st.caption(f"운영 상태 표시 오류: {type(e).__name__}: {e}")
+
 
 def 구글시트워크시트확보(spreadsheet, sheet_name, rows=1000, cols=30):
     try:
@@ -10062,6 +10112,9 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
     else:
         st.caption(f"현재 거래이력: {현재거래건수}건")
     st.caption(거래이력자동복원상태문구())
+
+    with st.expander("운영 상태 요약", expanded=False):
+        운영상태요약카드(현재거래건수=현재거래건수)
 
     st.markdown("##### 1. 파일 불러오기")
     업로드파일 = st.file_uploader(
