@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.37-reload-validate-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.38-quota-date-validate-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -765,6 +765,7 @@ def 구글시트워크시트확보(spreadsheet, sheet_name, rows=1000, cols=30):
     except Exception:
         return spreadsheet.add_worksheet(title=sheet_name, rows=rows, cols=cols)
 
+@st.cache_data(ttl=60, show_spinner=False)
 def 구글시트데이터프레임읽기(sheet_name):
     spreadsheet, info = 구글시트문서연결()
     if spreadsheet is None:
@@ -1878,6 +1879,101 @@ def IRP비주식자산표준열맞추기(df):
 
 
 
+def IRP비주식자산검증표생성(df):
+    """비주식·현금성 자산 입력값을 원본 기준으로 검증합니다.
+    - 반영일자는 필수이며 YYYY-MM-DD 형식이어야 합니다.
+    - 빈 동적 입력 행은 검증 대상에서 제외합니다.
+    - 저장 전 같은 검증을 다시 실행해 오류가 있으면 Google Sheets 저장을 차단합니다.
+    """
+    표준열 = ["계좌", "자산군", "상품명", "원금", "평가금액", "예상연수익률", "만기일", "반영일자", "비고"]
+    원본 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+
+    컬럼변환 = {}
+    if "수익률(%)" in 원본.columns and "예상연수익률" not in 원본.columns:
+        컬럼변환["수익률(%)"] = "예상연수익률"
+    if "기준일" in 원본.columns and "반영일자" not in 원본.columns:
+        컬럼변환["기준일"] = "반영일자"
+    if 컬럼변환:
+        원본 = 원본.rename(columns=컬럼변환)
+
+    for 열 in 표준열:
+        if 열 not in 원본.columns:
+            원본[열] = ""
+
+    원본 = 원본[표준열].copy()
+    점검결과 = []
+
+    def _문자(값):
+        try:
+            if pd.isna(값):
+                return ""
+        except Exception:
+            pass
+        문자 = str(값).strip()
+        return "" if 문자 in ["", "nan", "NaT", "None", "nat"] else 문자
+
+    def _날짜정상여부(값):
+        문자 = _문자(값)
+        if not 문자:
+            return False
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", 문자):
+            # Google Sheets/Excel에서 날짜가 datetime 형태로 넘어온 경우는 변환 가능하면 허용
+            try:
+                변환 = pd.to_datetime(값, errors="coerce")
+                return not pd.isna(변환)
+            except Exception:
+                return False
+        try:
+            변환 = pd.to_datetime(문자, errors="coerce")
+            return not pd.isna(변환)
+        except Exception:
+            return False
+
+    for idx, 행 in 원본.reset_index(drop=True).iterrows():
+        행번호 = idx + 1
+        계좌 = _문자(행.get("계좌"))
+        자산군 = _문자(행.get("자산군"))
+        상품명 = _문자(행.get("상품명"))
+        반영일자 = _문자(행.get("반영일자"))
+        만기일 = _문자(행.get("만기일"))
+        원금문자 = _문자(행.get("원금"))
+        평가문자 = _문자(행.get("평가금액"))
+        수익률문자 = _문자(행.get("예상연수익률"))
+
+        # data_editor의 완전 빈 추가 행은 무시합니다.
+        핵심값 = [계좌, 자산군, 상품명, 원금문자, 평가문자, 수익률문자, 만기일, 반영일자]
+        if not any(값 != "" for 값 in 핵심값):
+            continue
+
+        if not 계좌:
+            점검결과.append({"행": 행번호, "점검항목": "계좌", "현재값": "공란", "권장사항": "계좌명을 입력"})
+        if not 자산군:
+            점검결과.append({"행": 행번호, "점검항목": "자산군", "현재값": "공란", "권장사항": "TDF, 정기예금, 현금성자산 등 자산군 입력"})
+        if not 상품명:
+            점검결과.append({"행": 행번호, "점검항목": "상품명", "현재값": "공란", "권장사항": "상품명 입력"})
+
+        원금 = pd.to_numeric(pd.Series([행.get("원금")]), errors="coerce").iloc[0]
+        평가금액 = pd.to_numeric(pd.Series([행.get("평가금액")]), errors="coerce").iloc[0]
+        예상수익률 = pd.to_numeric(pd.Series([행.get("예상연수익률")]), errors="coerce").iloc[0]
+
+        if pd.isna(원금) or float(원금) <= 0:
+            점검결과.append({"행": 행번호, "점검항목": "원금", "현재값": 원금문자 or "공란", "권장사항": "0보다 큰 원금 입력"})
+        if pd.isna(평가금액) or float(평가금액) < 0:
+            점검결과.append({"행": 행번호, "점검항목": "평가금액", "현재값": 평가문자 or "공란", "권장사항": "0 이상 평가금액 입력"})
+        if pd.isna(예상수익률):
+            점검결과.append({"행": 행번호, "점검항목": "예상연수익률", "현재값": 수익률문자 or "공란", "권장사항": "숫자 형식으로 입력"})
+
+        if not 반영일자:
+            점검결과.append({"행": 행번호, "점검항목": "반영일자", "현재값": "공란", "권장사항": "YYYY-MM-DD 형식으로 반영일자 입력"})
+        elif not _날짜정상여부(반영일자):
+            점검결과.append({"행": 행번호, "점검항목": "반영일자 형식", "현재값": 반영일자, "권장사항": "YYYY-MM-DD 형식으로 입력"})
+
+        if 만기일 and not _날짜정상여부(만기일):
+            점검결과.append({"행": 행번호, "점검항목": "만기일 형식", "현재값": 만기일, "권장사항": "YYYY-MM-DD 형식으로 입력하거나 비워두기"})
+
+    return pd.DataFrame(점검결과, columns=["행", "점검항목", "현재값", "권장사항"])
+
+
 def IRP비주식자산불러오기():
     """비주식자산을 Google Sheets에서만 불러옵니다.
     Google Sheets 연결 실패 시 과거 로컬 JSON/기본값을 표시하지 않습니다.
@@ -1903,6 +1999,11 @@ def IRP비주식자산저장(df):
     연결됨, info = 구글시트운영연결확인(화면표시=False)
     if not 연결됨:
         return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
+
+    저장전검증표 = IRP비주식자산검증표생성(df)
+    if 저장전검증표 is not None and not 저장전검증표.empty:
+        대표오류 = 저장전검증표.iloc[0].to_dict()
+        return False, f"비주식·현금성 자산 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
 
     작업 = IRP비주식자산표준열맞추기(df)
     저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_NON_STOCK_SHEET, 작업)
@@ -1933,6 +2034,12 @@ def IRP비주식자산편집UI():
                 "비고": st.column_config.TextColumn("비고"),
             },
         )
+        비주식검증표 = IRP비주식자산검증표생성(편집df)
+        if 비주식검증표 is not None and not 비주식검증표.empty:
+            st.warning(f"비주식·현금성 자산 입력 점검 결과: {len(비주식검증표)}건의 확인 사항이 있습니다.")
+            with st.expander("비주식·현금성 자산 검증 상세 보기", expanded=False):
+                st.dataframe(비주식검증표, use_container_width=True, hide_index=True)
+
         버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.2, 5])
         with 버튼1:
             if st.button("비주식 자산 저장", key="save_irp_non_stock_assets_v513", use_container_width=True):
