@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.39-validation-cache-refresh-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.40-current-df-validation-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -1125,7 +1125,7 @@ def 거래이력세션캐시초기화():
 
 def 구글시트캐시초기화():
     """Google Sheets 새로고침 시 데이터·계산·검증 캐시를 모두 비웁니다.
-    v5.14.39: 검증표 stale cache 방지를 위해 거래이력 검증 관련 키까지 함께 초기화합니다.
+    v5.14.40: 검증표 stale cache 방지를 위해 거래이력 검증 관련 키까지 함께 초기화합니다.
     """
     try:
         st.session_state.pop("google_sheets_last_error", None)
@@ -1510,12 +1510,40 @@ def 거래이력자동보정(df):
 
 
 
+def 거래이력행입력값존재여부(행):
+    """동적 편집 표가 만드는 완전 빈 행은 검증 대상에서 제외합니다.
+    단, 종목코드/종목명/거래일자/거래구분/수량/단가 중 하나라도 입력되어 있으면 부분 입력 행으로 보고 검증합니다.
+    """
+    핵심열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가"]
+    for 열 in 핵심열:
+        값 = 행.get(열, "")
+        try:
+            if pd.isna(값):
+                continue
+        except Exception:
+            pass
+        문자 = str(값).strip()
+        if 문자 not in ["", "None", "nan", "NaT", "nat"]:
+            # 숫자형 0은 수량/단가 칸에 사용자가 0을 입력한 오류일 수 있으므로 입력값으로 봅니다.
+            return True
+    return False
+
+
 def 거래이력검증표생성(df):
     if df is None or df.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
     점검결과 = []
-    작업 = 거래이력자동보정(df.reset_index(drop=True).copy())
+    원본작업 = df.reset_index(drop=True).copy()
+    try:
+        입력행마스크 = 원본작업.apply(거래이력행입력값존재여부, axis=1)
+        원본작업 = 원본작업.loc[입력행마스크].copy()
+    except Exception:
+        pass
+    if 원본작업.empty:
+        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
+
+    작업 = 거래이력자동보정(원본작업.reset_index(drop=True).copy())
     오늘 = datetime.today().date()
 
     for idx, 행 in 작업.iterrows():
@@ -2539,7 +2567,7 @@ def 거래이력자동저장실행(df):
         return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
 
     편집df = 거래이력편집용자동보정(df)
-    저장전검증표 = 거래이력통합점검표캐시(json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True))
+    저장전검증표 = 거래이력통합점검표직접생성(편집df)
     if 저장전검증표 is not None and not 저장전검증표.empty:
         대표오류 = 저장전검증표.iloc[0].to_dict()
         return False, f"거래이력 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
@@ -2558,7 +2586,7 @@ def 최근업로드거래이력저장(df, 파일명=""):
         return False, f"Google Sheets 연결 실패로 업로드 반영을 중단했습니다: {info.get('메시지', '')}"
 
     편집df = 거래이력편집용자동보정(df)
-    저장전검증표 = 거래이력통합점검표캐시(json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True))
+    저장전검증표 = 거래이력통합점검표직접생성(편집df)
     if 저장전검증표 is not None and not 저장전검증표.empty:
         대표오류 = 저장전검증표.iloc[0].to_dict()
         return False, f"거래이력 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
@@ -2738,6 +2766,24 @@ def 거래이력통합점검표캐시(거래이력json문자열):
         작업df = 거래이력표준열맞추기(pd.DataFrame(원본))
     except Exception:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
+
+    입력검증표 = 거래이력검증표생성(작업df)
+    이상치점검표 = 거래이력이상치점검표생성(작업df)
+    통합점검표 = pd.concat([입력검증표, 이상치점검표], ignore_index=True) if not 이상치점검표.empty else 입력검증표.copy()
+    if not 통합점검표.empty:
+        통합점검표 = 통합점검표.drop_duplicates().reset_index(drop=True)
+    return 통합점검표
+
+
+def 거래이력통합점검표직접생성(편집df):
+    """현재 화면/세션의 편집 DataFrame을 기준으로 검증표를 즉시 재계산합니다.
+    v5.14.40: Google Sheets는 최신인데 검증표만 과거 상태로 남는 문제를 막기 위해,
+    화면 표시·저장 판단에 쓰는 검증은 cache_data가 아닌 현재 df 직접 계산을 우선합니다.
+    """
+    try:
+        작업df = 거래이력표준열맞추기(pd.DataFrame() if 편집df is None else pd.DataFrame(편집df).copy())
+    except Exception:
+        작업df = pd.DataFrame() if 편집df is None else pd.DataFrame(편집df).copy()
 
     입력검증표 = 거래이력검증표생성(작업df)
     이상치점검표 = 거래이력이상치점검표생성(작업df)
@@ -3106,19 +3152,13 @@ def 거래이력편집반영최적화(편집입력df):
     검증json = json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True)
     검증지문 = 거래이력서명생성(편집df)
 
-    # v5.14.39: 검증 결과는 반드시 현재 편집df의 JSON 지문 기준으로 재계산합니다.
-    # 이전 버전에서는 계산 캐시 키와 검증 캐시 키를 함께 사용하면서,
-    # Google Sheets 외부 수정 후 화면 데이터는 최신인데 검증표만 과거 상태가 남는 경우가 있었습니다.
-    # 따라서 검증 캐시는 별도 JSON 키로 관리하고, 키가 다르면 즉시 새로 계산합니다.
-    이전검증json = st.session_state.get("trade_validation_cache_json_v1", "")
-    if 검증json != 이전검증json:
-        통합점검표 = 거래이력통합점검표캐시(검증json)
-        st.session_state["trade_validation_cache_json_v1"] = 검증json
-        st.session_state["trade_validation_cache_fp_v1"] = 검증지문
-        st.session_state["trade_validation_cache_df_v1"] = 통합점검표.copy()
-        st.session_state["trade_check_cache_df_v1"] = 통합점검표.copy()
-    else:
-        통합점검표 = st.session_state.get("trade_validation_cache_df_v1", pd.DataFrame()).copy()
+    # v5.14.40: 검증 결과는 캐시가 아니라 현재 화면/세션의 편집df를 기준으로 즉시 재계산합니다.
+    # Google Sheets 외부 수정 후 표와 계산은 최신인데 검증표만 과거 오류를 유지하는 문제를 차단합니다.
+    통합점검표 = 거래이력통합점검표직접생성(편집df)
+    st.session_state["trade_validation_cache_json_v1"] = 검증json
+    st.session_state["trade_validation_cache_fp_v1"] = 검증지문
+    st.session_state["trade_validation_cache_df_v1"] = 통합점검표.copy()
+    st.session_state["trade_check_cache_df_v1"] = 통합점검표.copy()
 
     # 계산 캐시는 계산 대상 거래이력 기준으로 별도 관리합니다.
     if 검증지문 != st.session_state.get("trade_calc_cache_key_v1", ""):
