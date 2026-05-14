@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.40-current-df-validation-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.41-blank-row-validation-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -1511,21 +1511,52 @@ def 거래이력자동보정(df):
 
 
 def 거래이력행입력값존재여부(행):
-    """동적 편집 표가 만드는 완전 빈 행은 검증 대상에서 제외합니다.
-    단, 종목코드/종목명/거래일자/거래구분/수량/단가 중 하나라도 입력되어 있으면 부분 입력 행으로 보고 검증합니다.
+    """동적 편집 표가 자동으로 만드는 완전 빈 신규 행은 검증 대상에서 제외합니다.
+
+    v5.14.41 핵심 보정:
+    - st.data_editor는 빈 신규 입력행에도 거래수량/거래단가를 0 또는 0.0처럼 넣어 반환할 수 있습니다.
+    - 이 0만 보고 입력된 행으로 판단하면 실제 Google Sheets에는 없는 빈 행이
+      거래일자 NaT, 거래구분 공란, 거래수량 0 오류로 계속 검출됩니다.
+    - 따라서 종목코드/종목명/거래일자/거래구분/운용사/비고 같은 식별·문자 필드가 모두 비어 있고
+      수량·단가만 0 또는 공란이면 완전 빈 행으로 보고 제외합니다.
+    - 다만 종목이나 거래구분 등 하나라도 입력된 상태에서 수량/단가가 0이면 실제 오류로 검증합니다.
     """
-    핵심열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가"]
-    for 열 in 핵심열:
-        값 = 행.get(열, "")
+    문자열 = ["종목코드", "종목명", "거래일자", "거래구분", "운용사", "비고"]
+    숫자열 = ["거래수량", "거래단가"]
+
+    def _비어있음(값):
         try:
             if pd.isna(값):
-                continue
+                return True
         except Exception:
             pass
         문자 = str(값).strip()
-        if 문자 not in ["", "None", "nan", "NaT", "nat"]:
-            # 숫자형 0은 수량/단가 칸에 사용자가 0을 입력한 오류일 수 있으므로 입력값으로 봅니다.
-            return True
+        return 문자 in ["", "None", "none", "nan", "NaN", "NaT", "nat", "NULL", "null"]
+
+    # 문자/식별 필드가 하나라도 있으면 사용자가 작성한 행으로 보고 검증합니다.
+    for 열 in 문자열:
+        if 열 in 행.index if hasattr(행, "index") else True:
+            값 = 행.get(열, "")
+            if not _비어있음(값):
+                return True
+
+    # 문자 필드가 전부 비어 있을 때는 숫자 칸이 0인지 아닌지만 확인합니다.
+    # 0/0.0은 data_editor 빈 행 기본값일 수 있으므로 입력값으로 보지 않습니다.
+    for 열 in 숫자열:
+        값 = 행.get(열, "")
+        if _비어있음(값):
+            continue
+        try:
+            숫자 = pd.to_numeric(pd.Series([값]), errors="coerce").iloc[0]
+            if pd.isna(숫자):
+                continue
+            if float(숫자) != 0.0:
+                return True
+        except Exception:
+            문자 = str(값).strip()
+            if 문자 not in ["0", "0.0", "0.00"]:
+                return True
+
     return False
 
 
@@ -1729,7 +1760,16 @@ def 거래이력이상치점검표생성(df):
     if df is None or df.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
-    작업 = 거래이력자동보정(df.reset_index(drop=True).copy())
+    원본작업 = df.reset_index(drop=True).copy()
+    try:
+        입력행마스크 = 원본작업.apply(거래이력행입력값존재여부, axis=1)
+        원본작업 = 원본작업.loc[입력행마스크].copy()
+    except Exception:
+        pass
+    if 원본작업.empty:
+        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
+
+    작업 = 거래이력자동보정(원본작업.reset_index(drop=True).copy())
     점검결과 = []
 
     중복기준열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가"]
