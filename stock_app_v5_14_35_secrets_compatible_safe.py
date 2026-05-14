@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.45-operating-status-ui-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.46-save-log-ui-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
 
 
 # -----------------------------------
@@ -773,6 +773,55 @@ def 구글시트사이드바간단표시():
 
 
 
+def 운영로그기록(구분, 메시지, 성공=True):
+    """최근 저장/백업/오류 로그를 세션에 가볍게 기록합니다.
+    Google Sheets 추가 읽기 없이 운영 상태 UI에서 확인하기 위한 용도입니다.
+    """
+    try:
+        시각 = 서울조회문자열(서울현재시각(), 포맷="%Y-%m-%d %H:%M:%S")
+    except Exception:
+        시각 = str(datetime.now())
+
+    항목 = {
+        "시각": 시각,
+        "구분": str(구분),
+        "결과": "성공" if 성공 else "실패",
+        "메시지": str(메시지),
+    }
+
+    try:
+        로그 = st.session_state.get("operation_log_v51446", [])
+        if not isinstance(로그, list):
+            로그 = []
+        로그.insert(0, 항목)
+        st.session_state["operation_log_v51446"] = 로그[:10]
+        st.session_state["last_operation_message_v51446"] = f"[{항목['결과']}] {항목['구분']} · {항목['메시지']}"
+        st.session_state["last_operation_at_v51446"] = 시각
+    except Exception:
+        pass
+
+    return 항목
+
+
+def 저장결과안내(성공, 메시지):
+    """저장/백업 결과를 사용자에게 즉시 보여주는 경량 안내입니다."""
+    try:
+        if 성공:
+            st.success(메시지)
+            try:
+                st.toast(메시지, icon="✅")
+            except Exception:
+                pass
+        else:
+            st.error(메시지)
+            try:
+                st.toast(메시지, icon="⚠️")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def 운영상태요약카드(현재거래건수=None, 위치="sidebar"):
     """Cloud 운영 상태를 한눈에 확인하는 경량 UI입니다.
     - 추가 Google Sheets 읽기를 하지 않고 session_state에 이미 있는 값만 표시합니다.
@@ -817,6 +866,21 @@ def 운영상태요약카드(현재거래건수=None, 위치="sidebar"):
         st.caption(f"최근 백업: {백업표시}")
         if 최근백업시각:
             st.caption(f"백업 시각: {최근백업시각}")
+
+        마지막작업 = st.session_state.get("last_operation_message_v51446", "")
+        마지막작업시각 = st.session_state.get("last_operation_at_v51446", "")
+        if 마지막작업:
+            st.markdown("###### 최근 작업")
+            st.caption(마지막작업)
+            if 마지막작업시각:
+                st.caption(f"작업 시각: {마지막작업시각}")
+
+        로그 = st.session_state.get("operation_log_v51446", [])
+        if isinstance(로그, list) and 로그:
+            with st.expander("최근 저장·백업 로그", expanded=False):
+                for item in 로그[:5]:
+                    if isinstance(item, dict):
+                        st.caption(f"{item.get('시각', '')} · {item.get('결과', '')} · {item.get('구분', '')} · {item.get('메시지', '')}")
     except Exception as e:
         st.caption(f"운영 상태 표시 오류: {type(e).__name__}: {e}")
 
@@ -1193,8 +1257,11 @@ def 구글시트데이터프레임저장(sheet_name, df):
                 keep_count=GOOGLE_SHEETS_BACKUP_KEEP_COUNT,
             )
             if not 백업성공:
-                return False, f"거래이력 백업 실패로 저장을 중단했습니다: {백업결과}"
+                실패메시지 = f"거래이력 백업 실패로 저장을 중단했습니다: {백업결과}"
+                운영로그기록("거래이력 자동백업", 실패메시지, 성공=False)
+                return False, 실패메시지
             백업메시지 = f" / 자동 백업: {백업결과}"
+            운영로그기록("거래이력 자동백업", str(백업결과), 성공=True)
 
         ws = 구글시트워크시트확보(
             spreadsheet,
@@ -1212,9 +1279,18 @@ def 구글시트데이터프레임저장(sheet_name, df):
             구글시트데이터프레임읽기.clear()
         except Exception:
             pass
-        return True, f"Google Sheets 저장 완료: {sheet_name}{백업메시지}"
+        저장메시지 = f"Google Sheets 저장 완료: {sheet_name}{백업메시지}"
+        운영로그기록(f"Google Sheets 저장({sheet_name})", 저장메시지, 성공=True)
+        try:
+            st.session_state["google_sheets_last_save_sheet_v51446"] = str(sheet_name)
+            st.session_state["google_sheets_last_save_at_v51446"] = 서울조회문자열(서울현재시각(), 포맷="%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+        return True, 저장메시지
     except Exception as e:
-        return False, f"Google Sheets 저장 오류({sheet_name}): {type(e).__name__}: {e}"
+        저장오류메시지 = f"Google Sheets 저장 오류({sheet_name}): {type(e).__name__}: {e}"
+        운영로그기록(f"Google Sheets 저장({sheet_name})", 저장오류메시지, 성공=False)
+        return False, 저장오류메시지
 
 def 거래이력세션캐시초기화():
     """Google Sheets 외부 수정사항을 다시 읽기 위해 거래이력 관련 세션/계산 캐시를 초기화합니다."""
