@@ -111,7 +111,7 @@ st.set_page_config(page_title=f"투자 분석 시스템 {APP_VERSION}", layout="
 
 # v5.14.42: 배포 후 브라우저/세션에 남아 있던 과거 편집·검증 캐시 강제 초기화
 try:
-    _RUNNING_APP_VERSION_KEY = "running_app_version_v51442"
+    _RUNNING_APP_VERSION_KEY = "running_app_version_v51446"
     if st.session_state.get(_RUNNING_APP_VERSION_KEY) != APP_VERSION:
         for _k in [
             "trade_editor_last_input_fp_v1",
