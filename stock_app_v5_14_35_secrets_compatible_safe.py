@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.46-save-log-ui-safe"  # v5.14.35 기반 / Google Sheets 거래이력 자동 백업 추가
+APP_VERSION = "v5.14.53-asset-change-monthly-trend"  # v5.14.52 기반 / 자산변화로그 월별 추세 요약 추가
 
 
 # -----------------------------------
@@ -108,33 +108,6 @@ APP_VERSION = "v5.14.46-save-log-ui-safe"  # v5.14.35 기반 / Google Sheets 거
 # -----------------------------------
 
 st.set_page_config(page_title=f"투자 분석 시스템 {APP_VERSION}", layout="wide")
-
-# v5.14.42: 배포 후 브라우저/세션에 남아 있던 과거 편집·검증 캐시 강제 초기화
-try:
-    _RUNNING_APP_VERSION_KEY = "running_app_version_v51446"
-    if st.session_state.get(_RUNNING_APP_VERSION_KEY) != APP_VERSION:
-        for _k in [
-            "trade_editor_last_input_fp_v1",
-            "trade_editor_last_output_fp_v1",
-            "trade_history_editor_df_v1",
-            "trade_history_df_v22",
-            "trade_history_calc_df_v1",
-            "trade_history_signature_v1",
-            "trade_validation_cache_json_v1",
-            "trade_validation_cache_fp_v1",
-            "trade_validation_cache_df_v1",
-            "trade_check_cache_df_v1",
-            "trade_calc_cache_key_v1",
-            "trade_calc_cache_df_v1",
-            "portfolio_cache_key_v1",
-            "portfolio_cache_df_v1",
-            "portfolio_holding_cache_df_v1",
-            "portfolio_option_cache_v1",
-        ]:
-            st.session_state.pop(_k, None)
-        st.session_state[_RUNNING_APP_VERSION_KEY] = APP_VERSION
-except Exception:
-    pass
 
 # -----------------------------------
 # v5.13.7 안정화 스타일 세트
@@ -467,6 +440,9 @@ except Exception:
 GOOGLE_SHEETS_TRADE_SHEET = "거래이력"
 GOOGLE_SHEETS_NON_STOCK_SHEET = "비주식자산"
 GOOGLE_SHEETS_SUMMARY_SHEET = "통합요약"
+GOOGLE_SHEETS_ASSET_CHANGE_LOG_SHEET = "자산변화로그"
+GOOGLE_SHEETS_CASH_ASSET_SHEET = "현금성자산"
+GOOGLE_SHEETS_PRINCIPAL_LEDGER_SHEET = "원금변동원장"
 
 
 # -----------------------------------
@@ -481,60 +457,164 @@ GOOGLE_SHEETS_CONNECT_ATTEMPTS = 6
 GOOGLE_SHEETS_CONNECT_WAIT_SECONDS = 1.5
 
 
-def _구글서비스계정정보정리(계정정보원본):
-    """Streamlit Secrets의 서비스 계정 정보를 Google Auth가 읽기 쉬운 dict로 정리합니다.
 
-    핵심 원칙:
-    - v5.14.28에서 성공했던 [gcp_service_account] dict 구조를 우선 그대로 사용합니다.
-    - private_key는 JSON으로 다시 파싱하지 않습니다.
-    - 복사 과정에서 들어간 \n 문자열/앞뒤 공백/따옴표만 안전하게 정리합니다.
+# -----------------------------------
+# v5.14.36 Stable JSON Auth
+# - Google 인증 구조 단순화
+# - 로컬 PC는 .streamlit/service_account.json 직접 사용을 1순위로 고정
+# - Streamlit Cloud Secrets의 private_key 방식은 JSON 파일이 없을 때만 보조 사용
+# - 실패 상태를 과도하게 캐시하지 않고, 매 연결마다 fresh-auth 수행
+# -----------------------------------
+GOOGLE_SHEETS_LOCAL_SERVICE_ACCOUNT_FILE = ".streamlit/service_account.json"
+GOOGLE_SHEETS_STARTUP_DELAY_SECONDS = 0.5
+GOOGLE_SHEETS_CONNECT_ATTEMPTS = 3
+GOOGLE_SHEETS_CONNECT_WAIT_SECONDS = 0.8
+
+
+def _구글경로정규화(path_value):
+    if not path_value:
+        return ""
+    try:
+        return os.path.abspath(os.path.expanduser(str(path_value).strip()))
+    except Exception:
+        return str(path_value).strip()
+
+
+def _구글시트ID가져오기():
+    """Google Sheets 문서 ID를 안전하게 가져옵니다."""
+    try:
+        if "google_sheets" in st.secrets:
+            spreadsheet_id = str(st.secrets["google_sheets"].get("spreadsheet_id", "")).strip()
+            if spreadsheet_id:
+                return spreadsheet_id, "secrets.toml [google_sheets]"
+    except Exception:
+        pass
+
+    try:
+        env_id = str(os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "")).strip()
+        if env_id:
+            return env_id, "환경변수 GOOGLE_SHEETS_SPREADSHEET_ID"
+    except Exception:
+        pass
+
+    return "", "spreadsheet_id 없음"
+
+
+def _구글서비스계정JSON경로후보():
+    """로컬 JSON 인증 파일 후보를 우선순위대로 반환합니다."""
+    후보 = []
+
+    # 1순위: 이번 안정화 기준 경로
+    후보.append(GOOGLE_SHEETS_LOCAL_SERVICE_ACCOUNT_FILE)
+
+    # 2순위: secrets.toml에 path가 명시된 경우
+    try:
+        if "gcp_service_account_file" in st.secrets:
+            path_value = st.secrets["gcp_service_account_file"].get("path", "")
+            if path_value:
+                후보.append(path_value)
+    except Exception:
+        pass
+
+    # 3순위: 환경변수로 지정한 경우
+    try:
+        env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if env_path:
+            후보.append(env_path)
+    except Exception:
+        pass
+
+    정리후보 = []
+    for item in 후보:
+        path = _구글경로정규화(item)
+        if path and path not in 정리후보:
+            정리후보.append(path)
+    return 정리후보
+
+
+def _구글서비스계정JSON파일찾기():
+    for path in _구글서비스계정JSON경로후보():
+        try:
+            if os.path.exists(path) and os.path.isfile(path):
+                return path
+        except Exception:
+            pass
+    return ""
+
+
+
+
+def _구글서비스계정파일정보읽기(json_path):
+    """서비스 계정 JSON 파일을 읽습니다.
+    정상 JSON이면 그대로 사용하고, private_key 안의 줄바꿈이 실제 줄바꿈으로 저장되어
+    JSONDecodeError가 나는 경우에는 안전하게 복구해 Credentials.from_service_account_info에 넘깁니다.
+    """
+    try:
+        raw = Path(json_path).read_text(encoding="utf-8-sig")
+    except Exception as e:
+        return {}, f"서비스 계정 파일 읽기 실패: {type(e).__name__}: {e}"
+
+    try:
+        info = json.loads(raw)
+        if isinstance(info, dict):
+            return info, "정상 JSON 파일"
+        return {}, "서비스 계정 JSON 루트가 dict가 아님"
+    except json.JSONDecodeError as first_error:
+        # Google JSON 원본의 private_key는 보통 \n 이스케이프 문자열입니다.
+        # 사용자가 편집기에서 열고 저장하면서 실제 줄바꿈으로 바뀌면 표준 json.loads가 실패합니다.
+        try:
+            repaired = raw
+            m = re.search(r'("private_key"\s*:\s*")(.*?)("\s*,\s*"client_email")', repaired, flags=re.DOTALL)
+            if m:
+                key_body = m.group(2)
+                key_body = key_body.replace('\\n', '\n')
+                key_body = key_body.replace('\r\n', '\n').replace('\r', '\n')
+                key_body = key_body.replace('\n', '\\n')
+                repaired = repaired[:m.start(2)] + key_body + repaired[m.end(2):]
+                info = json.loads(repaired)
+                if isinstance(info, dict):
+                    # google-auth에는 실제 줄바꿈 PEM 문자열로 넘깁니다.
+                    if "private_key" in info:
+                        info["private_key"] = str(info["private_key"]).replace('\\n', '\n')
+                    return info, "private_key 줄바꿈 자동 보정 JSON"
+        except Exception as repair_error:
+            return {}, f"서비스 계정 JSON 보정 실패: {type(repair_error).__name__}: {repair_error} / 원오류: {first_error}"
+
+        return {}, f"서비스 계정 JSON 파싱 실패: {type(first_error).__name__}: {first_error}"
+    except Exception as e:
+        return {}, f"서비스 계정 JSON 읽기 오류: {type(e).__name__}: {e}"
+
+def _구글서비스계정정보정리(계정정보원본):
+    """Cloud Secrets 보조 사용을 위한 최소 정리 함수입니다.
+    로컬에서는 기본적으로 이 함수를 사용하지 않고 JSON 파일을 직접 읽습니다.
     """
     try:
         if 계정정보원본 is None:
             return {}, "서비스 계정 정보 없음"
 
-        # Streamlit secrets의 TOML 섹션은 AttrDict 형태이므로 dict 변환만 수행합니다.
         if isinstance(계정정보원본, dict) or hasattr(계정정보원본, "items"):
             계정정보 = dict(계정정보원본)
         elif isinstance(계정정보원본, str):
-            # 전체 서비스 계정 JSON을 문자열로 넣은 예외적 경우만 지원합니다.
-            # 다만 일반 [gcp_service_account] 방식에서는 이 경로를 사용하지 않습니다.
-            try:
-                계정정보 = json.loads(계정정보원본)
-            except Exception as e:
-                return {}, f"서비스 계정 문자열 JSON 파싱 실패: {type(e).__name__}: {e}"
+            계정정보 = json.loads(계정정보원본)
         else:
             return {}, f"지원하지 않는 서비스 계정 형식: {type(계정정보원본).__name__}"
 
-        # 모든 값을 문자열 기반으로 정리하되 private_key는 PEM 줄바꿈을 보존합니다.
         정리 = {}
         for k, v in 계정정보.items():
             키 = str(k).strip()
+            값 = "" if v is None else str(v).strip()
             if 키 == "private_key":
-                값 = "" if v is None else str(v).strip()
-                # JSON 원본에서 온 \n escape가 있으면 실제 줄바꿈으로 변환합니다.
                 값 = 값.replace("\\n", "\n")
-                # 복붙 과정에서 바깥 따옴표가 붙은 경우만 제거합니다.
                 if (값.startswith('"') and 값.endswith('"')) or (값.startswith("'") and 값.endswith("'")):
                     값 = 값[1:-1].strip()
-                # BEGIN/END 주변 줄바꿈이 깨진 경우 최소 보정합니다.
-                값 = 값.replace("-----BEGIN PRIVATE KEY----- ", "-----BEGIN PRIVATE KEY-----\n")
-                값 = 값.replace(" -----END PRIVATE KEY-----", "\n-----END PRIVATE KEY-----")
-                정리[키] = 값
-            else:
-                정리[키] = "" if v is None else str(v).strip()
+            정리[키] = 값
 
         필수 = ["type", "project_id", "private_key", "client_email", "token_uri"]
         누락 = [k for k in 필수 if not 정리.get(k)]
         if 누락:
             return 정리, "서비스 계정 필수값 누락: " + ", ".join(누락)
 
-        private_key = 정리.get("private_key", "")
-        if "-----BEGIN PRIVATE KEY-----" not in private_key or "-----END PRIVATE KEY-----" not in private_key:
-            return 정리, "private_key PEM 시작/끝 문구 확인 필요"
-
         return 정리, "서비스 계정 정보 정리 완료"
-
     except Exception as e:
         return {}, f"서비스 계정 정보 정리 오류: {type(e).__name__}: {e}"
 
@@ -546,132 +626,79 @@ def 구글서비스계정정보가져오기():
 
 
 def 구글시트초기화대기():
-    """Streamlit Cloud가 깨어난 직후 Secrets/네트워크 준비 시간을 확보합니다.
-    세션당 1회만 짧게 대기합니다.
-    """
+    """세션당 1회만 아주 짧게 대기합니다."""
     try:
-        if st.session_state.get("google_sheets_startup_warmup_done_v51434", False):
+        if st.session_state.get("google_sheets_startup_warmup_done_v51436", False):
             return
         대기초 = float(GOOGLE_SHEETS_STARTUP_DELAY_SECONDS)
         if 대기초 > 0:
-            with st.spinner("Google Sheets 연결 준비 중..."):
-                time.sleep(대기초)
-        st.session_state["google_sheets_startup_warmup_done_v51434"] = True
+            time.sleep(대기초)
+        st.session_state["google_sheets_startup_warmup_done_v51436"] = True
     except Exception:
-        st.session_state["google_sheets_startup_warmup_done_v51434"] = True
+        st.session_state["google_sheets_startup_warmup_done_v51436"] = True
 
-
-def 구글시트Secrets준비대기(max_attempts=None, wait_seconds=None):
-    """st.secrets에 필요한 섹션이 준비될 때까지 짧게 반복 확인합니다."""
-    시도횟수 = int(max_attempts or GOOGLE_SHEETS_SECRETS_WAIT_ATTEMPTS)
-    대기초 = float(wait_seconds or GOOGLE_SHEETS_SECRETS_WAIT_SECONDS)
-    마지막메시지 = "Secrets 확인 전"
-
-    for 시도 in range(1, 시도횟수 + 1):
-        try:
-            has_google_sheets = "google_sheets" in st.secrets
-            has_cloud_account = "gcp_service_account" in st.secrets
-            has_local_file = "gcp_service_account_file" in st.secrets
-
-            if has_google_sheets and (has_cloud_account or has_local_file):
-                st.session_state["google_sheets_secrets_ready_attempts"] = 시도
-                return True, f"Secrets 준비 완료 · {시도}회 확인"
-
-            누락 = []
-            if not has_google_sheets:
-                누락.append("[google_sheets]")
-            if not (has_cloud_account or has_local_file):
-                누락.append("[gcp_service_account] 또는 [gcp_service_account_file]")
-            마지막메시지 = "Secrets 대기 중 · 누락: " + ", ".join(누락)
-        except Exception as e:
-            마지막메시지 = f"Secrets 확인 오류: {type(e).__name__}: {e}"
-
-        if 시도 < 시도횟수:
-            try:
-                time.sleep(대기초)
-            except Exception:
-                pass
-
-    st.session_state["google_sheets_secrets_ready_attempts"] = 시도횟수
-    return False, 마지막메시지
-
-def _구글경로정규화(path_value):
-    if not path_value:
-        return ""
-    try:
-        return os.path.abspath(os.path.expanduser(str(path_value).strip()))
-    except Exception:
-        return str(path_value).strip()
 
 def 구글시트설정가능여부():
-    """로컬/Streamlit Cloud 공통 Google Sheets 설정 점검.
-    - 로컬: [gcp_service_account_file] path 사용
-    - Cloud: [gcp_service_account] 정보 사용
+    """Google Sheets 설정 점검.
+    핵심 원칙: 로컬 JSON 파일이 있으면 JSON 방식을 최우선으로 사용합니다.
     """
     try:
         if not GOOGLE_SHEETS_AVAILABLE:
             return False, "gspread/google-auth 미설치"
 
-        secrets_ready, secrets_msg = 구글시트Secrets준비대기()
-        if not secrets_ready:
-            return False, secrets_msg
-
-        if "google_sheets" not in st.secrets:
-            return False, "secrets.toml 또는 Cloud Secrets에 [google_sheets] 없음"
-
-        spreadsheet_id = str(st.secrets["google_sheets"].get("spreadsheet_id", "")).strip()
+        spreadsheet_id, id_source = _구글시트ID가져오기()
         if not spreadsheet_id:
-            return False, "spreadsheet_id 없음"
+            return False, "spreadsheet_id 없음: secrets.toml의 [google_sheets] 또는 환경변수 확인 필요"
 
-        # 1순위: Streamlit Cloud Secrets 방식
-        if "gcp_service_account" in st.secrets:
-            계정정보, 계정메시지 = 구글서비스계정정보가져오기()
-            if 계정정보.get("client_email") and 계정정보.get("private_key"):
-                return True, "Google Sheets 설정 확인 · Cloud Secrets 방식"
-            return False, 계정메시지
+        json_path = _구글서비스계정JSON파일찾기()
+        if json_path:
+            return True, f"Google Sheets 설정 확인 · 로컬 JSON 방식 · {os.path.basename(json_path)} · ID 출처: {id_source}"
 
-        # 2순위: 로컬 service_account.json 파일 방식
-        if "gcp_service_account_file" in st.secrets:
-            service_path = _구글경로정규화(st.secrets["gcp_service_account_file"].get("path", ""))
-            if service_path and os.path.exists(service_path):
-                return True, "Google Sheets 설정 확인 · 로컬 JSON 방식"
-            return False, f"service_account.json 없음: {service_path}"
+        # Cloud에서 JSON 파일이 없을 때만 보조적으로 Secrets 방식 허용
+        try:
+            if "gcp_service_account" in st.secrets:
+                계정정보, 계정메시지 = 구글서비스계정정보가져오기()
+                if 계정정보.get("client_email") and 계정정보.get("private_key"):
+                    return True, f"Google Sheets 설정 확인 · Cloud Secrets 보조 방식 · ID 출처: {id_source}"
+                return False, 계정메시지
+        except Exception as e:
+            return False, f"Cloud Secrets 확인 오류: {type(e).__name__}: {e}"
 
-        return False, "인증 정보 없음: [gcp_service_account] 또는 [gcp_service_account_file] 필요"
+        후보문자 = ", ".join(_구글서비스계정JSON경로후보())
+        return False, f"service_account.json 없음 · 확인 경로: {후보문자}"
 
     except Exception as e:
-        return False, f"secrets 읽기 오류: {e}"
+        return False, f"Google Sheets 설정 확인 오류: {type(e).__name__}: {e}"
 
 
 def _구글시트문서연결_직접():
     """Google Sheets 1회 직접 연결.
-    실패 결과는 캐시하지 않고, 성공한 연결만 짧게 재사용합니다.
+    v5.14.36부터 로컬 JSON 파일을 최우선으로 사용합니다.
     """
     가능, 메시지 = 구글시트설정가능여부()
     if not 가능:
         return None, {"상태": "미설정", "메시지": 메시지}
 
     try:
-        spreadsheet_id = str(st.secrets["google_sheets"]["spreadsheet_id"]).strip()
+        spreadsheet_id, id_source = _구글시트ID가져오기()
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
 
-        # Streamlit Cloud: [gcp_service_account] TOML 섹션 사용
-        if "gcp_service_account" in st.secrets:
-            계정정보, 계정메시지 = 구글서비스계정정보가져오기()
-            if 계정정보.get("client_email") and 계정정보.get("private_key"):
-                credentials = Credentials.from_service_account_info(계정정보, scopes=scopes)
-                인증방식 = "Cloud Secrets"
-            else:
-                raise ValueError(계정메시지 or "[gcp_service_account]에 client_email/private_key가 없습니다.")
-
-        # 로컬: service_account.json 파일을 직접 읽는 경우
+        json_path = _구글서비스계정JSON파일찾기()
+        if json_path:
+            계정정보, 계정메시지 = _구글서비스계정파일정보읽기(json_path)
+            if not (계정정보.get("client_email") and 계정정보.get("private_key")):
+                raise ValueError(계정메시지 or "서비스 계정 JSON 파일 정보 확인 실패")
+            credentials = Credentials.from_service_account_info(계정정보, scopes=scopes)
+            인증방식 = f"Local JSON · {os.path.basename(json_path)} · {계정메시지}"
         else:
-            service_path = _구글경로정규화(st.secrets["gcp_service_account_file"]["path"])
-            credentials = Credentials.from_service_account_file(service_path, scopes=scopes)
-            인증방식 = "Local JSON"
+            계정정보, 계정메시지 = 구글서비스계정정보가져오기()
+            if not (계정정보.get("client_email") and 계정정보.get("private_key")):
+                raise ValueError(계정메시지 or "서비스 계정 정보 없음")
+            credentials = Credentials.from_service_account_info(계정정보, scopes=scopes)
+            인증방식 = "Cloud Secrets 보조"
 
         client = gspread.authorize(credentials)
         spreadsheet = client.open_by_key(spreadsheet_id)
@@ -680,6 +707,7 @@ def _구글시트문서연결_직접():
             "상태": "연결됨",
             "메시지": f"Google Sheets 연결됨 · {인증방식}",
             "인증방식": 인증방식,
+            "문서ID출처": id_source,
             "문서명": spreadsheet.title,
             "시트목록": [ws.title for ws in spreadsheet.worksheets()],
         }
@@ -689,22 +717,21 @@ def _구글시트문서연결_직접():
 
 
 def 구글시트문서연결(max_attempts=None, wait_seconds=None, force=False):
-    """Google Sheets fresh-auth + secrets warm-up 연결 함수.
-    - Credentials / gspread client / spreadsheet 객체를 세션에 저장하지 않습니다.
-    - 실패 상태도 캐시하지 않습니다.
-    - Streamlit Cloud에서 오래된 인증 객체가 재사용되는 문제를 줄이기 위해 매 호출마다 새로 인증합니다.
+    """Google Sheets fresh-auth 연결 함수.
+    - 인증 객체를 세션에 장기 저장하지 않습니다.
+    - 로컬 JSON 우선 원칙을 유지합니다.
     """
     구글시트초기화대기()
     max_attempts = int(max_attempts or GOOGLE_SHEETS_CONNECT_ATTEMPTS)
     wait_seconds = float(wait_seconds or GOOGLE_SHEETS_CONNECT_WAIT_SECONDS)
     마지막정보 = {"상태": "오류", "메시지": "Google Sheets 연결 시도 전"}
 
-    for 시도 in range(1, int(max_attempts) + 1):
+    for 시도 in range(1, max_attempts + 1):
         spreadsheet, info = _구글시트문서연결_직접()
         마지막정보 = dict(info or {})
         마지막정보["연결시도횟수"] = 시도
-        마지막정보["최대시도횟수"] = int(max_attempts)
-        마지막정보["연결방식"] = "fresh-auth + secrets-warmup"
+        마지막정보["최대시도횟수"] = max_attempts
+        마지막정보["연결방식"] = "fresh-auth + stable-json-auth"
 
         if spreadsheet is not None:
             연결시각 = 서울조회문자열(서울현재시각(), 포맷="%Y-%m-%d %H:%M:%S")
@@ -714,20 +741,20 @@ def 구글시트문서연결(max_attempts=None, wait_seconds=None, force=False):
             st.session_state["google_sheet_worksheets"] = 마지막정보.get("시트목록", [])
             st.session_state["google_sheets_last_connected_at"] = 연결시각
             st.session_state["google_sheets_last_connection_attempts"] = 시도
-            st.session_state["google_sheets_last_connection_mode"] = "fresh-auth + secrets-warmup"
+            st.session_state["google_sheets_last_connection_mode"] = 마지막정보.get("연결방식", "")
+            st.session_state["google_sheets_last_auth_mode"] = 마지막정보.get("인증방식", "")
             st.session_state.pop("google_sheets_last_error", None)
             return spreadsheet, 마지막정보
 
-        # 실패는 캐시하지 않고, 마지막 시도가 아니면 잠깐 기다린 뒤 재시도합니다.
-        if 시도 < int(max_attempts):
+        if 시도 < max_attempts:
             try:
-                time.sleep(float(wait_seconds))
+                time.sleep(wait_seconds)
             except Exception:
                 pass
 
     st.session_state["google_sheets_connected"] = False
     st.session_state["google_sheets_last_error"] = 마지막정보.get("메시지", "")
-    st.session_state["google_sheets_last_connection_attempts"] = int(max_attempts)
+    st.session_state["google_sheets_last_connection_attempts"] = max_attempts
     return None, 마지막정보
 
 
@@ -735,10 +762,12 @@ def 구글시트연결상태표시():
     spreadsheet, info = 구글시트문서연결()
     if spreadsheet is not None:
         st.success(f"Google Sheets 연결됨 · {info.get('문서명', '')}")
-        시도횟수 = info.get("연결시도횟수", st.session_state.get("google_sheets_last_connection_attempts", ""))
+        인증방식 = info.get("인증방식", "")
         연결시각 = info.get("마지막연결시각", st.session_state.get("google_sheets_last_connected_at", ""))
+        if 인증방식:
+            st.caption(f"인증 방식: {인증방식}")
         if 연결시각:
-            st.caption(f"마지막 연결: {연결시각} · 연결 시도: {시도횟수}회")
+            st.caption(f"마지막 연결: {연결시각} · 연결 시도: {info.get('연결시도횟수', '')}회")
     else:
         st.warning(f"Google Sheets 미연결 · 데이터 보호 안전모드 · {info.get('메시지', '')}")
     return spreadsheet is not None
@@ -750,139 +779,43 @@ def 구글시트사이드바간단표시():
         spreadsheet, info = 구글시트문서연결()
         if spreadsheet is not None:
             st.caption(f"Google Sheets 연결됨 · {info.get('문서명', '')}")
+            인증방식 = info.get("인증방식", st.session_state.get("google_sheets_last_auth_mode", ""))
             연결시각 = info.get("마지막연결시각", st.session_state.get("google_sheets_last_connected_at", ""))
             시도횟수 = info.get("연결시도횟수", st.session_state.get("google_sheets_last_connection_attempts", ""))
+            if 인증방식:
+                st.caption(f"인증 방식: {인증방식}")
             if 연결시각:
                 st.caption(f"마지막 연결 {연결시각} · {시도횟수}회 시도")
-            if st.button("Google Sheets 새로고침", key="google_sheets_refresh_compact_v51423", use_container_width=True):
+            if st.button("Google Sheets 새로고침", key="google_sheets_refresh_compact_v51436", use_container_width=True):
                 구글시트캐시초기화()
-                st.session_state["google_sheets_manual_refresh_requested_v51439"] = 서울현재시각ISO()
+                for k in [
+                    "portfolio_df_v1",
+                    "trade_history_df_v1",
+                    "trade_history_edit_df_v1",
+                    "irp_non_stock_assets_df_v512",
+                ]:
+                    if k in st.session_state:
+                        del st.session_state[k]
                 st.rerun()
         else:
-            st.caption(f"Google Sheets 미연결 · 데이터 보호 안전모드")
-            마지막오류 = st.session_state.get("google_sheets_last_error", "")
+            st.caption("Google Sheets 미연결 · 데이터 보호 안전모드")
+            마지막오류 = st.session_state.get("google_sheets_last_error", "") or info.get("메시지", "")
             if 마지막오류:
                 st.caption(f"연결 오류: {마지막오류}")
-            if st.button("Google Sheets 재연결", key="google_sheets_reconnect_compact_v51434", use_container_width=True):
+            if st.button("Google Sheets 재연결", key="google_sheets_reconnect_compact_v51436", use_container_width=True):
                 구글시트캐시초기화()
-                st.session_state.pop("google_sheets_startup_warmup_done_v51434", None)
-                st.session_state["google_sheets_manual_reconnect_requested_v51439"] = 서울현재시각ISO()
+                st.session_state.pop("google_sheets_startup_warmup_done_v51436", None)
+                for k in [
+                    "portfolio_df_v1",
+                    "trade_history_df_v1",
+                    "trade_history_edit_df_v1",
+                    "irp_non_stock_assets_df_v512",
+                ]:
+                    if k in st.session_state:
+                        del st.session_state[k]
                 st.rerun()
     except Exception as e:
         st.caption(f"Google Sheets 상태 확인 오류: {e}")
-
-
-
-def 운영로그기록(구분, 메시지, 성공=True):
-    """최근 저장/백업/오류 로그를 세션에 가볍게 기록합니다.
-    Google Sheets 추가 읽기 없이 운영 상태 UI에서 확인하기 위한 용도입니다.
-    """
-    try:
-        시각 = 서울조회문자열(서울현재시각(), 포맷="%Y-%m-%d %H:%M:%S")
-    except Exception:
-        시각 = str(datetime.now())
-
-    항목 = {
-        "시각": 시각,
-        "구분": str(구분),
-        "결과": "성공" if 성공 else "실패",
-        "메시지": str(메시지),
-    }
-
-    try:
-        로그 = st.session_state.get("operation_log_v51446", [])
-        if not isinstance(로그, list):
-            로그 = []
-        로그.insert(0, 항목)
-        st.session_state["operation_log_v51446"] = 로그[:10]
-        st.session_state["last_operation_message_v51446"] = f"[{항목['결과']}] {항목['구분']} · {항목['메시지']}"
-        st.session_state["last_operation_at_v51446"] = 시각
-    except Exception:
-        pass
-
-    return 항목
-
-
-def 저장결과안내(성공, 메시지):
-    """저장/백업 결과를 사용자에게 즉시 보여주는 경량 안내입니다."""
-    try:
-        if 성공:
-            st.success(메시지)
-            try:
-                st.toast(메시지, icon="✅")
-            except Exception:
-                pass
-        else:
-            st.error(메시지)
-            try:
-                st.toast(메시지, icon="⚠️")
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-
-def 운영상태요약카드(현재거래건수=None, 위치="sidebar"):
-    """Cloud 운영 상태를 한눈에 확인하는 경량 UI입니다.
-    - 추가 Google Sheets 읽기를 하지 않고 session_state에 이미 있는 값만 표시합니다.
-    - quota 부담을 줄이기 위해 새로고침/저장 과정에서 갱신된 상태값을 재사용합니다.
-    """
-    try:
-        연결됨 = bool(st.session_state.get("google_sheets_connected", False))
-        문서명 = st.session_state.get("google_sheet_title", "")
-        마지막연결 = (
-            st.session_state.get("google_sheets_last_connected_at")
-            or st.session_state.get("google_sheet_last_connected_at")
-            or ""
-        )
-        마지막저장조회 = st.session_state.get("trade_history_last_loaded_at_v1", "")
-        최근백업명 = st.session_state.get("google_sheets_last_backup_name", "")
-        최근백업시각 = st.session_state.get("google_sheets_last_backup_at", "")
-        마지막오류 = st.session_state.get("google_sheets_last_error", "")
-
-        if 현재거래건수 is None:
-            try:
-                현재거래건수 = len(st.session_state.get("trade_history_df_v22", pd.DataFrame()))
-            except Exception:
-                현재거래건수 = "-"
-
-        상태라벨 = "정상" if 연결됨 else "안전모드"
-        상태아이콘 = "✅" if 연결됨 else "⚠️"
-        백업표시 = 최근백업명 if 최근백업명 else "이번 세션 백업 없음"
-
-        st.markdown("##### 운영 상태")
-        if 연결됨:
-            st.success(f"{상태아이콘} Google Sheets 연결: {상태라벨}")
-        else:
-            st.warning(f"{상태아이콘} Google Sheets 연결: {상태라벨}")
-            if 마지막오류:
-                st.caption(f"최근 오류: {마지막오류}")
-
-        st.caption(f"문서: {문서명 if 문서명 else '-'}")
-        st.caption(f"마지막 연결: {마지막연결 if 마지막연결 else '-'}")
-        st.caption(f"현재 거래이력: {현재거래건수}건")
-        if 마지막저장조회:
-            st.caption(f"마지막 저장 조회: {마지막저장조회}")
-        st.caption(f"최근 백업: {백업표시}")
-        if 최근백업시각:
-            st.caption(f"백업 시각: {최근백업시각}")
-
-        마지막작업 = st.session_state.get("last_operation_message_v51446", "")
-        마지막작업시각 = st.session_state.get("last_operation_at_v51446", "")
-        if 마지막작업:
-            st.markdown("###### 최근 작업")
-            st.caption(마지막작업)
-            if 마지막작업시각:
-                st.caption(f"작업 시각: {마지막작업시각}")
-
-        로그 = st.session_state.get("operation_log_v51446", [])
-        if isinstance(로그, list) and 로그:
-            with st.expander("최근 저장·백업 로그", expanded=False):
-                for item in 로그[:5]:
-                    if isinstance(item, dict):
-                        st.caption(f"{item.get('시각', '')} · {item.get('결과', '')} · {item.get('구분', '')} · {item.get('메시지', '')}")
-    except Exception as e:
-        st.caption(f"운영 상태 표시 오류: {type(e).__name__}: {e}")
 
 
 def 구글시트워크시트확보(spreadsheet, sheet_name, rows=1000, cols=30):
@@ -891,7 +824,7 @@ def 구글시트워크시트확보(spreadsheet, sheet_name, rows=1000, cols=30):
     except Exception:
         return spreadsheet.add_worksheet(title=sheet_name, rows=rows, cols=cols)
 
-@st.cache_data(ttl=60, show_spinner=False)
+
 def 구글시트데이터프레임읽기(sheet_name):
     spreadsheet, info = 구글시트문서연결()
     if spreadsheet is None:
@@ -909,6 +842,7 @@ def 구글시트데이터프레임읽기(sheet_name):
     except Exception:
         return pd.DataFrame()
 
+
 def _구글시트날짜문자열(값):
     """Google Sheets 저장 전 날짜/일시 값을 YYYY-MM-DD 문자열로 고정합니다."""
     if 값 is None:
@@ -923,7 +857,6 @@ def _구글시트날짜문자열(값):
     if 문자 in ["", "nan", "NaT", "None", "nat"]:
         return ""
 
-    # 이미 날짜로 시작하면 앞 10자리만 사용합니다.
     if re.match(r"^\d{4}-\d{2}-\d{2}", 문자):
         return 문자[:10]
 
@@ -957,21 +890,14 @@ def _구글시트종목코드문자열(값):
     if not 숫자:
         return 문자
 
-    # 국내 종목코드는 6자리 유지
     if len(숫자) <= 6:
         return 숫자.zfill(6)
     return 숫자
 
 
 def 구글시트저장용정리(df, sheet_name=""):
-    """Google Sheets 저장 직전 표시 형식을 안정화합니다.
-    - 종목코드: 6자리 문자열 유지(005930 등 앞자리 0 보존)
-    - 날짜형 컬럼: YYYY-MM-DD 문자열로 저장해 00:00:00 표시 방지
-    - 내부 관리 컬럼은 Google Sheets에 노출하지 않음
-    - 저장 방식은 RAW로 처리해 Google Sheets 자동 숫자/날짜 변환을 최소화
-    """
+    """Google Sheets 저장 직전 표시 형식을 안정화합니다."""
     작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
-    작업 = 구글시트내부관리컬럼제거(작업)
     작업 = 작업.replace({pd.NA: "", np.nan: "", None: ""}).fillna("")
 
     날짜형키워드 = ["거래일자", "기준일", "만기일", "반영일자", "저장일자", "작성일자"]
@@ -990,7 +916,6 @@ def 구글시트저장용정리(df, sheet_name=""):
             작업[열] = 작업[열].apply(lambda 값: "" if str(값) in ["nan", "NaT", "None"] else 값)
 
     return 작업
-
 
 
 def 구글시트날짜문자열정리(값):
@@ -1035,23 +960,17 @@ def 구글시트종목코드문자열정리(값):
 
 
 def 구글시트데이터무결성정리(df):
-    """Google Sheets 저장 전 데이터 무결성 보정.
-    - 종목코드: 6자리 문자열
-    - 날짜 컬럼: YYYY-MM-DD 문자열
-    - NaN/NaT/None 제거
-    """
+    """Google Sheets 저장 전 데이터 무결성 보정."""
     작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
     작업 = 작업.replace({pd.NA: "", np.nan: "", None: ""}).fillna("")
 
     for 열 in 작업.columns:
         작업[열] = 작업[열].apply(lambda 값: "" if str(값) in ["nan", "NaT", "None"] else 값)
 
-    # 종목코드 앞자리 0 보존
     for 후보열 in ["종목코드", "코드"]:
         if 후보열 in 작업.columns:
             작업[후보열] = 작업[후보열].apply(구글시트종목코드문자열정리)
 
-    # 날짜/일자 컬럼은 시:분:초 제거
     for 후보열 in ["거래일자", "거래일", "일자", "날짜", "매매일자", "만기일", "반영일자", "기준일"]:
         if 후보열 in 작업.columns:
             작업[후보열] = 작업[후보열].apply(구글시트날짜문자열정리)
@@ -1060,9 +979,7 @@ def 구글시트데이터무결성정리(df):
 
 
 def 구글시트워크시트포맷적용(ws, df):
-    """Google Sheets 열 형식 보정.
-    종목코드와 날짜 열을 일반 숫자가 아닌 텍스트로 고정해 앞자리 0과 날짜 문자열을 보존합니다.
-    """
+    """종목코드와 날짜 열을 텍스트로 고정합니다."""
     try:
         열목록 = list(df.columns) if df is not None else []
         for idx, 열이름 in enumerate(열목록, start=1):
@@ -1077,192 +994,12 @@ def 구글시트워크시트포맷적용(ws, df):
         pass
 
 
-# -----------------------------------
-# v5.14.43 내부 관리 컬럼 숨김/정리
-# - _입력원본순서 같은 내부 컬럼은 앱 계산에는 사용하되 Google Sheets 운영 시트/백업 시트에는 노출하지 않습니다.
-# -----------------------------------
-GOOGLE_SHEETS_INTERNAL_COLUMNS = ["_입력원본순서", "입력원본순서"]
-
-
-def 구글시트내부관리컬럼제거(df):
-    """Google Sheets 저장 전 사용자에게 보일 필요가 없는 내부 관리 컬럼을 제거합니다."""
-    작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
-    제거대상 = [열 for 열 in GOOGLE_SHEETS_INTERNAL_COLUMNS if 열 in 작업.columns]
-    if 제거대상:
-        작업 = 작업.drop(columns=제거대상, errors="ignore")
-    return 작업
-
-
-def 구글시트워크시트내부컬럼삭제(ws):
-    """백업 시트에 복제된 내부 관리 컬럼을 삭제합니다."""
-    try:
-        values = ws.get_all_values()
-        if not values:
-            return 0
-        headers = [str(x).strip() for x in values[0]]
-        삭제인덱스 = []
-        for idx, header in enumerate(headers, start=1):
-            if header in GOOGLE_SHEETS_INTERNAL_COLUMNS:
-                삭제인덱스.append(idx)
-        삭제수 = 0
-        # 뒤에서부터 삭제해야 앞쪽 삭제로 인덱스가 밀리지 않습니다.
-        for idx in sorted(삭제인덱스, reverse=True):
-            try:
-                if hasattr(ws, "delete_columns"):
-                    ws.delete_columns(idx)
-                else:
-                    ws.delete_cols(idx)
-                삭제수 += 1
-            except Exception:
-                pass
-        return 삭제수
-    except Exception:
-        return 0
-
-
-
-# -----------------------------------
-# v5.14.36 Google Sheets 거래이력 자동 백업
-# - 저장 직전 현재 거래이력 worksheet를 복제합니다.
-# - 백업명: 거래이력_backup_YYYYMMDD_vN
-# - 백업 실패 시 원본 보호를 위해 저장을 중단합니다.
-# -----------------------------------
-GOOGLE_SHEETS_BACKUP_KEEP_COUNT = 10
-
-
-def 구글시트백업시트명생성(spreadsheet, source_sheet_name="거래이력"):
-    """오늘 날짜 기준 다음 백업 시트명을 생성합니다.
-    예: 거래이력_backup_20260514_v1, 거래이력_backup_20260514_v2
-    """
-    오늘 = 서울현재시각().strftime("%Y%m%d")
-    prefix = f"{source_sheet_name}_backup_{오늘}_v"
-    version_numbers = []
-    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
-
-    try:
-        for ws in spreadsheet.worksheets():
-            title = str(getattr(ws, "title", ""))
-            match = pattern.match(title)
-            if match:
-                try:
-                    version_numbers.append(int(match.group(1)))
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    next_version = max(version_numbers) + 1 if version_numbers else 1
-    return f"{prefix}{next_version}"
-
-
-def 구글시트백업정렬키(ws, source_sheet_name="거래이력"):
-    """백업 시트 정렬용 키: 날짜와 버전 숫자를 기준으로 최신순 정리에 사용합니다."""
-    title = str(getattr(ws, "title", ""))
-    pattern = re.compile(rf"^{re.escape(source_sheet_name)}_backup_(\d{{8}})_v(\d+)$")
-    match = pattern.match(title)
-    if match:
-        try:
-            return (int(match.group(1)), int(match.group(2)))
-        except Exception:
-            return (0, 0)
-    return (0, 0)
-
-
-def 구글시트오래된백업정리(spreadsheet, source_sheet_name="거래이력", keep_count=None):
-    """거래이력 백업 시트를 최근 keep_count개만 남기고 정리합니다."""
-    keep_count = int(keep_count or GOOGLE_SHEETS_BACKUP_KEEP_COUNT)
-    try:
-        backup_sheets = [
-            ws for ws in spreadsheet.worksheets()
-            if str(getattr(ws, "title", "")).startswith(f"{source_sheet_name}_backup_")
-        ]
-        backup_sheets = sorted(
-            backup_sheets,
-            key=lambda ws: 구글시트백업정렬키(ws, source_sheet_name),
-            reverse=True,
-        )
-        삭제수 = 0
-        for old_ws in backup_sheets[keep_count:]:
-            try:
-                spreadsheet.del_worksheet(old_ws)
-                삭제수 += 1
-            except Exception:
-                pass
-        return True, 삭제수
-    except Exception as e:
-        return False, f"백업 정리 오류: {type(e).__name__}: {e}"
-
-
-def 구글시트거래이력자동백업(spreadsheet, source_sheet_name="거래이력", keep_count=None):
-    """Google Sheets 저장 직전 거래이력 worksheet를 백업합니다.
-
-    운영 원칙:
-    - 원본 시트가 존재하고 데이터가 있으면 반드시 백업 후 저장합니다.
-    - 백업 실패 시 저장을 중단할 수 있도록 False를 반환합니다.
-    - 원본 시트가 아직 없거나 완전히 비어 있으면 첫 저장 상황으로 보고 백업을 생략합니다.
-    """
-    try:
-        try:
-            source_ws = spreadsheet.worksheet(source_sheet_name)
-        except Exception:
-            return True, f"백업 생략: 원본 시트 없음({source_sheet_name})"
-
-        try:
-            existing_values = source_ws.get_all_values()
-        except Exception as e:
-            return False, f"백업 전 원본 읽기 실패({source_sheet_name}): {type(e).__name__}: {e}"
-
-        if not existing_values or len(existing_values) == 0:
-            return True, f"백업 생략: 원본 시트 비어 있음({source_sheet_name})"
-
-        backup_sheet_name = 구글시트백업시트명생성(spreadsheet, source_sheet_name)
-        try:
-            backup_ws = source_ws.duplicate(new_sheet_name=backup_sheet_name)
-            try:
-                구글시트워크시트내부컬럼삭제(backup_ws)
-            except Exception:
-                pass
-        except Exception as e:
-            return False, f"백업 시트 생성 실패({backup_sheet_name}): {type(e).__name__}: {e}"
-
-        정리성공, 정리결과 = 구글시트오래된백업정리(
-            spreadsheet,
-            source_sheet_name=source_sheet_name,
-            keep_count=keep_count,
-        )
-        if not 정리성공:
-            return False, str(정리결과)
-
-        st.session_state["google_sheets_last_backup_name"] = backup_sheet_name
-        st.session_state["google_sheets_last_backup_at"] = 서울조회문자열(서울현재시각(), 포맷="%Y-%m-%d %H:%M:%S")
-        return True, backup_sheet_name
-
-    except Exception as e:
-        return False, f"거래이력 자동 백업 오류: {type(e).__name__}: {e}"
-
 def 구글시트데이터프레임저장(sheet_name, df):
     spreadsheet, info = 구글시트문서연결()
     if spreadsheet is None:
         return False, f"Google Sheets 미연결: {info.get('메시지', '')}"
     try:
         작업 = 구글시트저장용정리(df, sheet_name=sheet_name)
-
-        # 거래이력은 Google Sheets 단일 원본이므로, 저장 직전 현재 시트를 먼저 백업합니다.
-        # 백업 실패 시 원본 데이터 보호를 위해 저장을 중단합니다.
-        백업메시지 = ""
-        if str(sheet_name).strip() == GOOGLE_SHEETS_TRADE_SHEET:
-            백업성공, 백업결과 = 구글시트거래이력자동백업(
-                spreadsheet,
-                source_sheet_name=GOOGLE_SHEETS_TRADE_SHEET,
-                keep_count=GOOGLE_SHEETS_BACKUP_KEEP_COUNT,
-            )
-            if not 백업성공:
-                실패메시지 = f"거래이력 백업 실패로 저장을 중단했습니다: {백업결과}"
-                운영로그기록("거래이력 자동백업", 실패메시지, 성공=False)
-                return False, 실패메시지
-            백업메시지 = f" / 자동 백업: {백업결과}"
-            운영로그기록("거래이력 자동백업", str(백업결과), 성공=True)
-
         ws = 구글시트워크시트확보(
             spreadsheet,
             sheet_name,
@@ -1273,89 +1010,33 @@ def 구글시트데이터프레임저장(sheet_name, df):
         ws.clear()
         구글시트워크시트포맷적용(ws, 작업)
         if values:
-            # RAW 저장을 사용해야 종목코드 005930의 앞자리 0과 날짜 문자열이 보존됩니다.
             ws.update(values, value_input_option="RAW")
         try:
             구글시트데이터프레임읽기.clear()
         except Exception:
             pass
-        저장메시지 = f"Google Sheets 저장 완료: {sheet_name}{백업메시지}"
-        운영로그기록(f"Google Sheets 저장({sheet_name})", 저장메시지, 성공=True)
-        try:
-            st.session_state["google_sheets_last_save_sheet_v51446"] = str(sheet_name)
-            st.session_state["google_sheets_last_save_at_v51446"] = 서울조회문자열(서울현재시각(), 포맷="%Y-%m-%d %H:%M:%S")
-        except Exception:
-            pass
-        return True, 저장메시지
+        return True, f"Google Sheets 저장 완료: {sheet_name}"
     except Exception as e:
-        저장오류메시지 = f"Google Sheets 저장 오류({sheet_name}): {type(e).__name__}: {e}"
-        운영로그기록(f"Google Sheets 저장({sheet_name})", 저장오류메시지, 성공=False)
-        return False, 저장오류메시지
-
-def 거래이력세션캐시초기화():
-    """Google Sheets 외부 수정사항을 다시 읽기 위해 거래이력 관련 세션/계산 캐시를 초기화합니다."""
-    초기화키목록 = [
-        "portfolio_df_v1",
-        "trade_history_df_v1",
-        "trade_history_edit_df_v1",
-        "trade_history_editor_df_v1",
-        "trade_history_df_v22",
-        "trade_history_calc_df_v1",
-        "trade_history_signature_v1",
-        "trade_history_last_saved_signature_v1",
-        "trade_history_changed_v1",
-        "trade_editor_last_input_fp_v1",
-        "trade_editor_last_output_fp_v1",
-        "trade_calc_cache_key_v1",
-        "trade_calc_cache_df_v1",
-        "trade_check_cache_df_v1",
-        "trade_validation_cache_json_v1",
-        "trade_validation_cache_fp_v1",
-        "trade_validation_cache_df_v1",
-        "trade_input_validation_df_v1",
-        "trade_last_validation_result_v1",
-        "portfolio_cache_key_v1",
-        "portfolio_cache_df_v1",
-        "portfolio_holding_cache_df_v1",
-        "portfolio_option_cache_v1",
-    ]
-    for key in 초기화키목록:
-        try:
-            st.session_state.pop(key, None)
-        except Exception:
-            pass
+        return False, f"Google Sheets 저장 오류({sheet_name}): {type(e).__name__}: {e}"
 
 
 def 구글시트캐시초기화():
-    """Google Sheets 새로고침 시 데이터·계산·검증 캐시를 모두 비웁니다.
-    v5.14.40: 검증표 stale cache 방지를 위해 거래이력 검증 관련 키까지 함께 초기화합니다.
-    """
     try:
         st.session_state.pop("google_sheets_last_error", None)
+    except Exception:
+        pass
+    try:
+        st.session_state.pop("google_sheets_startup_warmup_done_v51436", None)
     except Exception:
         pass
     try:
         구글시트데이터프레임읽기.clear()
     except Exception:
         pass
-    try:
-        거래이력통합점검표캐시.clear()
-    except Exception:
-        pass
-    try:
-        포트폴리오계산캐시.clear()
-    except Exception:
-        pass
-    try:
-        거래이력세션캐시초기화()
-    except Exception:
-        pass
 
 
 def 구글시트운영연결확인(화면표시=False):
-    """Google Sheets 단일 원본 운영을 위한 연결 확인.
-    연결 실패 시 로컬 fallback을 사용하지 않고 안전모드로 전환합니다.
-    """
+    """Google Sheets 단일 원본 운영을 위한 연결 확인."""
     try:
         spreadsheet, info = 구글시트문서연결()
         연결됨 = spreadsheet is not None
@@ -1374,6 +1055,571 @@ def 구글시트운영연결확인(화면표시=False):
         if 화면표시:
             st.error(f"Google Sheets 연결 확인 오류: {type(e).__name__}: {e}")
         return False, {"상태": "오류", "메시지": f"{type(e).__name__}: {e}"}
+
+
+# -----------------------------------
+# v5.14.38 자산변화로그 1단계
+# - Google Sheets에 '자산변화로그' 탭을 자동 생성/관리
+# - 현재 포트폴리오 + 비주식자산 기준으로 시점별 스냅샷 저장
+# - 직전 스냅샷과 원금/평가액/손익 변화 비교
+# -----------------------------------
+
+자산변화로그표준열 = [
+    "저장시각", "기준일", "변화유형", "계좌", "자산구분", "종목명",
+    "원금", "평가액", "평가손익", "실현손익", "보유종목수",
+    "원금변화", "평가액변화", "평가손익변화", "실현손익변화", "자동분석", "메모"
+]
+
+
+def 자산변화로그표준화(df):
+    작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+    for 열 in 자산변화로그표준열:
+        if 열 not in 작업.columns:
+            작업[열] = 0 if 열 in ["원금", "평가액", "평가손익", "실현손익", "보유종목수", "원금변화", "평가액변화", "평가손익변화", "실현손익변화"] else ""
+    작업 = 작업[자산변화로그표준열].copy()
+    for 열 in ["원금", "평가액", "평가손익", "실현손익", "보유종목수", "원금변화", "평가액변화", "평가손익변화", "실현손익변화"]:
+        작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0)
+    for 열 in ["저장시각", "기준일", "변화유형", "계좌", "자산구분", "종목명", "메모"]:
+        작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
+    return 작업.reset_index(drop=True)
+
+
+def 자산변화로그읽기():
+    try:
+        df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_ASSET_CHANGE_LOG_SHEET)
+        return 자산변화로그표준화(df)
+    except Exception:
+        return 자산변화로그표준화(pd.DataFrame())
+
+
+def 자산변화로그저장(df):
+    작업 = 자산변화로그표준화(df)
+    return 구글시트데이터프레임저장(GOOGLE_SHEETS_ASSET_CHANGE_LOG_SHEET, 작업)
+
+
+def 자산변화로그시트확보():
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨:
+        return False, f"Google Sheets 연결 실패: {info.get('메시지', '')}"
+    try:
+        현재 = 자산변화로그읽기()
+        if 현재.empty:
+            빈표 = pd.DataFrame(columns=자산변화로그표준열)
+            성공, 메시지 = 자산변화로그저장(빈표)
+            return 성공, 메시지
+        return True, "자산변화로그 시트 확인 완료"
+    except Exception as e:
+        return False, f"자산변화로그 시트 확인 오류: {type(e).__name__}: {e}"
+
+
+def _자산변화로그숫자(df, 열이름):
+    if df is None or 열이름 not in df.columns:
+        return pd.Series(dtype="float64")
+    return pd.to_numeric(df[열이름], errors="coerce").fillna(0)
+
+
+def 자산스냅샷행생성(계산포트폴리오, 보유계산포트폴리오, 비주식자산df=None, 메모=""):
+    보유 = pd.DataFrame() if 보유계산포트폴리오 is None else pd.DataFrame(보유계산포트폴리오).copy()
+    계산 = pd.DataFrame() if 계산포트폴리오 is None else pd.DataFrame(계산포트폴리오).copy()
+
+    if not 보유.empty and "데이터상태" in 보유.columns:
+        보유정상 = 보유[보유["데이터상태"].astype(str) == "정상"].copy()
+    else:
+        보유정상 = 보유.copy()
+
+    주식원금 = float(_자산변화로그숫자(보유정상, "투자원금").sum())
+    주식평가액 = float(_자산변화로그숫자(보유정상, "평가금액").sum())
+    주식평가손익 = float(_자산변화로그숫자(보유정상, "평가손익").sum())
+    실현손익 = float(_자산변화로그숫자(계산, "실현손익").sum())
+    보유종목수 = int(len(보유정상)) if 보유정상 is not None else 0
+
+    비주식 = IRP비주식자산표준열맞추기(비주식자산df) if 비주식자산df is not None else IRP비주식자산표준열맞추기(pd.DataFrame())
+    비주식원금 = float(_자산변화로그숫자(비주식, "원금").sum())
+    비주식평가액 = float(_자산변화로그숫자(비주식, "평가금액").sum())
+    비주식평가손익 = 비주식평가액 - 비주식원금
+
+    총원금 = 주식원금 + 비주식원금
+    총평가액 = 주식평가액 + 비주식평가액
+    총평가손익 = 주식평가손익 + 비주식평가손익
+
+    현재 = 서울현재시각()
+    return {
+        "저장시각": 현재.strftime("%Y-%m-%d %H:%M:%S"),
+        "기준일": 현재.strftime("%Y-%m-%d"),
+        "변화유형": "스냅샷",
+        "계좌": "전체",
+        "자산구분": "통합자산",
+        "종목명": "전체 포트폴리오",
+        "원금": round(총원금),
+        "평가액": round(총평가액),
+        "평가손익": round(총평가손익),
+        "실현손익": round(실현손익),
+        "보유종목수": 보유종목수,
+        "원금변화": 0,
+        "평가액변화": 0,
+        "평가손익변화": 0,
+        "실현손익변화": 0,
+        "자동분석": "현재 통합자산 기준 자동 저장 전 미리보기입니다.",
+        "메모": 메모 or "현재 통합자산 기준 자동 저장",
+    }
+
+
+def 자산변화유형판정(원금변화, 평가액변화, 평가손익변화):
+    기준값 = 1
+    원금변화 = float(원금변화 or 0)
+    평가액변화 = float(평가액변화 or 0)
+    평가손익변화 = float(평가손익변화 or 0)
+
+    if abs(원금변화) <= 기준값 and abs(평가액변화) <= 기준값 and abs(평가손익변화) <= 기준값:
+        return "변화 미미"
+    if 원금변화 > 기준값 and 평가액변화 > 기준값:
+        return "추가투자+자산증가"
+    if 원금변화 > 기준값 and 평가액변화 <= 0:
+        return "추가투자+평가하락"
+    if 원금변화 < -기준값 and 평가액변화 < -기준값:
+        return "원금 감소 또는 기준 변경"
+    if abs(원금변화) <= 기준값 and 평가액변화 > 기준값:
+        return "평가수익 증가"
+    if abs(원금변화) <= 기준값 and 평가액변화 < -기준값:
+        return "평가손익 악화"
+    if 원금변화 < -기준값 and 평가액변화 >= 0:
+        return "원금감소+자산유지"
+    return "복합 변화"
+
+
+def 자산변화자동분석생성(변화유형, 원금변화, 평가액변화, 평가손익변화, 실현손익변화=0):
+    if 변화유형 == "최초 스냅샷":
+        return "자산변화로그의 첫 기록입니다. 이후 저장부터 직전 기록과 비교됩니다."
+    if 변화유형 == "추가투자+자산증가":
+        return "원금이 증가했고 평가액도 함께 증가했습니다. 추가 입금 또는 투자 확대가 반영된 것으로 보입니다."
+    if 변화유형 == "추가투자+평가하락":
+        return "원금은 증가했지만 평가액은 감소했습니다. 추가 투자 이후 평가손익이 악화되었을 가능성이 있습니다."
+    if 변화유형 == "원금 감소 또는 기준 변경":
+        return "원금과 평가액이 함께 감소했습니다. 실제 인출, 일부 자산 제외, 또는 기준 데이터 변경 가능성이 있습니다."
+    if 변화유형 == "평가수익 증가":
+        return "원금 변동 없이 평가액이 증가했습니다. 보유자산의 평가수익이 개선된 것으로 보입니다."
+    if 변화유형 == "평가손익 악화":
+        return "원금 변동 없이 평가액이 감소했습니다. 보유자산의 평가손익이 악화된 것으로 보입니다."
+    if 변화유형 == "원금감소+자산유지":
+        return "원금은 감소했지만 평가액은 유지 또는 증가했습니다. 일부 인출에도 자산 평가가 양호했을 가능성이 있습니다."
+    if 변화유형 == "변화 미미":
+        return "직전 기록과 비교해 큰 변화는 없습니다."
+    if abs(float(실현손익변화 or 0)) >= 1:
+        return "실현손익 변화가 함께 발생했습니다. 매도 거래 또는 정산 내역을 거래이력과 함께 확인해 주세요."
+    return "원금, 평가액, 수익 변화가 함께 발생한 복합적인 변화입니다. 거래이력과 비주식자산 입력 내용을 함께 확인해 주세요."
+
+
+def 자산변화로그행보정(새행, 기존로그):
+    행 = dict(새행)
+    로그 = 자산변화로그표준화(기존로그)
+    if not 로그.empty:
+        직전 = 로그.iloc[-1]
+        행["원금변화"] = round(float(행.get("원금", 0)) - float(직전.get("원금", 0)))
+        행["평가액변화"] = round(float(행.get("평가액", 0)) - float(직전.get("평가액", 0)))
+        행["평가손익변화"] = round(float(행.get("평가손익", 0)) - float(직전.get("평가손익", 0)))
+        행["실현손익변화"] = round(float(행.get("실현손익", 0)) - float(직전.get("실현손익", 0)))
+        행["변화유형"] = 자산변화유형판정(행["원금변화"], 행["평가액변화"], 행["평가손익변화"])
+    else:
+        행["변화유형"] = "최초 스냅샷"
+        행["원금변화"] = 0
+        행["평가액변화"] = 0
+        행["평가손익변화"] = 0
+        행["실현손익변화"] = 0
+    행["자동분석"] = 자산변화자동분석생성(
+        행.get("변화유형", ""),
+        행.get("원금변화", 0),
+        행.get("평가액변화", 0),
+        행.get("평가손익변화", 0),
+        행.get("실현손익변화", 0),
+    )
+    return 행
+
+
+def 자산변화로그추가저장(계산포트폴리오, 보유계산포트폴리오, 비주식자산df=None, 메모=""):
+    기존 = 자산변화로그읽기()
+    새행 = 자산스냅샷행생성(계산포트폴리오, 보유계산포트폴리오, 비주식자산df, 메모=메모)
+    새행 = 자산변화로그행보정(새행, 기존)
+    저장대상 = pd.concat([기존, pd.DataFrame([새행])], ignore_index=True)
+    저장대상 = 자산변화로그표준화(저장대상)
+    성공, 메시지 = 자산변화로그저장(저장대상)
+    return 성공, 메시지, 새행, 저장대상
+
+
+
+def 자산변화상위요인문장(계좌요약=None, 자산군요약=None, 미리보기행=None):
+    """계좌별·자산군별 현재 구성과 직전 대비 총액 변화를 바탕으로 핵심 변화 문장을 만듭니다."""
+    try:
+        계좌요약 = pd.DataFrame() if 계좌요약 is None else pd.DataFrame(계좌요약).copy()
+        자산군요약 = pd.DataFrame() if 자산군요약 is None else pd.DataFrame(자산군요약).copy()
+        미리보기행 = 미리보기행 or {}
+
+        변화유형 = str(미리보기행.get("변화유형", "")).strip()
+        원금변화 = float(미리보기행.get("원금변화", 0) or 0)
+        평가액변화 = float(미리보기행.get("평가액변화", 0) or 0)
+        평가손익변화 = float(미리보기행.get("평가손익변화", 0) or 0)
+        실현손익변화 = float(미리보기행.get("실현손익변화", 0) or 0)
+
+        문장 = []
+        if 변화유형:
+            문장.append(f"이번 저장 예상 변화유형은 '{변화유형}'입니다.")
+
+        if not 자산군요약.empty and "평가금액" in 자산군요약.columns:
+            tmp = 자산군요약.copy()
+            tmp["평가금액"] = pd.to_numeric(tmp["평가금액"], errors="coerce").fillna(0)
+            tmp = tmp.sort_values("평가금액", ascending=False)
+            if not tmp.empty:
+                top = tmp.iloc[0]
+                문장.append(f"현재 가장 큰 자산군은 {top.get('자산군', '')}이며 평가금액은 {원화정수포맷(top.get('평가금액', 0))}입니다.")
+
+        if not 계좌요약.empty and "평가금액" in 계좌요약.columns:
+            tmp = 계좌요약.copy()
+            tmp["평가금액"] = pd.to_numeric(tmp["평가금액"], errors="coerce").fillna(0)
+            tmp = tmp.sort_values("평가금액", ascending=False)
+            if not tmp.empty:
+                top = tmp.iloc[0]
+                문장.append(f"계좌 기준으로는 {top.get('계좌', '')} 비중이 가장 큽니다.")
+
+        if abs(원금변화) >= 1:
+            방향 = "증가" if 원금변화 > 0 else "감소"
+            문장.append(f"직전 저장 대비 원금은 {손익원화문자열(원금변화)} {방향}했습니다. 원금변동원장, 현금성자산, 비주식자산 입력 변경 여부를 함께 확인하는 것이 좋습니다.")
+        elif abs(평가액변화) >= 1:
+            방향 = "증가" if 평가액변화 > 0 else "감소"
+            문장.append(f"원금 변화는 거의 없고 평가액이 {손익원화문자열(평가액변화)} {방향}했습니다. 보유자산 평가금액 변화의 영향으로 볼 수 있습니다.")
+
+        if abs(평가손익변화) >= 1:
+            방향 = "개선" if 평가손익변화 > 0 else "악화"
+            문장.append(f"평가손익은 직전 대비 {손익원화문자열(평가손익변화)} 변동되어 수익 상태가 {방향}되었습니다.")
+        if abs(실현손익변화) >= 1:
+            문장.append(f"실현손익도 {손익원화문자열(실현손익변화)} 변동되었습니다. 매도 거래나 정산 내역을 거래이력에서 확인해 주세요.")
+
+        if not 문장:
+            문장.append("직전 저장 기록과 비교해 큰 변화는 없습니다.")
+        return " ".join(문장)
+    except Exception:
+        return "자산 변화 요약을 생성하지 못했습니다. 저장 로그와 입력 데이터를 함께 확인해 주세요."
+
+
+def 자산변화현재구성요약생성(보유계산포트폴리오, 비주식자산df):
+    """현재 통합자산을 계좌별·자산군별로 집계합니다."""
+    통합표 = 통합자산현황표생성(보유계산포트폴리오, 비주식자산df)
+    if 통합표 is None or 통합표.empty:
+        빈 = pd.DataFrame(columns=["구분", "원금", "평가금액", "평가손익", "수익률", "전체비중"])
+        return 빈.copy(), 빈.copy(), pd.DataFrame()
+
+    작업 = 통합표.copy()
+    for 열 in ["원금", "평가금액", "평가손익"]:
+        작업[열] = pd.to_numeric(작업.get(열, 0), errors="coerce").fillna(0)
+
+    총평가 = float(작업["평가금액"].sum())
+
+    계좌요약 = 작업.groupby("계좌", dropna=False).agg(
+        원금=("원금", "sum"),
+        평가금액=("평가금액", "sum"),
+        평가손익=("평가손익", "sum"),
+        상품수=("상품명", "count"),
+    ).reset_index()
+    계좌요약["수익률"] = np.where(계좌요약["원금"] != 0, 계좌요약["평가손익"] / 계좌요약["원금"] * 100, 0)
+    계좌요약["전체비중"] = np.where(총평가 != 0, 계좌요약["평가금액"] / 총평가 * 100, 0)
+
+    자산군요약 = 작업.groupby("자산군", dropna=False).agg(
+        원금=("원금", "sum"),
+        평가금액=("평가금액", "sum"),
+        평가손익=("평가손익", "sum"),
+        상품수=("상품명", "count"),
+    ).reset_index()
+    자산군요약["수익률"] = np.where(자산군요약["원금"] != 0, 자산군요약["평가손익"] / 자산군요약["원금"] * 100, 0)
+    자산군요약["전체비중"] = np.where(총평가 != 0, 자산군요약["평가금액"] / 총평가 * 100, 0)
+
+    계좌요약 = 계좌요약.sort_values("평가금액", ascending=False).reset_index(drop=True)
+    자산군요약 = 자산군요약.sort_values("평가금액", ascending=False).reset_index(drop=True)
+    return 계좌요약, 자산군요약, 작업
+
+
+def 자산변화요약표시(제목, df, 구분열):
+    st.markdown(f"#### {제목}")
+    if df is None or pd.DataFrame(df).empty:
+        st.info(f"{제목}를 표시할 데이터가 없습니다.")
+        return
+    표시 = pd.DataFrame(df).copy()
+    표시 = index_1부터(표시)
+    포맷 = {
+        "원금": 원화정수포맷,
+        "평가금액": 원화정수포맷,
+        "평가손익": 손익원화문자열,
+        "수익률": lambda v: f"{float(v):,.2f}%",
+        "전체비중": lambda v: f"{float(v):,.1f}%",
+        "상품수": lambda v: f"{float(v):,.0f}개",
+    }
+    표시열 = [c for c in ["No", 구분열, "원금", "평가금액", "평가손익", "수익률", "전체비중", "상품수"] if c in 표시.columns]
+    표시 = 표시[표시열]
+    try:
+        표데이터프레임(
+            표시.style.format({k: v for k, v in 포맷.items() if k in 표시.columns}).map(손익색상, subset=[c for c in ["평가손익"] if c in 표시.columns]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    except Exception:
+        표데이터프레임(표시, use_container_width=True, hide_index=True)
+
+
+
+def 자산변화월별추세요약표시(로그df):
+    """자산변화로그 2건 이상일 때 월별 원금·평가액·손익 흐름을 요약 표시합니다."""
+    try:
+        로그 = 자산변화로그표준화(로그df)
+        if 로그.empty or len(로그) < 2:
+            st.caption("월별 변화 요약은 저장 기록이 2건 이상일 때 표시됩니다.")
+            return
+
+        작업 = 로그.copy()
+        작업["저장시각_dt"] = pd.to_datetime(작업.get("저장시각", ""), errors="coerce")
+        if 작업["저장시각_dt"].isna().all() and "기준일" in 작업.columns:
+            작업["저장시각_dt"] = pd.to_datetime(작업["기준일"], errors="coerce")
+        작업 = 작업.dropna(subset=["저장시각_dt"]).sort_values("저장시각_dt").reset_index(drop=True)
+        if len(작업) < 2:
+            st.caption("월별 변화 요약을 만들 수 있는 유효한 날짜 기록이 부족합니다.")
+            return
+
+        for 열 in ["원금", "평가액", "평가손익", "실현손익"]:
+            작업[열] = pd.to_numeric(작업.get(열, 0), errors="coerce").fillna(0)
+        작업["월"] = 작업["저장시각_dt"].dt.strftime("%Y-%m")
+
+        월별행 = []
+        for 월, 그룹 in 작업.groupby("월", sort=True):
+            시작 = 그룹.iloc[0]
+            종료 = 그룹.iloc[-1]
+            원금변화 = float(종료["원금"] - 시작["원금"])
+            평가액변화 = float(종료["평가액"] - 시작["평가액"])
+            평가손익변화 = float(종료["평가손익"] - 시작["평가손익"])
+            실현손익변화 = float(종료["실현손익"] - 시작["실현손익"])
+            월별행.append({
+                "월": 월,
+                "기록수": len(그룹),
+                "월초 원금": 시작["원금"],
+                "월말 원금": 종료["원금"],
+                "원금변화": 원금변화,
+                "평가액변화": 평가액변화,
+                "평가손익변화": 평가손익변화,
+                "실현손익변화": 실현손익변화,
+                "월말 평가액": 종료["평가액"],
+                "월말 평가손익": 종료["평가손익"],
+            })
+        월별 = pd.DataFrame(월별행)
+        if 월별.empty:
+            return
+
+        st.markdown("### 월별 자산 변화 요약")
+        st.caption("저장된 자산변화로그를 월 단위로 묶어 원금 변화와 평가손익 변화를 분리해서 봅니다.")
+
+        최근 = 월별.iloc[-1]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("최근 월 원금변화", 금액표시(최근.get("원금변화", 0)))
+        c2.metric("최근 월 평가액변화", 금액표시(최근.get("평가액변화", 0)))
+        c3.metric("최근 월 평가손익변화", 금액표시(최근.get("평가손익변화", 0)))
+        c4.metric("최근 월 기록수", f"{int(최근.get('기록수', 0))}건")
+
+        if PLOTLY_AVAILABLE and len(월별) >= 1:
+            try:
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=월별["월"], y=월별["원금변화"], name="원금변화", width=0.28))
+                fig.add_trace(go.Bar(x=월별["월"], y=월별["평가손익변화"], name="평가손익변화", width=0.28))
+                fig.add_trace(go.Scatter(x=월별["월"], y=월별["월말 평가액"], mode="lines+markers", name="월말 평가액", yaxis="y2"))
+                fig.update_layout(
+                    height=360,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    title="월별 원금 변화 · 평가손익 변화 · 월말 평가액",
+                    legend=dict(orientation="h"),
+                    barmode="group",
+                    yaxis=dict(title="월별 변화액"),
+                    yaxis2=dict(title="월말 평가액", overlaying="y", side="right", showgrid=False),
+                )
+                st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "responsive": True})
+            except Exception as e:
+                st.caption(f"월별 추세 그래프 표시 오류: {type(e).__name__}: {e}")
+
+        표시 = 월별.sort_values("월", ascending=False).copy()
+        표시 = index_1부터(표시)
+        표시열 = ["No", "월", "기록수", "월초 원금", "월말 원금", "원금변화", "평가액변화", "평가손익변화", "실현손익변화", "월말 평가액", "월말 평가손익"]
+        표시 = 표시[[c for c in 표시열 if c in 표시.columns]]
+        금액열 = [c for c in 표시.columns if c not in ["No", "월", "기록수"]]
+        try:
+            스타일 = 표시.style.format({**{c: 원화정수포맷 for c in 금액열}, "기록수": lambda v: f"{int(float(v))}건"}).map(
+                손익색상,
+                subset=[c for c in ["원금변화", "평가액변화", "평가손익변화", "실현손익변화", "월말 평가손익"] if c in 표시.columns],
+            )
+            표데이터프레임(스타일, use_container_width=True, hide_index=True)
+        except Exception:
+            표데이터프레임(표시, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.caption(f"월별 자산 변화 요약 생성 오류: {type(e).__name__}: {e}")
+
+
+
+def 자산변화원금변동설명표시(미리보기행, 현재스냅샷, 로그df, 계좌요약=None, 자산군요약=None):
+    """자산변화일지의 '현재 원금 직전대비'가 무엇을 의미하는지 설명합니다.
+    원금 변화는 주가 등락 손실이 아니라 입력 원금 또는 원금변동 기준의 변화입니다.
+    """
+    try:
+        원금변화 = float(미리보기행.get("원금변화", 0) or 0)
+        if abs(원금변화) < 1:
+            return
+        로그 = 자산변화로그표준화(로그df)
+        직전원금 = 0
+        직전시각 = ""
+        if not 로그.empty:
+            직전 = 로그.iloc[-1]
+            직전원금 = float(직전.get("원금", 0) or 0)
+            직전시각 = str(직전.get("저장시각", ""))
+        현재원금 = float(현재스냅샷.get("원금", 0) or 0)
+        설명문 = (
+            "현재 원금의 직전대비 금액은 주식 가격 하락으로 생긴 평가손실이 아니라, "
+            "거래이력의 보유 원금, 비주식자산 원금, 현금성자산 원금, 또는 원금변동원장 기준값이 직전 저장 시점과 달라졌다는 뜻입니다."
+        )
+        if 원금변화 < 0:
+            st.warning(f"원금이 직전 저장 대비 {손익원화문자열(원금변화)} 감소했습니다. {설명문}")
+        else:
+            st.info(f"원금이 직전 저장 대비 {손익원화문자열(원금변화)} 증가했습니다. {설명문}")
+        원인표 = pd.DataFrame([
+            {"구분": "직전 저장 원금", "금액": 직전원금, "확인 의미": f"이전 자산변화로그 기준값 {직전시각}"},
+            {"구분": "현재 입력자산 원금", "금액": 현재원금, "확인 의미": "현재 거래이력·비주식자산·현금성자산 합계"},
+            {"구분": "직전대비 원금 변화", "금액": 원금변화, "확인 의미": "입금·인출·자산 재분류·거래원금 변경 여부 확인 필요"},
+        ])
+        try:
+            표데이터프레임(원인표.style.format({"금액": 손익원화문자열}).map(손익색상, subset=["금액"]), use_container_width=True, hide_index=True)
+        except Exception:
+            표데이터프레임(원인표, use_container_width=True, hide_index=True)
+        if 원금변화 < 0:
+            st.caption("확인 순서: ① 원금변동원장에 실제 인출/감소 기록이 있는지 ② 현금성자산 금액이 줄었는지 ③ 비주식자산에서 현금성 항목이 제외되며 중복이 해소된 것인지 ④ 거래이력의 보유수량·매수원금이 바뀐 것인지 확인하면 됩니다.")
+    except Exception as e:
+        st.caption(f"원금 변화 설명 표시 오류: {type(e).__name__}: {e}")
+
+def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
+    st.markdown("---")
+    st.subheader("자산 변화 일지")
+    st.caption("현재 통합자산 상태를 저장하고, 직전 기록과 비교해 원금·평가액·손익 변화와 계좌별·자산군별 구성을 함께 보여줍니다.")
+
+    비주식자산df = IRP비주식자산불러오기()
+    현재스냅샷 = 자산스냅샷행생성(계산포트폴리오, 보유계산포트폴리오, 비주식자산df)
+    로그df = 자산변화로그읽기()
+    미리보기행 = 자산변화로그행보정(현재스냅샷, 로그df)
+    계좌요약, 자산군요약, 통합구성표 = 자산변화현재구성요약생성(보유계산포트폴리오, 비주식자산df)
+
+    카드1, 카드2, 카드3, 카드4 = st.columns(4)
+    카드1.metric("현재 원금", 금액표시(현재스냅샷.get("원금", 0)), 금액표시(미리보기행.get("원금변화", 0)))
+    카드2.metric("현재 평가액", 금액표시(현재스냅샷.get("평가액", 0)), 금액표시(미리보기행.get("평가액변화", 0)))
+    카드3.metric("평가손익", 금액표시(현재스냅샷.get("평가손익", 0)), 금액표시(미리보기행.get("평가손익변화", 0)))
+    카드4.metric("실현손익", 금액표시(현재스냅샷.get("실현손익", 0)), 금액표시(미리보기행.get("실현손익변화", 0)))
+
+    변화유형 = 미리보기행.get("변화유형", "")
+    자동분석 = 미리보기행.get("자동분석", "")
+    핵심문장 = 자산변화상위요인문장(계좌요약, 자산군요약, 미리보기행)
+    if 변화유형:
+        st.info(f"이번 저장 예상 변화유형: **{변화유형}**\n\n{자동분석}\n\n**이번 변화의 핵심:** {핵심문장}")
+    자산변화원금변동설명표시(미리보기행, 현재스냅샷, 로그df, 계좌요약, 자산군요약)
+
+    요약표 = pd.DataFrame([
+        {"구분": "현재 원금", "현재값": 현재스냅샷.get("원금", 0), "직전대비": 미리보기행.get("원금변화", 0)},
+        {"구분": "현재 평가액", "현재값": 현재스냅샷.get("평가액", 0), "직전대비": 미리보기행.get("평가액변화", 0)},
+        {"구분": "평가손익", "현재값": 현재스냅샷.get("평가손익", 0), "직전대비": 미리보기행.get("평가손익변화", 0)},
+        {"구분": "실현손익", "현재값": 현재스냅샷.get("실현손익", 0), "직전대비": 미리보기행.get("실현손익변화", 0)},
+    ])
+    try:
+        표데이터프레임(
+            요약표.style.format({"현재값": 원화정수포맷, "직전대비": 손익원화문자열}).map(손익색상, subset=["직전대비"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    except Exception:
+        표데이터프레임(요약표, use_container_width=True, hide_index=True)
+
+    메모 = st.text_input("이번 저장 메모", value="현재 통합자산 기준 자동 저장", key="asset_change_log_memo_v51442")
+    버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.2, 5])
+    with 버튼1:
+        if st.button("현재 자산 상태 저장", key="save_asset_change_snapshot_v51442", use_container_width=True):
+            성공, 메시지, 새행, 저장대상 = 자산변화로그추가저장(계산포트폴리오, 보유계산포트폴리오, 비주식자산df, 메모=메모)
+            if 성공:
+                st.success(f"자산변화로그를 저장했습니다. 변화유형: {새행.get('변화유형', '')}")
+                st.rerun()
+            else:
+                st.error(메시지)
+    with 버튼2:
+        if st.button("시트 확인/생성", key="ensure_asset_change_sheet_v51442", use_container_width=True):
+            성공, 메시지 = 자산변화로그시트확보()
+            if 성공:
+                st.success(메시지)
+            else:
+                st.error(메시지)
+    with 버튼3:
+        st.caption("거래이력·비주식자산이 바뀐 뒤 저장하면 직전 저장값과 자동 비교됩니다. 이번 버전은 계좌별·자산군별 현재 구성까지 함께 보여줍니다.")
+
+    st.markdown("### 계좌별·자산군별 현재 구성")
+    탭1, 탭2, 탭3 = st.tabs(["계좌별 요약", "자산군별 요약", "상세 구성"])
+    with 탭1:
+        자산변화요약표시("계좌별 자산 요약", 계좌요약, "계좌")
+    with 탭2:
+        자산변화요약표시("자산군별 자산 요약", 자산군요약, "자산군")
+    with 탭3:
+        표시상세 = 통합구성표.copy()
+        if 표시상세.empty:
+            st.info("상세 구성을 표시할 데이터가 없습니다.")
+        else:
+            자산군순서 = {"주식": 1, "ETF": 2, "TDF": 3, "정기예금": 4, "비주식자산": 5, "현금성자산": 6}
+            표시상세["자산군정렬"] = 표시상세["자산군"].map(자산군순서).fillna(99)
+            표시상세 = 표시상세.sort_values(["자산군정렬", "계좌", "평가금액"], ascending=[True, True, False]).drop(columns=["자산군정렬"]).reset_index(drop=True)
+            표시상세 = index_1부터(표시상세)
+            표시열 = [c for c in ["No", "계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "전체비중", "비고"] if c in 표시상세.columns]
+            표시상세 = 표시상세[표시열]
+            try:
+                표데이터프레임(
+                    표시상세.style.format({
+                        "원금": 원화정수포맷,
+                        "평가금액": 원화정수포맷,
+                        "평가손익": 손익원화문자열,
+                        "수익률": lambda v: f"{float(v):,.2f}%",
+                        "전체비중": lambda v: f"{float(v):,.1f}%",
+                    }).map(손익색상, subset=[c for c in ["평가손익"] if c in 표시상세.columns]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            except Exception:
+                표데이터프레임(표시상세, use_container_width=True, hide_index=True)
+
+    if 로그df.empty:
+        st.info("아직 저장된 자산변화로그가 없습니다. '현재 자산 상태 저장'을 눌러 첫 스냅샷을 만드세요.")
+        return
+
+    그래프기준 = 로그df.sort_values("저장시각").copy()
+    if PLOTLY_AVAILABLE and len(그래프기준) >= 2:
+        try:
+            그래프기준["저장시각"] = pd.to_datetime(그래프기준["저장시각"], errors="coerce")
+            그래프기준 = 그래프기준.dropna(subset=["저장시각"])
+            if not 그래프기준.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=그래프기준["저장시각"], y=pd.to_numeric(그래프기준["원금"], errors="coerce"), mode="lines+markers", name="원금"))
+                fig.add_trace(go.Scatter(x=그래프기준["저장시각"], y=pd.to_numeric(그래프기준["평가액"], errors="coerce"), mode="lines+markers", name="평가액"))
+                fig.add_trace(go.Bar(x=그래프기준["저장시각"], y=pd.to_numeric(그래프기준["평가손익"], errors="coerce"), name="평가손익", opacity=0.35))
+                fig.update_layout(height=420, margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation="h"), title="원금 · 평가액 · 평가손익 흐름")
+                st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "responsive": True})
+        except Exception as e:
+            st.caption(f"자산변화 그래프 표시 오류: {type(e).__name__}: {e}")
+    else:
+        st.caption("추세 그래프는 저장 기록이 2건 이상일 때 표시됩니다.")
+
+    자산변화월별추세요약표시(로그df)
+
+    표시 = 로그df.copy().sort_values("저장시각", ascending=False).reset_index(drop=True)
+    st.markdown("### 저장된 자산 변화 일지")
+    st.caption(f"총 {len(표시)}건 · 핵심 변화 항목 중심으로 표시합니다.")
+    핵심열 = ["저장시각", "변화유형", "원금", "평가액", "평가손익", "실현손익", "원금변화", "평가액변화", "평가손익변화", "실현손익변화", "자동분석", "메모"]
+    표시용 = 표시[[열 for 열 in 핵심열 if 열 in 표시.columns]].copy()
+    표시용 = index_1부터(표시용)
+    숫자열 = [열 for 열 in ["원금", "평가액", "평가손익", "실현손익", "원금변화", "평가액변화", "평가손익변화", "실현손익변화"] if 열 in 표시용.columns]
+    포맷 = {열: 원화정수포맷 for 열 in 숫자열}
+    try:
+        스타일 = 표시용.style.format(포맷).map(손익색상, subset=[열 for 열 in ["평가손익", "실현손익", "원금변화", "평가액변화", "평가손익변화", "실현손익변화"] if 열 in 표시용.columns])
+        표데이터프레임(스타일, use_container_width=True)
+    except Exception:
+        표데이터프레임(표시용, use_container_width=True)
 
 야후인덱스심볼 = {
     "1001": "^KS11",
@@ -1713,80 +1959,12 @@ def 거래이력자동보정(df):
 
 
 
-def 거래이력행입력값존재여부(행):
-    """st.data_editor가 만드는 가짜 빈 신규 행을 실제 거래로 보지 않습니다.
-
-    v5.14.42 핵심 보정:
-    - 날짜 NaT, 거래구분 공란, 수량 0, 단가 0 형태로 반환되는 빈 입력 대기행을 제외합니다.
-    - 종목코드/종목명/거래일자/거래구분/운용사/비고 중 하나라도 값이 있으면 실제 입력행으로 봅니다.
-    - 수량·단가만 0이면 빈 행으로 봅니다. 단, 수량·단가가 0이 아닌 값이면 실제 입력행으로 봅니다.
-    """
-    def _값비어있음(값):
-        try:
-            if pd.isna(값):
-                return True
-        except Exception:
-            pass
-        문자 = str(값).strip()
-        if 문자.endswith('.0') and 문자.replace('.', '', 1).isdigit():
-            # 종목코드 같은 값은 여기에서 비어 있다고 판단하지 않습니다.
-            pass
-        return 문자 in ["", "None", "none", "nan", "NaN", "NaT", "nat", "NULL", "null", "<NA>"]
-
-    def _숫자0또는공란(값):
-        if _값비어있음(값):
-            return True
-        try:
-            숫자 = pd.to_numeric(pd.Series([값]), errors="coerce").iloc[0]
-            if pd.isna(숫자):
-                return True
-            return float(숫자) == 0.0
-        except Exception:
-            문자 = str(값).strip().replace(',', '')
-            return 문자 in ["0", "0.0", "0.00", "0.000000"]
-
-    문자열 = ["종목코드", "종목명", "거래일자", "거래구분", "운용사", "비고"]
-    for 열 in 문자열:
-        try:
-            값 = 행.get(열, "")
-        except Exception:
-            값 = ""
-        if not _값비어있음(값):
-            return True
-
-    수량0 = _숫자0또는공란(행.get("거래수량", "") if hasattr(행, 'get') else "")
-    단가0 = _숫자0또는공란(행.get("거래단가", "") if hasattr(행, 'get') else "")
-    return not (수량0 and 단가0)
-
-
-def 거래이력빈입력행제거(df):
-    """검증·계산·표시 전에 st.data_editor의 가짜 빈 입력행을 강제로 제거합니다."""
-    if df is None:
-        return pd.DataFrame(columns=거래이력표준열 if '거래이력표준열' in globals() else [])
-    작업 = pd.DataFrame(df).copy()
-    if 작업.empty:
-        return 작업
-    표준열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"]
-    for 열 in 표준열:
-        if 열 not in 작업.columns:
-            작업[열] = None if 열 in ["거래일자", "거래수량", "거래단가"] else ""
-    try:
-        마스크 = 작업.apply(거래이력행입력값존재여부, axis=1)
-        작업 = 작업.loc[마스크].copy()
-    except Exception:
-        pass
-    return 작업.reset_index(drop=True)
-
 def 거래이력검증표생성(df):
     if df is None or df.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
     점검결과 = []
-    원본작업 = 거래이력빈입력행제거(df)
-    if 원본작업.empty:
-        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
-
-    작업 = 거래이력자동보정(원본작업.reset_index(drop=True).copy())
+    작업 = 거래이력자동보정(df.reset_index(drop=True).copy())
     오늘 = datetime.today().date()
 
     for idx, 행 in 작업.iterrows():
@@ -1884,7 +2062,7 @@ def 거래이력편집용자동보정(df):
     if df is None:
         return pd.DataFrame(columns=["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"])
 
-    작업 = 거래이력빈입력행제거(df)
+    작업 = df.copy()
 
     표준열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"]
     for 열 in 표준열:
@@ -1972,11 +2150,7 @@ def 거래이력이상치점검표생성(df):
     if df is None or df.empty:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
 
-    원본작업 = 거래이력빈입력행제거(df)
-    if 원본작업.empty:
-        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
-
-    작업 = 거래이력자동보정(원본작업.reset_index(drop=True).copy())
+    작업 = 거래이력자동보정(df.reset_index(drop=True).copy())
     점검결과 = []
 
     중복기준열 = ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가"]
@@ -2068,14 +2242,741 @@ IRP비주식자산저장파일 = "v5146_personal_integrated_non_stock_assets.jso
 IRP비주식자산레거시저장파일목록 = ["v5145_personal_integrated_non_stock_assets.json", "integrated_non_stock_assets_v513.json"]
 
 
-def 기본IRP비주식자산표():
-    오늘 = 서울현재시각().date().isoformat()
+# -----------------------------------
+# v5.14.46 현금성자산 · 원금변동원장 통합
+# - 기존 비주식자산 안에 섞여 있던 예수금/CMA/대기현금을 별도 시트로 분리 관리
+# - 총 자산원금은 원금변동원장 기준으로 별도 추적
+# - 자동 추론보다 사용자가 입력한 원장 기반 검증을 우선
+# -----------------------------------
+
+현금성자산표준열 = ["기준일", "계좌", "유형", "원금", "평가금액", "메모"]
+원금변동원장표준열 = ["일자", "유형", "출처", "도착", "금액", "총원금반영", "메모"]
+
+
+def 현금성자산표준화(df):
+    작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+    컬럼변환 = {}
+    if "반영일자" in 작업.columns and "기준일" not in 작업.columns:
+        컬럼변환["반영일자"] = "기준일"
+    if "자산군" in 작업.columns and "유형" not in 작업.columns:
+        컬럼변환["자산군"] = "유형"
+    if "상품명" in 작업.columns and "메모" not in 작업.columns:
+        컬럼변환["상품명"] = "메모"
+    if 컬럼변환:
+        작업 = 작업.rename(columns=컬럼변환)
+
+    for 열 in 현금성자산표준열:
+        if 열 not in 작업.columns:
+            작업[열] = 0 if 열 in ["원금", "평가금액"] else ""
+    작업 = 작업[현금성자산표준열].copy()
+
+    for 열 in ["기준일"]:
+        작업[열] = 작업[열].apply(날짜값_YYYYMMDD문자열)
+    for 열 in ["계좌", "유형", "메모"]:
+        작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
+    for 열 in ["원금", "평가금액"]:
+        작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0.0)
+
+    작업["계좌"] = 작업["계좌"].replace("", "미지정 계좌")
+    작업["유형"] = 작업["유형"].replace("", "예수금")
+    작업 = 작업[(작업["원금"] > 0) | (작업["평가금액"] > 0) | (작업["메모"].astype(str).str.strip() != "")].copy()
+    return 작업.reset_index(drop=True)
+
+
+def 기본현금성자산표():
     return pd.DataFrame([
-        {"계좌": "신한은행 IRP", "자산군": "TDF", "상품명": "TDF2035", "원금": 50000000, "평가금액": 51873538, "예상연수익률": 3.74, "만기일": "", "반영일자": "2026-04-30", "비고": "평가금액은 직접 입력"},
-        {"계좌": "신한은행 IRP", "자산군": "TDF", "상품명": "TDF2045", "원금": 30000000, "평가금액": 31443846, "예상연수익률": 4.81, "만기일": "", "반영일자": "2026-04-30", "비고": "평가금액은 직접 입력"},
-        {"계좌": "신한은행 IRP", "자산군": "정기예금", "상품명": "푸본현대생명 정기예금", "원금": 27499444, "평가금액": 27499444, "예상연수익률": 3.10, "만기일": "2027-02-11", "반영일자": "2026-04-30", "비고": "만기 유지 시 고정금리 기준"},
-        {"계좌": "신한은행 IRP", "자산군": "현금성자산", "상품명": "현금성 대기자산", "원금": 5030813, "평가금액": 5030813, "예상연수익률": 2.30, "만기일": "", "반영일자": "2026-04-30", "비고": "예수금·MMDA 등 수동 입력"},
-        {"계좌": "미래에셋증권", "자산군": "현금성자산", "상품명": "예수금", "원금": 17188280, "평가금액": 17188280, "예상연수익률": 0.0, "만기일": "", "반영일자": "2026-04-30", "비고": "CMA/예수금"},
+        {"기준일": "2026-05-19", "계좌": "신한은행 IRP", "유형": "현금성 대기자산", "원금": 51866314, "평가금액": 51866314, "메모": "예수금·MMDA 등 수동 입력"},
+        {"기준일": "2026-05-19", "계좌": "미래에셋/증권계좌", "유형": "예수금", "원금": 172218, "평가금액": 172218, "메모": "CMA/예수금"},
+    ])
+
+
+def 비주식현금성자산자동이관표(비주식자산df=None):
+    """비주식자산 시트에 남아 있는 현금성 항목을 신규 현금성자산 시트 형식으로 변환합니다.
+    - 예수금, CMA, MMDA, MMF, 현금성 대기자산 등만 추출합니다.
+    - 원본 비주식자산 시트를 삭제하거나 수정하지 않고, 신규 시트에 복사할 후보만 만듭니다.
+    """
+    try:
+        원본 = IRP비주식자산표준열맞추기(비주식자산df if 비주식자산df is not None else IRP비주식자산불러오기())
+        if 원본.empty:
+            return 현금성자산표준화(pd.DataFrame())
+
+        현금키워드 = ["현금", "예수금", "CMA", "MMDA", "MMF", "대기자산", "입출금", "수시입출"]
+        패턴 = "|".join(현금키워드)
+        자산군 = 원본["자산군"].astype(str) if "자산군" in 원본.columns else ""
+        상품명 = 원본["상품명"].astype(str) if "상품명" in 원본.columns else ""
+        비고 = 원본["비고"].astype(str) if "비고" in 원본.columns else ""
+        마스크 = 자산군.str.contains(패턴, case=False, na=False) | 상품명.str.contains(패턴, case=False, na=False)
+        try:
+            마스크 = 마스크 | 비고.str.contains(패턴, case=False, na=False)
+        except Exception:
+            pass
+
+        후보 = 원본[마스크].copy()
+        if 후보.empty:
+            return 현금성자산표준화(pd.DataFrame())
+
+        def _유형결정(row):
+            텍스트 = f"{row.get('자산군', '')} {row.get('상품명', '')} {row.get('비고', '')}".upper()
+            if "CMA" in 텍스트:
+                return "CMA"
+            if "MMDA" in 텍스트:
+                return "MMDA"
+            if "MMF" in 텍스트:
+                return "MMF"
+            if "예수금" in 텍스트:
+                return "예수금"
+            if "입출금" in 텍스트 or "수시입출" in 텍스트:
+                return "입출금통장"
+            return "현금성 대기자산"
+
+        결과 = pd.DataFrame({
+            "기준일": 후보["반영일자"].apply(날짜값_YYYYMMDD문자열) if "반영일자" in 후보.columns else 서울현재시각().strftime("%Y-%m-%d"),
+            "계좌": 후보["계좌"] if "계좌" in 후보.columns else "미지정 계좌",
+            "유형": 후보.apply(_유형결정, axis=1),
+            "원금": pd.to_numeric(후보["원금"], errors="coerce").fillna(0) if "원금" in 후보.columns else 0,
+            "평가금액": pd.to_numeric(후보["평가금액"], errors="coerce").fillna(0) if "평가금액" in 후보.columns else 0,
+            "메모": 후보.apply(lambda r: f"비주식자산 자동 이관 · {r.get('상품명', '')}".strip(), axis=1),
+        })
+        return 현금성자산표준화(결과)
+    except Exception:
+        return 현금성자산표준화(pd.DataFrame())
+
+
+def 현금성자산초기자동이관(force=False):
+    """신규 현금성자산 시트가 비어 있으면 비주식자산의 현금성 항목을 1회 자동 이관합니다."""
+    현재 = 현금성자산표준화(현금성자산불러오기())
+    if not 현재.empty and not force:
+        return False, "현금성자산 시트에 이미 데이터가 있어 자동 이관을 중단했습니다.", 현재
+
+    후보 = 비주식현금성자산자동이관표()
+    if 후보.empty:
+        return False, "비주식자산에서 자동 이관할 현금성 항목을 찾지 못했습니다.", 현재
+
+    성공, 메시지 = 현금성자산저장(후보)
+    if 성공:
+        return True, f"현금성자산 {len(후보)}건을 자동 이관했습니다.", 후보
+    return False, 메시지, 현재
+
+
+def 현금성자산및초기원금일괄초기화(최적화결과=None, 기준일=None, 사용자확정금액=None):
+    """현금성자산 이관과 초기 총 자산원금 생성을 한 번에 수행합니다."""
+    결과메시지 = []
+    현금현재 = 현금성자산표준화(현금성자산불러오기())
+    if 현금현재.empty:
+        현금성공, 현금메시지, 현금결과 = 현금성자산초기자동이관(force=False)
+        결과메시지.append(현금메시지)
+    else:
+        결과메시지.append("현금성자산 시트에 이미 데이터가 있어 이관은 건너뛰었습니다.")
+
+    원장현재 = 원금변동원장표준화(원금변동원장불러오기())
+    if 초기설정원금존재여부(원장현재):
+        결과메시지.append("초기 총 자산원금 기준값이 이미 있어 원금 생성은 건너뛰었습니다.")
+        return True, " / ".join(결과메시지)
+
+    성공, 메시지, 저장대상, 상세 = 초기총자산원금자동생성(
+        최적화결과=최적화결과,
+        기준일=기준일,
+        사용자확정금액=사용자확정금액,
+    )
+    결과메시지.append(메시지)
+    return bool(성공), " / ".join(결과메시지)
+
+
+def 현금성자산불러오기():
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨:
+        return 현금성자산표준화(pd.DataFrame())
+    try:
+        구글df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_CASH_ASSET_SHEET)
+        df = 현금성자산표준화(구글df)
+        return df
+    except Exception:
+        return 현금성자산표준화(pd.DataFrame())
+
+
+def 현금성자산저장(df):
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨:
+        return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
+    작업 = 현금성자산표준화(df)
+    return 구글시트데이터프레임저장(GOOGLE_SHEETS_CASH_ASSET_SHEET, 작업)
+
+
+def 원금변동원장표준화(df):
+    작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+    for 열 in 원금변동원장표준열:
+        if 열 not in 작업.columns:
+            작업[열] = 0 if 열 == "금액" else ""
+    작업 = 작업[원금변동원장표준열].copy()
+    작업["일자"] = 작업["일자"].apply(날짜값_YYYYMMDD문자열)
+    for 열 in ["유형", "출처", "도착", "총원금반영", "메모"]:
+        작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
+    작업["금액"] = pd.to_numeric(작업["금액"], errors="coerce").fillna(0.0)
+    작업["총원금반영"] = 작업["총원금반영"].replace({"": "미반영", "입금": "증가", "인출": "감소"})
+    작업 = 작업[(작업["금액"] > 0) | (작업["메모"].astype(str).str.strip() != "")].copy()
+    return 작업.reset_index(drop=True)
+
+
+def 기본원금변동원장표():
+    return pd.DataFrame(columns=원금변동원장표준열)
+
+
+def 원금변동원장불러오기():
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨:
+        return 원금변동원장표준화(pd.DataFrame())
+    try:
+        구글df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_PRINCIPAL_LEDGER_SHEET)
+        return 원금변동원장표준화(구글df)
+    except Exception:
+        return 원금변동원장표준화(pd.DataFrame())
+
+
+def 원금변동원장저장(df):
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨:
+        return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
+    작업 = 원금변동원장표준화(df)
+    return 구글시트데이터프레임저장(GOOGLE_SHEETS_PRINCIPAL_LEDGER_SHEET, 작업)
+
+
+def 관리기준총원금계산(원금원장df=None):
+    원장 = 원금변동원장표준화(원금원장df if 원금원장df is not None else 원금변동원장불러오기())
+    if 원장.empty:
+        return 0
+    증가 = 원장[원장["총원금반영"].astype(str).str.contains("증가", na=False)]["금액"].sum()
+    감소 = 원장[원장["총원금반영"].astype(str).str.contains("감소", na=False)]["금액"].sum()
+    return float(증가 - 감소)
+
+
+def _원금숫자합계(df, 후보열목록):
+    """여러 후보 컬럼 중 존재하는 첫 컬럼의 숫자 합계를 반환합니다."""
+    try:
+        작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+        if 작업.empty:
+            return 0.0
+        for 열 in 후보열목록:
+            if 열 in 작업.columns:
+                return float(pd.to_numeric(작업[열], errors="coerce").fillna(0).sum())
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def 비주식현금성자산제외(df, 현금성자산df=None):
+    """신규 현금성자산 시트에 값이 있으면 기존 비주식자산의 현금성 항목을 제외합니다."""
+    작업 = IRP비주식자산표준열맞추기(df)
+    현금 = 현금성자산표준화(현금성자산df if 현금성자산df is not None else 현금성자산불러오기())
+    if 작업.empty or 현금.empty:
+        return 작업
+
+    현금키워드 = ["현금", "예수금", "CMA", "MMDA", "MMF", "대기자산", "입출금", "수시입출"]
+    자산군 = 작업["자산군"].astype(str)
+    상품명 = 작업["상품명"].astype(str)
+    비고 = 작업["비고"].astype(str) if "비고" in 작업.columns else ""
+    현금성마스크 = 자산군.str.contains("|".join(현금키워드), case=False, na=False) | 상품명.str.contains("|".join(현금키워드), case=False, na=False)
+    try:
+        현금성마스크 = 현금성마스크 | 비고.str.contains("|".join(현금키워드), case=False, na=False)
+    except Exception:
+        pass
+    return 작업[~현금성마스크].copy().reset_index(drop=True)
+
+
+def 초기총자산원금계산(최적화결과=None, 비주식자산df=None, 현금성자산df=None):
+    """현재 입력 데이터를 기준으로 초기 총 자산원금 제안값을 계산합니다.
+    계산 기준: 보유 주식 투자원금 + 비주식자산 원금(현금성 중복 제외) + 신규 현금성자산 원금
+    """
+    주식원금 = 0.0
+    try:
+        if isinstance(최적화결과, dict):
+            보유 = 최적화결과.get("보유계산포트폴리오", pd.DataFrame())
+            주식원금 = _원금숫자합계(보유, ["투자원금", "원금", "매수금액"])
+    except Exception:
+        주식원금 = 0.0
+
+    비주식원본 = IRP비주식자산표준열맞추기(비주식자산df if 비주식자산df is not None else IRP비주식자산불러오기())
+    현금 = 현금성자산표준화(현금성자산df if 현금성자산df is not None else 현금성자산불러오기())
+    비주식중복제외 = 비주식현금성자산제외(비주식원본, 현금)
+    비주식원금 = _원금숫자합계(비주식중복제외, ["원금"])
+    현금원금 = _원금숫자합계(현금, ["원금"])
+
+    합계 = float(주식원금 + 비주식원금 + 현금원금)
+    상세 = {
+        "주식원금": round(주식원금),
+        "비주식원금_현금중복제외": round(비주식원금),
+        "현금성자산원금": round(현금원금),
+        "초기총자산원금": round(합계),
+        "비주식현금성제외건수": int(max(len(비주식원본) - len(비주식중복제외), 0)),
+    }
+    return round(합계), 상세
+
+
+def 초기설정원금존재여부(원금원장df=None):
+    원장 = 원금변동원장표준화(원금원장df if 원금원장df is not None else 원금변동원장불러오기())
+    if 원장.empty:
+        return False
+    유형 = 원장["유형"].astype(str).str.strip()
+    메모 = 원장["메모"].astype(str)
+    return bool(((유형 == "초기설정") | 메모.str.contains("초기 총 자산원금", na=False)).any())
+
+
+def 초기총자산원금행생성(금액, 기준일=None, 메모="초기 총 자산원금 기준값"):
+    기준일 = 기준일 or 서울현재시각().strftime("%Y-%m-%d")
+    return {
+        "일자": 날짜값_YYYYMMDD문자열(기준일),
+        "유형": "초기설정",
+        "출처": "현재 통합자산",
+        "도착": "원금변동원장",
+        "금액": float(금액 or 0),
+        "총원금반영": "증가",
+        "메모": 메모,
+    }
+
+
+def 초기총자산원금자동생성(최적화결과=None, 기준일=None, 사용자확정금액=None):
+    """원금변동원장이 비어 있거나 초기설정 행이 없을 때 1회만 초기 원금 기준값을 저장합니다."""
+    원장 = 원금변동원장표준화(원금변동원장불러오기())
+    if 초기설정원금존재여부(원장):
+        return False, "이미 초기 총 자산원금 기준값이 존재합니다. 중복 생성을 차단했습니다.", 원장, {}
+
+    계산금액, 상세 = 초기총자산원금계산(최적화결과)
+    저장금액 = float(사용자확정금액 if 사용자확정금액 is not None else 계산금액)
+    if 저장금액 <= 0:
+        return False, "초기 총 자산원금 제안값이 0원입니다. 비주식자산·현금성자산·거래이력 입력을 먼저 확인해 주세요.", 원장, 상세
+
+    새행 = 초기총자산원금행생성(저장금액, 기준일=기준일)
+    저장대상 = pd.concat([원장, pd.DataFrame([새행])], ignore_index=True)
+    저장대상 = 원금변동원장표준화(저장대상)
+    성공, 메시지 = 원금변동원장저장(저장대상)
+    if 성공:
+        return True, f"초기 총 자산원금 기준값을 저장했습니다: {원화정수포맷(저장금액)}", 저장대상, 상세
+    return False, 메시지, 원장, 상세
+
+
+def 현금성자산요약행생성(cash_df):
+    작업 = 현금성자산표준화(cash_df)
+    if 작업.empty:
+        return pd.DataFrame(columns=["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"])
+    결과 = pd.DataFrame({
+        "계좌": 작업["계좌"],
+        "자산군": "현금성자산",
+        "상품명": 작업["유형"],
+        "원금": 작업["원금"],
+        "평가금액": 작업["평가금액"],
+        "평가손익": 작업["평가금액"] - 작업["원금"],
+        "수익률": np.where(작업["원금"] != 0, (작업["평가금액"] - 작업["원금"]) / 작업["원금"] * 100, 0),
+        "비고": 작업["메모"],
+    })
+    return 결과
+
+
+
+def _대시보드숫자합계(df, 후보열목록):
+    try:
+        작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+        if 작업.empty:
+            return 0.0
+        for 열 in 후보열목록:
+            if 열 in 작업.columns:
+                return float(pd.to_numeric(작업[열], errors="coerce").fillna(0).sum())
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def 통합자산대시보드데이터생성(최적화결과=None):
+    """거래이력·비주식자산·현금성자산·원금변동원장을 한 화면에서 보기 위한 통합 데이터 생성."""
+    보유 = pd.DataFrame()
+    계산 = pd.DataFrame()
+    try:
+        if isinstance(최적화결과, dict):
+            보유 = pd.DataFrame(최적화결과.get("보유계산포트폴리오", pd.DataFrame())).copy()
+            계산 = pd.DataFrame(최적화결과.get("계산포트폴리오", pd.DataFrame())).copy()
+    except Exception:
+        보유 = pd.DataFrame()
+        계산 = pd.DataFrame()
+
+    if not 보유.empty and "데이터상태" in 보유.columns:
+        보유 = 보유[보유["데이터상태"].astype(str) == "정상"].copy()
+
+    주식원금 = _대시보드숫자합계(보유, ["투자원금", "원금", "매수금액"])
+    주식평가 = _대시보드숫자합계(보유, ["평가금액", "현재평가금액", "평가액"])
+    주식평가손익 = _대시보드숫자합계(보유, ["평가손익"])
+    if 주식평가손익 == 0 and 주식평가 != 0:
+        주식평가손익 = 주식평가 - 주식원금
+
+    실현손익 = _대시보드숫자합계(계산, ["실현손익", "누적실현손익"])
+
+    비주식원본 = IRP비주식자산표준열맞추기(IRP비주식자산불러오기())
+    현금 = 현금성자산표준화(현금성자산불러오기())
+    비주식 = 비주식현금성자산제외(비주식원본, 현금)
+
+    비주식원금 = _대시보드숫자합계(비주식, ["원금"])
+    비주식평가 = _대시보드숫자합계(비주식, ["평가금액", "평가액"])
+    비주식평가손익 = 비주식평가 - 비주식원금
+
+    현금원금 = _대시보드숫자합계(현금, ["원금"])
+    현금평가 = _대시보드숫자합계(현금, ["평가금액", "평가액"])
+    현금평가손익 = 현금평가 - 현금원금
+
+    원장 = 원금변동원장표준화(원금변동원장불러오기())
+    관리기준원금 = 관리기준총원금계산(원장)
+
+    총원금 = 주식원금 + 비주식원금 + 현금원금
+    총평가 = 주식평가 + 비주식평가 + 현금평가
+    총평가손익 = 총평가 - 총원금
+    총손익 = 총평가손익 + 실현손익
+    수익률 = (총손익 / 관리기준원금 * 100) if 관리기준원금 else ((총손익 / 총원금 * 100) if 총원금 else 0)
+    평가수익률 = (총평가손익 / 총원금 * 100) if 총원금 else 0
+    검증차이 = 관리기준원금 - 총원금 if 관리기준원금 else 0
+
+    자산군행 = [
+        {"자산군": "주식", "원금": 주식원금, "평가금액": 주식평가, "평가손익": 주식평가손익, "상품수": len(보유) if not 보유.empty else 0},
+        {"자산군": "비주식자산", "원금": 비주식원금, "평가금액": 비주식평가, "평가손익": 비주식평가손익, "상품수": len(비주식) if not 비주식.empty else 0},
+        {"자산군": "현금성자산", "원금": 현금원금, "평가금액": 현금평가, "평가손익": 현금평가손익, "상품수": len(현금) if not 현금.empty else 0},
+    ]
+    자산군요약 = pd.DataFrame(자산군행)
+    자산군요약["수익률"] = np.where(자산군요약["원금"] != 0, 자산군요약["평가손익"] / 자산군요약["원금"] * 100, 0)
+    자산군요약["전체비중"] = np.where(총평가 != 0, 자산군요약["평가금액"] / 총평가 * 100, 0)
+    자산군요약 = 자산군요약[(자산군요약["원금"] != 0) | (자산군요약["평가금액"] != 0) | (자산군요약["상품수"] != 0)].copy()
+
+    상세목록 = []
+    if not 보유.empty:
+        for _, r in 보유.iterrows():
+            원금 = float(pd.to_numeric(pd.Series([r.get("투자원금", r.get("원금", 0))]), errors="coerce").fillna(0).iloc[0])
+            평가 = float(pd.to_numeric(pd.Series([r.get("평가금액", r.get("평가액", 0))]), errors="coerce").fillna(0).iloc[0])
+            손익 = float(pd.to_numeric(pd.Series([r.get("평가손익", 평가 - 원금)]), errors="coerce").fillna(0).iloc[0])
+            상세목록.append({
+                "계좌": str(r.get("계좌", "미래에셋/증권계좌") or "미래에셋/증권계좌"),
+                "자산군": "주식" if str(r.get("종목명", r.get("상품명", ""))) != "KODEX 200" else "ETF",
+                "상품명": str(r.get("종목명", r.get("상품명", ""))),
+                "원금": 원금, "평가금액": 평가, "평가손익": 손익,
+                "비고": str(r.get("비고", "실시간/준실시간 시세 반영") or "실시간/준실시간 시세 반영"),
+            })
+    if not 비주식.empty:
+        for _, r in 비주식.iterrows():
+            원금 = float(r.get("원금", 0) or 0)
+            평가 = float(r.get("평가금액", 0) or 0)
+            상세목록.append({"계좌": r.get("계좌", ""), "자산군": r.get("자산군", "비주식자산"), "상품명": r.get("상품명", ""), "원금": 원금, "평가금액": 평가, "평가손익": 평가 - 원금, "비고": r.get("비고", "")})
+    if not 현금.empty:
+        for _, r in 현금.iterrows():
+            원금 = float(r.get("원금", 0) or 0)
+            평가 = float(r.get("평가금액", 0) or 0)
+            상세목록.append({"계좌": r.get("계좌", ""), "자산군": "현금성자산", "상품명": r.get("유형", "현금성자산"), "원금": 원금, "평가금액": 평가, "평가손익": 평가 - 원금, "비고": r.get("메모", "")})
+    상세 = pd.DataFrame(상세목록)
+    if not 상세.empty:
+        상세["수익률"] = np.where(상세["원금"] != 0, 상세["평가손익"] / 상세["원금"] * 100, 0)
+        상세["전체비중"] = np.where(총평가 != 0, 상세["평가금액"] / 총평가 * 100, 0)
+
+    if not 상세.empty:
+        계좌요약 = 상세.groupby("계좌", dropna=False).agg(원금=("원금", "sum"), 평가금액=("평가금액", "sum"), 평가손익=("평가손익", "sum"), 상품수=("상품명", "count")).reset_index()
+        계좌요약["수익률"] = np.where(계좌요약["원금"] != 0, 계좌요약["평가손익"] / 계좌요약["원금"] * 100, 0)
+        계좌요약["전체비중"] = np.where(총평가 != 0, 계좌요약["평가금액"] / 총평가 * 100, 0)
+    else:
+        계좌요약 = pd.DataFrame(columns=["계좌", "원금", "평가금액", "평가손익", "상품수", "수익률", "전체비중"])
+
+    지표 = {
+        "관리기준원금": 관리기준원금,
+        "입력자산원금": 총원금,
+        "현재평가액": 총평가,
+        "평가손익": 총평가손익,
+        "실현손익": 실현손익,
+        "총손익": 총손익,
+        "수익률": 수익률,
+        "평가수익률": 평가수익률,
+        "검증차이": 검증차이,
+        "비주식현금성제외건수": int(max(len(비주식원본) - len(비주식), 0)),
+    }
+    자산군순서 = {"주식": 1, "ETF": 2, "TDF": 3, "정기예금": 4, "비주식자산": 5, "현금성자산": 6}
+    if not 상세.empty:
+        상세["자산군정렬"] = 상세["자산군"].map(자산군순서).fillna(99)
+        상세 = 상세.sort_values(["자산군정렬", "계좌", "평가금액"], ascending=[True, True, False]).drop(columns=["자산군정렬"])
+    if not 자산군요약.empty:
+        자산군요약["자산군정렬"] = 자산군요약["자산군"].map(자산군순서).fillna(99)
+        자산군요약 = 자산군요약.sort_values(["자산군정렬", "평가금액"], ascending=[True, False]).drop(columns=["자산군정렬"])
+    return 지표, 계좌요약.sort_values("평가금액", ascending=False), 자산군요약, 상세
+
+
+def 통합자산대시보드UI(최적화결과=None):
+    st.markdown("#### 통합 자산 대시보드")
+    st.caption("거래이력, 비주식자산, 현금성자산, 원금변동원장을 한 화면에서 통합해 보여줍니다.")
+    지표, 계좌요약, 자산군요약, 상세 = 통합자산대시보드데이터생성(최적화결과)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("관리 기준 원금", 원화정수포맷(지표.get("관리기준원금", 0)))
+    c2.metric("현재 총 평가액", 원화정수포맷(지표.get("현재평가액", 0)))
+    c3.metric("총 손익", 손익원화문자열(지표.get("총손익", 0)), f"{지표.get('수익률', 0):,.2f}%")
+    c4.metric("원금 검증 차이", 손익원화문자열(지표.get("검증차이", 0)))
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("입력자산 원금", 원화정수포맷(지표.get("입력자산원금", 0)))
+    c6.metric("평가손익", 손익원화문자열(지표.get("평가손익", 0)), f"{지표.get('평가수익률', 0):,.2f}%")
+    c7.metric("실현손익", 손익원화문자열(지표.get("실현손익", 0)))
+    c8.metric("현금 중복 제외", f"{지표.get('비주식현금성제외건수', 0):,.0f}건")
+
+    if abs(float(지표.get("검증차이", 0) or 0)) <= 1:
+        st.success("원금변동원장 기준 원금과 입력자산 기준 원금이 일치합니다.")
+    elif 지표.get("관리기준원금", 0):
+        st.warning("원금변동원장 기준 원금과 입력자산 기준 원금에 차이가 있습니다. 최근 입금·인출 또는 자산 재분류 여부를 확인하세요.")
+    else:
+        st.info("관리 기준 원금이 아직 없습니다. 원금변동원장에서 초기 총 자산원금을 먼저 저장하세요.")
+
+    차트1, 차트2 = st.columns(2)
+    with 차트1:
+        st.markdown("##### 자산군별 비중")
+        if PLOTLY_AVAILABLE and not 자산군요약.empty:
+            fig = go.Figure(data=[go.Pie(labels=자산군요약["자산군"], values=자산군요약["평가금액"], hole=0.45)])
+            fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h"))
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+        else:
+            st.info("자산군별 차트를 표시할 데이터가 없습니다.")
+    with 차트2:
+        st.markdown("##### 계좌별 평가액")
+        if PLOTLY_AVAILABLE and not 계좌요약.empty:
+            fig = go.Figure(data=[go.Bar(
+                x=계좌요약["계좌"],
+                y=계좌요약["평가금액"],
+                text=계좌요약["평가금액"].apply(원화정수포맷),
+                textposition="outside",
+                width=[0.38] * len(계좌요약),
+                cliponaxis=False,
+            )])
+            fig.update_layout(
+                height=360,
+                margin=dict(l=10, r=10, t=30, b=80),
+                yaxis_title="평가금액",
+                bargap=0.55,
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+        else:
+            st.info("계좌별 차트를 표시할 데이터가 없습니다.")
+
+    st.markdown("##### 계좌별 요약")
+    if not 계좌요약.empty:
+        표시 = 계좌요약.copy()
+        try:
+            표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%", "상품수": lambda v: f"{float(v):,.0f}개"}).map(손익색상, subset=["평가손익"]), use_container_width=True, hide_index=True)
+        except Exception:
+            표데이터프레임(표시, use_container_width=True, hide_index=True)
+
+    st.markdown("##### 자산군별 요약")
+    if not 자산군요약.empty:
+        표시 = 자산군요약.copy()
+        try:
+            표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%", "상품수": lambda v: f"{float(v):,.0f}개"}).map(손익색상, subset=["평가손익"]), use_container_width=True, hide_index=True)
+        except Exception:
+            표데이터프레임(표시, use_container_width=True, hide_index=True)
+
+    with st.expander("상세 구성 보기", expanded=False):
+        if 상세 is None or 상세.empty:
+            st.info("상세 구성을 표시할 데이터가 없습니다.")
+        else:
+            표시 = 상세.copy()
+            try:
+                표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%"}).map(손익색상, subset=["평가손익"]), use_container_width=True, hide_index=True)
+            except Exception:
+                표데이터프레임(표시, use_container_width=True, hide_index=True)
+
+def 자산원장UI(최적화결과=None):
+    st.markdown("### 자산 원장")
+    st.caption("현금성자산과 원금변동원장을 별도 관리합니다. 신규 현금성자산 시트에 값이 있으면 기존 비주식자산의 현금성자산 중복 반영을 방지합니다.")
+    대시탭, 현금탭, 원금탭, 요약탭 = st.tabs(["통합 대시보드", "현금성자산", "원금변동원장", "원금·현금 요약"])
+
+    with 대시탭:
+        통합자산대시보드UI(최적화결과)
+
+    with 현금탭:
+        st.markdown("#### 현금성자산 관리")
+        현재현금 = 현금성자산불러오기()
+        이관후보 = 비주식현금성자산자동이관표()
+        if 현재현금.empty and not 이관후보.empty:
+            st.warning(f"현금성자산 시트가 비어 있습니다. 비주식자산에서 현금성 항목 {len(이관후보)}건을 자동 이관할 수 있습니다.")
+        elif 현재현금.empty:
+            st.info("현금성자산 시트가 비어 있습니다. 직접 입력하거나 비주식자산 데이터를 먼저 확인하세요.")
+        편집현금 = st.data_editor(
+            현재현금,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="cash_assets_editor_v51446",
+            column_config={
+                "기준일": st.column_config.TextColumn("기준일"),
+                "계좌": st.column_config.TextColumn("계좌"),
+                "유형": st.column_config.SelectboxColumn("유형", options=["예수금", "CMA", "현금성 대기자산", "MMDA", "입출금통장", "기타"]),
+                "원금": st.column_config.NumberColumn("원금", min_value=0, step=10000, format="%,d"),
+                "평가금액": st.column_config.NumberColumn("평가금액", min_value=0, step=10000, format="%,d"),
+                "메모": st.column_config.TextColumn("메모"),
+            },
+        )
+        표시현금 = 현금성자산표준화(편집현금)
+        if not 표시현금.empty:
+            표시현금2 = 표시현금.copy()
+            표시현금2["평가손익"] = 표시현금2["평가금액"] - 표시현금2["원금"]
+            try:
+                표데이터프레임(표시현금2.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열}).map(손익색상, subset=["평가손익"]), use_container_width=True)
+            except Exception:
+                표데이터프레임(표시현금2, use_container_width=True)
+        버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.4, 5])
+        with 버튼1:
+            if st.button("현금성자산 저장", key="save_cash_assets_v51446", use_container_width=True):
+                성공, 메시지 = 현금성자산저장(편집현금)
+                if 성공:
+                    st.success("현금성자산을 저장했습니다.")
+                    st.rerun()
+                else:
+                    st.error(메시지)
+        with 버튼2:
+            if st.button("비주식 현금성자산 자동 이관", key="auto_migrate_cash_assets_v51449", use_container_width=True):
+                성공, 메시지, 결과 = 현금성자산초기자동이관(force=False)
+                if 성공:
+                    st.success(메시지)
+                    st.rerun()
+                else:
+                    st.warning(메시지)
+        with 버튼3:
+            st.caption("전환 단계에서는 신규 현금성자산 시트에 값이 있으면 기존 비주식자산의 현금성자산은 통합 계산에서 제외됩니다.")
+
+    with 원금탭:
+        st.markdown("#### 원금변동원장")
+        현재원장 = 원금변동원장불러오기()
+
+        제안원금, 제안상세 = 초기총자산원금계산(최적화결과)
+        초기존재 = 초기설정원금존재여부(현재원장)
+        st.markdown("##### 초기 총 자산원금 기준값")
+        c초1, c초2, c초3, c초4 = st.columns(4)
+        c초1.metric("자동 제안 초기 원금", 원화정수포맷(제안상세.get("초기총자산원금", 제안원금)))
+        c초2.metric("주식 원금", 원화정수포맷(제안상세.get("주식원금", 0)))
+        c초3.metric("비주식 원금", 원화정수포맷(제안상세.get("비주식원금_현금중복제외", 0)))
+        c초4.metric("현금성자산 원금", 원화정수포맷(제안상세.get("현금성자산원금", 0)))
+
+        if 제안상세.get("비주식현금성제외건수", 0) > 0:
+            st.caption(f"신규 현금성자산 시트 사용으로 기존 비주식자산의 현금성 항목 {제안상세.get('비주식현금성제외건수', 0)}건은 초기 원금 계산에서 제외했습니다.")
+
+        기준일입력 = st.text_input("초기 원금 기준일", value=서울현재시각().strftime("%Y-%m-%d"), key="initial_principal_date_v51448")
+        확정원금입력 = st.number_input(
+            "초기 총 자산원금 확정금액",
+            min_value=0,
+            value=int(제안상세.get("초기총자산원금", 제안원금) or 0),
+            step=100000,
+            format="%d",
+            key="initial_principal_amount_v51448",
+        )
+
+        if 현재원장.empty and 현금성자산표준화(현금성자산불러오기()).empty:
+            st.warning("현금성자산과 원금변동원장이 모두 비어 있습니다. 아래 버튼으로 초기 운영 데이터를 한 번에 생성할 수 있습니다.")
+            if st.button("현금 이관 + 초기 원금 일괄 생성", key="cash_principal_auto_init_v51449", use_container_width=True):
+                성공, 메시지 = 현금성자산및초기원금일괄초기화(
+                    최적화결과=최적화결과,
+                    기준일=기준일입력,
+                    사용자확정금액=확정원금입력,
+                )
+                if 성공:
+                    st.success(메시지)
+                    st.rerun()
+                else:
+                    st.error(메시지)
+
+        b초1, b초2 = st.columns([1.4, 4])
+        with b초1:
+            if st.button("초기 총 자산원금 저장", key="save_initial_principal_v51448", use_container_width=True, disabled=초기존재):
+                성공, 메시지, 저장대상, 상세 = 초기총자산원금자동생성(
+                    최적화결과=최적화결과,
+                    기준일=기준일입력,
+                    사용자확정금액=확정원금입력,
+                )
+                if 성공:
+                    st.success(메시지)
+                    st.rerun()
+                else:
+                    st.error(메시지)
+        with b초2:
+            if 초기존재:
+                st.success("초기 총 자산원금 기준값이 이미 설정되어 있습니다. 중복 생성을 차단했습니다.")
+            else:
+                st.caption("이 값은 이후 입금·인출과 투자손익을 구분하기 위한 기준점입니다. 자동 제안값을 확인한 뒤 필요하면 직접 수정해 저장하세요.")
+
+        편집원장 = st.data_editor(
+            현재원장,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="principal_ledger_editor_v51446",
+            column_config={
+                "일자": st.column_config.TextColumn("일자"),
+                "유형": st.column_config.SelectboxColumn("유형", options=["초기설정", "외부입금", "외부인출", "생활비인출", "세금", "수수료", "계좌이동", "원금조정", "기타"]),
+                "출처": st.column_config.TextColumn("출처"),
+                "도착": st.column_config.TextColumn("도착"),
+                "금액": st.column_config.NumberColumn("금액", min_value=0, step=10000, format="%,d"),
+                "총원금반영": st.column_config.SelectboxColumn("총원금반영", options=["증가", "감소", "미반영"]),
+                "메모": st.column_config.TextColumn("메모"),
+            },
+        )
+        표시원장 = 원금변동원장표준화(편집원장)
+        if not 표시원장.empty:
+            try:
+                표데이터프레임(표시원장.style.format({"금액": 원화정수포맷}), use_container_width=True)
+            except Exception:
+                표데이터프레임(표시원장, use_container_width=True)
+        if st.button("원금변동원장 저장", key="save_principal_ledger_v51446", use_container_width=True):
+            성공, 메시지 = 원금변동원장저장(편집원장)
+            if 성공:
+                st.success("원금변동원장을 저장했습니다.")
+                st.rerun()
+            else:
+                st.error(메시지)
+
+    with 요약탭:
+        st.markdown("#### 원금·현금 요약")
+        st.caption("현금성자산, 입력자산 원금, 원금변동원장 기준 원금을 한 번에 검증합니다. 중복되는 현금 항목은 제외하고 핵심 차이만 보여줍니다.")
+        현금 = 현금성자산표준화(현금성자산불러오기())
+        원장 = 원금변동원장표준화(원금변동원장불러오기())
+        총현금원금 = 현금["원금"].sum() if not 현금.empty else 0
+        총현금평가 = 현금["평가금액"].sum() if not 현금.empty else 0
+        관리원금 = 관리기준총원금계산(원장)
+        제안원금, 제안상세 = 초기총자산원금계산(최적화결과)
+        입력원금 = 제안상세.get("초기총자산원금", 제안원금)
+        원금차이 = 관리원금 - 입력원금 if 관리원금 else 0
+
+        a1, a2, a3 = st.columns(3)
+        a1.metric("① 입력자산 원금 합계", 원화정수포맷(입력원금))
+        a2.metric("② 원금변동원장 기준 원금", 원화정수포맷(관리원금))
+        a3.metric("③ 검증 차이", 손익원화문자열(원금차이))
+
+        b1, b2, b3 = st.columns(3)
+        b1.metric("현금성자산 원금", 원화정수포맷(총현금원금))
+        b2.metric("현금성자산 평가금액", 원화정수포맷(총현금평가))
+        b3.metric("현금성자산 손익", 손익원화문자열(총현금평가 - 총현금원금))
+
+        설명표 = pd.DataFrame([
+            {"구분": "주식 원금", "금액": 제안상세.get("주식원금", 0), "의미": "거래이력에서 계산된 현재 보유 주식의 투자원금"},
+            {"구분": "비주식 원금", "금액": 제안상세.get("비주식원금_현금중복제외", 0), "의미": "TDF·정기예금 등. 현금성자산 시트와 중복되는 항목은 제외"},
+            {"구분": "현금성자산 원금", "금액": 제안상세.get("현금성자산원금", 0), "의미": "CMA·예수금·현금성 대기자산 등 별도 시트 기준"},
+            {"구분": "입력자산 원금 합계", "금액": 입력원금, "의미": "현재 입력된 자산 원금의 합계"},
+            {"구분": "원금변동원장 기준 원금", "금액": 관리원금, "의미": "초기설정 + 이후 입금 - 인출로 관리되는 기준 원금"},
+            {"구분": "검증 차이", "금액": 원금차이, "의미": "0원이면 입력자산 원금과 원금변동원장이 일치"},
+        ])
+        try:
+            표데이터프레임(설명표.style.format({"금액": 손익원화문자열}).map(손익색상, subset=["금액"]), use_container_width=True, hide_index=True)
+        except Exception:
+            표데이터프레임(설명표, use_container_width=True, hide_index=True)
+
+        if 관리원금 == 0:
+            st.info("원금변동원장이 아직 비어 있습니다. 먼저 초기 총 자산원금 기준값을 저장하세요.")
+        elif abs(float(원금차이 or 0)) <= 1:
+            st.success("정상입니다. 입력자산 원금 합계와 원금변동원장 기준 원금이 일치합니다.")
+        else:
+            st.warning("입력자산 원금 합계와 원금변동원장 기준 원금이 다릅니다. 최근 입금·인출, 현금성자산 이관, 비주식자산 재분류 여부를 확인하세요.")
+
+
+def 기본IRP비주식자산표():
+    """Jone 기준 비주식·현금성 자산 복원값입니다.
+    주의: 이 값은 Google Sheets를 자동으로 덮어쓰지 않습니다.
+    사용자가 명시적으로 복원을 확인한 경우에만 저장됩니다.
+    """
+    return pd.DataFrame([
+        {"계좌": "신한은행 IRP", "자산군": "TDF", "상품명": "TDF2035", "원금": 50000000, "평가금액": 53255265, "예상연수익률": 6.50, "만기일": "", "반영일자": "2026-05-19", "비고": "평가금액은 직접 입력"},
+        {"계좌": "신한은행 IRP", "자산군": "TDF", "상품명": "TDF2045", "원금": 30000000, "평가금액": 32580265, "예상연수익률": 8.60, "만기일": "", "반영일자": "2026-05-19", "비고": "평가금액은 직접 입력"},
+        {"계좌": "신한은행 IRP", "자산군": "정기예금", "상품명": "푸본현대생명 정기예금", "원금": 0, "평가금액": 0, "예상연수익률": 3.10, "만기일": "", "반영일자": "2026-05-19", "비고": "해지"},
+        {"계좌": "신한은행 IRP", "자산군": "현금성자산", "상품명": "현금성 대기자산", "원금": 51866314, "평가금액": 51866314, "예상연수익률": 2.30, "만기일": "", "반영일자": "2026-05-19", "비고": "예수금·MMDA 등 수동 입력"},
+        {"계좌": "미래에셋/증권계좌", "자산군": "현금성자산", "상품명": "예수금", "원금": 172218, "평가금액": 172218, "예상연수익률": 0.0, "만기일": "", "반영일자": "2026-05-19", "비고": "CMA/예수금"},
     ])
 
 
@@ -2147,101 +3048,6 @@ def IRP비주식자산표준열맞추기(df):
 
 
 
-def IRP비주식자산검증표생성(df):
-    """비주식·현금성 자산 입력값을 원본 기준으로 검증합니다.
-    - 반영일자는 필수이며 YYYY-MM-DD 형식이어야 합니다.
-    - 빈 동적 입력 행은 검증 대상에서 제외합니다.
-    - 저장 전 같은 검증을 다시 실행해 오류가 있으면 Google Sheets 저장을 차단합니다.
-    """
-    표준열 = ["계좌", "자산군", "상품명", "원금", "평가금액", "예상연수익률", "만기일", "반영일자", "비고"]
-    원본 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
-
-    컬럼변환 = {}
-    if "수익률(%)" in 원본.columns and "예상연수익률" not in 원본.columns:
-        컬럼변환["수익률(%)"] = "예상연수익률"
-    if "기준일" in 원본.columns and "반영일자" not in 원본.columns:
-        컬럼변환["기준일"] = "반영일자"
-    if 컬럼변환:
-        원본 = 원본.rename(columns=컬럼변환)
-
-    for 열 in 표준열:
-        if 열 not in 원본.columns:
-            원본[열] = ""
-
-    원본 = 원본[표준열].copy()
-    점검결과 = []
-
-    def _문자(값):
-        try:
-            if pd.isna(값):
-                return ""
-        except Exception:
-            pass
-        문자 = str(값).strip()
-        return "" if 문자 in ["", "nan", "NaT", "None", "nat"] else 문자
-
-    def _날짜정상여부(값):
-        문자 = _문자(값)
-        if not 문자:
-            return False
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", 문자):
-            # Google Sheets/Excel에서 날짜가 datetime 형태로 넘어온 경우는 변환 가능하면 허용
-            try:
-                변환 = pd.to_datetime(값, errors="coerce")
-                return not pd.isna(변환)
-            except Exception:
-                return False
-        try:
-            변환 = pd.to_datetime(문자, errors="coerce")
-            return not pd.isna(변환)
-        except Exception:
-            return False
-
-    for idx, 행 in 원본.reset_index(drop=True).iterrows():
-        행번호 = idx + 1
-        계좌 = _문자(행.get("계좌"))
-        자산군 = _문자(행.get("자산군"))
-        상품명 = _문자(행.get("상품명"))
-        반영일자 = _문자(행.get("반영일자"))
-        만기일 = _문자(행.get("만기일"))
-        원금문자 = _문자(행.get("원금"))
-        평가문자 = _문자(행.get("평가금액"))
-        수익률문자 = _문자(행.get("예상연수익률"))
-
-        # data_editor의 완전 빈 추가 행은 무시합니다.
-        핵심값 = [계좌, 자산군, 상품명, 원금문자, 평가문자, 수익률문자, 만기일, 반영일자]
-        if not any(값 != "" for 값 in 핵심값):
-            continue
-
-        if not 계좌:
-            점검결과.append({"행": 행번호, "점검항목": "계좌", "현재값": "공란", "권장사항": "계좌명을 입력"})
-        if not 자산군:
-            점검결과.append({"행": 행번호, "점검항목": "자산군", "현재값": "공란", "권장사항": "TDF, 정기예금, 현금성자산 등 자산군 입력"})
-        if not 상품명:
-            점검결과.append({"행": 행번호, "점검항목": "상품명", "현재값": "공란", "권장사항": "상품명 입력"})
-
-        원금 = pd.to_numeric(pd.Series([행.get("원금")]), errors="coerce").iloc[0]
-        평가금액 = pd.to_numeric(pd.Series([행.get("평가금액")]), errors="coerce").iloc[0]
-        예상수익률 = pd.to_numeric(pd.Series([행.get("예상연수익률")]), errors="coerce").iloc[0]
-
-        if pd.isna(원금) or float(원금) <= 0:
-            점검결과.append({"행": 행번호, "점검항목": "원금", "현재값": 원금문자 or "공란", "권장사항": "0보다 큰 원금 입력"})
-        if pd.isna(평가금액) or float(평가금액) < 0:
-            점검결과.append({"행": 행번호, "점검항목": "평가금액", "현재값": 평가문자 or "공란", "권장사항": "0 이상 평가금액 입력"})
-        if pd.isna(예상수익률):
-            점검결과.append({"행": 행번호, "점검항목": "예상연수익률", "현재값": 수익률문자 or "공란", "권장사항": "숫자 형식으로 입력"})
-
-        if not 반영일자:
-            점검결과.append({"행": 행번호, "점검항목": "반영일자", "현재값": "공란", "권장사항": "YYYY-MM-DD 형식으로 반영일자 입력"})
-        elif not _날짜정상여부(반영일자):
-            점검결과.append({"행": 행번호, "점검항목": "반영일자 형식", "현재값": 반영일자, "권장사항": "YYYY-MM-DD 형식으로 입력"})
-
-        if 만기일 and not _날짜정상여부(만기일):
-            점검결과.append({"행": 행번호, "점검항목": "만기일 형식", "현재값": 만기일, "권장사항": "YYYY-MM-DD 형식으로 입력하거나 비워두기"})
-
-    return pd.DataFrame(점검결과, columns=["행", "점검항목", "현재값", "권장사항"])
-
-
 def IRP비주식자산불러오기():
     """비주식자산을 Google Sheets에서만 불러옵니다.
     Google Sheets 연결 실패 시 과거 로컬 JSON/기본값을 표시하지 않습니다.
@@ -2268,17 +3074,131 @@ def IRP비주식자산저장(df):
     if not 연결됨:
         return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
 
-    저장전검증표 = IRP비주식자산검증표생성(df)
-    if 저장전검증표 is not None and not 저장전검증표.empty:
-        대표오류 = 저장전검증표.iloc[0].to_dict()
-        return False, f"비주식·현금성 자산 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
-
     작업 = IRP비주식자산표준열맞추기(df)
+
+    # v5.14.40 안전장치: 예전 샘플값(2026-04-30 기준)이 실수로 다시 저장되는 것을 차단합니다.
+    try:
+        구버전기준일 = 작업["반영일자"].astype(str).str.contains("2026-04-30", na=False).sum()
+        구버전금액패턴 = (
+            작업["평가금액"].astype(float).isin([51873538, 31443846, 27499444, 5030813, 17188280]).sum()
+        )
+        if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
+            return False, "저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다."
+    except Exception:
+        pass
+
     저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_NON_STOCK_SHEET, 작업)
     if 저장성공:
         st.session_state["irp_non_stock_assets_df_v512"] = 작업
         return True, 저장메시지
     return False, 저장메시지
+
+def IRP비주식자산검증표생성(df):
+    작업 = IRP비주식자산표준열맞추기(df)
+    결과 = []
+    for idx, 행 in 작업.reset_index(drop=True).iterrows():
+        행번호 = idx + 1
+        원금 = float(pd.to_numeric(pd.Series([행.get("원금", 0)]), errors="coerce").fillna(0).iloc[0])
+        평가금액 = float(pd.to_numeric(pd.Series([행.get("평가금액", 0)]), errors="coerce").fillna(0).iloc[0])
+        비고 = str(행.get("비고", "") or "").strip()
+        상품명 = str(행.get("상품명", "") or "").strip()
+        만기일 = str(행.get("만기일", "") or "").strip()
+        해지상품 = "해지" in 비고
+
+        if 원금 <= 0 and 평가금액 <= 0:
+            if 해지상품:
+                continue
+            결과.append({
+                "행": 행번호,
+                "점검항목": "원금/평가금액",
+                "현재값": 원화정수포맷(원금),
+                "권장사항": "운용 중인 상품이면 원금 또는 평가금액을 입력",
+                "상세설명": f"'{상품명}' 항목의 원금과 평가금액이 모두 0원입니다. 실제 보유 중인 상품인지 확인해 주세요.",
+            })
+            continue
+
+        if 원금 <= 0 and 평가금액 > 0:
+            if 해지상품:
+                결과.append({
+                    "행": 행번호,
+                    "점검항목": "해지 상품 확인",
+                    "현재값": 원화정수포맷(원금),
+                    "권장사항": "비고에 해지 표시가 있으므로 원금 0원은 허용됩니다",
+                    "상세설명": f"'{상품명}' 항목은 해지 상품으로 보입니다. 평가금액도 0원인지 함께 확인하면 더 정확합니다.",
+                })
+            else:
+                결과.append({
+                    "행": 행번호,
+                    "점검항목": "원금",
+                    "현재값": 원화정수포맷(원금),
+                    "권장사항": "평가금액이 있으면 원금도 함께 입력",
+                    "상세설명": f"'{상품명}' 항목은 평가금액이 있으나 원금이 0원입니다. 수익률 계산이 왜곡될 수 있습니다.",
+                })
+
+        if 원금 > 0 and 평가금액 <= 0 and not 해지상품:
+            결과.append({
+                "행": 행번호,
+                "점검항목": "평가금액",
+                "현재값": 원화정수포맷(평가금액),
+                "권장사항": "현재 평가금액 입력",
+                "상세설명": f"'{상품명}' 항목은 원금이 있으나 평가금액이 0원입니다. 현재 평가액을 입력해 주세요.",
+            })
+
+        if 해지상품 and 원금 == 0 and 평가금액 == 0:
+            # 정상적인 해지 상품은 경고 목록에서 제외합니다.
+            continue
+
+        if 만기일:
+            try:
+                만기 = pd.to_datetime(만기일, errors="coerce")
+                if not pd.isna(만기) and 만기.date() < 서울현재시각().date() and not 해지상품:
+                    결과.append({
+                        "행": 행번호,
+                        "점검항목": "만기일",
+                        "현재값": 만기.strftime("%Y-%m-%d"),
+                        "권장사항": "만기 경과 여부 확인",
+                        "상세설명": f"'{상품명}' 항목은 만기일이 지났습니다. 재예치, 해지, 평가금액 반영 여부를 확인해 주세요.",
+                    })
+            except Exception:
+                pass
+
+    return pd.DataFrame(결과, columns=["행", "점검항목", "현재값", "권장사항", "상세설명"])
+
+
+def 비주식평가금액색상(row):
+    styles = [""] * len(row)
+    try:
+        원금 = float(row.get("원금", 0) or 0)
+        평가 = float(row.get("평가금액", 0) or 0)
+        for 대상열 in ["평가금액", "평가손익"]:
+            if 대상열 in row.index:
+                idx = list(row.index).index(대상열)
+                if 평가 > 원금:
+                    styles[idx] = "color: red; font-weight: 700;"
+                elif 평가 < 원금:
+                    styles[idx] = "color: blue; font-weight: 700;"
+    except Exception:
+        pass
+    return styles
+
+
+def IRP비주식자산표시용스타일(df):
+    표시 = IRP비주식자산표준열맞추기(df)
+    if 표시.empty:
+        return 표시
+    표시 = 표시.copy()
+    표시["평가손익"] = pd.to_numeric(표시["평가금액"], errors="coerce").fillna(0) - pd.to_numeric(표시["원금"], errors="coerce").fillna(0)
+    포맷 = {
+        "원금": 원화정수포맷,
+        "평가금액": 원화정수포맷,
+        "평가손익": 손익원화문자열,
+        "예상연수익률": lambda x: 안전소수포맷(x, 2) + "%",
+    }
+    try:
+        return 표시.style.format(포맷).map(손익색상, subset=["평가손익", "예상연수익률"]).apply(비주식평가금액색상, axis=1)
+    except Exception:
+        return 표시
+
 
 def IRP비주식자산편집UI():
     st.markdown("### 계좌별 비주식·현금성 자산 관리")
@@ -2294,21 +3214,31 @@ def IRP비주식자산편집UI():
                 "계좌": st.column_config.TextColumn("계좌"),
                 "자산군": st.column_config.SelectboxColumn("자산군", options=["TDF", "정기예금", "현금성자산", "채권", "펀드", "기타"]),
                 "상품명": st.column_config.TextColumn("상품명"),
-                "원금": st.column_config.NumberColumn("원금", min_value=0, step=10000, format="%d"),
-                "평가금액": st.column_config.NumberColumn("평가금액", min_value=0, step=10000, format="%d"),
+                "원금": st.column_config.NumberColumn("원금", min_value=0, step=10000, format="%,d"),
+                "평가금액": st.column_config.NumberColumn("평가금액", min_value=0, step=10000, format="%,d"),
                 "예상연수익률": st.column_config.NumberColumn("예상연수익률(%)", step=0.1, format="%.2f"),
                 "만기일": st.column_config.TextColumn("만기일"),
                 "반영일자": st.column_config.TextColumn("반영일자"),
                 "비고": st.column_config.TextColumn("비고"),
             },
         )
-        비주식검증표 = IRP비주식자산검증표생성(편집df)
-        if 비주식검증표 is not None and not 비주식검증표.empty:
-            st.warning(f"비주식·현금성 자산 입력 점검 결과: {len(비주식검증표)}건의 확인 사항이 있습니다.")
-            with st.expander("비주식·현금성 자산 검증 상세 보기", expanded=False):
-                st.dataframe(비주식검증표, use_container_width=True, hide_index=True)
 
-        버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.2, 5])
+        st.caption("입력표는 숫자 입력 안정성을 위해 원 단위 숫자로 저장하고, 아래 표시 기준 보기에서 천 단위 쉼표·원화·손익 색상을 적용해 확인합니다.")
+        표데이터프레임(IRP비주식자산표시용스타일(편집df), use_container_width=True)
+
+        비주식점검표 = IRP비주식자산검증표생성(편집df)
+        if 비주식점검표.empty:
+            st.success("비주식·현금성 자산 입력 점검 결과: 현재 확인된 형식 오류가 없습니다.")
+        else:
+            st.warning(f"비주식·현금성 자산 입력 점검 결과: {len(비주식점검표)}건의 확인 사항이 있습니다.")
+            with st.expander("비주식·현금성 자산 검증 상세 보기", expanded=False):
+                try:
+                    점검표시 = 비주식점검표.copy()
+                    표데이터프레임(index_1부터(점검표시).style.map(손익색상, subset=["현재값"]), use_container_width=True)
+                except Exception:
+                    표데이터프레임(index_1부터(비주식점검표), use_container_width=True)
+
+        버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.6, 4.6])
         with 버튼1:
             if st.button("비주식 자산 저장", key="save_irp_non_stock_assets_v513", use_container_width=True):
                 성공, 메시지 = IRP비주식자산저장(편집df)
@@ -2318,12 +3248,16 @@ def IRP비주식자산편집UI():
                 else:
                     st.error(메시지)
         with 버튼2:
-            if st.button("기본값 복원", key="reset_irp_non_stock_assets_v513", use_container_width=True):
-                IRP비주식자산저장(기본IRP비주식자산표())
-                st.success("기본 비주식·현금성 자산 표로 복원했습니다.")
-                st.rerun()
+            복원확인 = st.checkbox("Jone 기준값 복원 확인", key="confirm_reset_irp_non_stock_assets_v51440")
+            if st.button("Jone 기준값 복원", key="reset_irp_non_stock_assets_v51440", use_container_width=True, disabled=not 복원확인):
+                성공, 메시지 = IRP비주식자산저장(기본IRP비주식자산표())
+                if 성공:
+                    st.success("Jone 기준 비주식·현금성 자산 값으로 복원했습니다.")
+                    st.rerun()
+                else:
+                    st.error(메시지)
         with 버튼3:
-            st.caption("정기예금은 현재 평가를 보수적으로 원금 기준으로 두고, 만기 예상 이자는 비고로 관리하는 방식을 권장합니다.")
+            st.caption("기본값 복원은 Google Sheets 값을 덮어쓰는 작업이므로 확인 체크 후에만 실행됩니다. 정기예금은 해지 상태라면 비고에 '해지'를 유지하고 원금·평가금액 0원으로 둘 수 있습니다.")
     return IRP비주식자산불러오기()
 
 
@@ -2351,6 +3285,12 @@ def 주식ETF자산요약행생성(보유포트폴리오):
 
 def IRP비주식자산요약행생성(irp_df):
     작업 = IRP비주식자산표준열맞추기(irp_df)
+    try:
+        별도현금 = 현금성자산불러오기()
+        if 별도현금 is not None and not 별도현금.empty:
+            작업 = 작업[작업["자산군"].astype(str) != "현금성자산"].copy()
+    except Exception:
+        pass
     작업 = 작업[(작업["원금"] > 0) | (작업["평가금액"] > 0)].copy()
     if 작업.empty:
         return pd.DataFrame(columns=["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"])
@@ -2359,8 +3299,13 @@ def IRP비주식자산요약행생성(irp_df):
     return 작업[["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"]].copy()
 
 
-def 통합자산현황표생성(보유포트폴리오, irp_df):
-    통합 = pd.concat([주식ETF자산요약행생성(보유포트폴리오), IRP비주식자산요약행생성(irp_df)], ignore_index=True)
+def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
+    if cash_df is None:
+        try:
+            cash_df = 현금성자산불러오기()
+        except Exception:
+            cash_df = pd.DataFrame()
+    통합 = pd.concat([주식ETF자산요약행생성(보유포트폴리오), IRP비주식자산요약행생성(irp_df), 현금성자산요약행생성(cash_df)], ignore_index=True)
     if 통합.empty:
         return 통합
     통합["원금"] = pd.to_numeric(통합["원금"], errors="coerce").fillna(0)
@@ -2372,8 +3317,8 @@ def 통합자산현황표생성(보유포트폴리오, irp_df):
     return 통합
 
 
-def 통합자산현황UI(보유포트폴리오, irp_df):
-    통합표 = 통합자산현황표생성(보유포트폴리오, irp_df)
+def 통합자산현황UI(보유포트폴리오, irp_df, cash_df=None):
+    통합표 = 통합자산현황표생성(보유포트폴리오, irp_df, cash_df)
     st.markdown("### 통합 자산 현황")
     if 통합표.empty:
         st.info("통합 자산 현황을 표시할 데이터가 없습니다.")
@@ -2814,10 +3759,6 @@ def 거래이력자동저장실행(df):
         return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
 
     편집df = 거래이력편집용자동보정(df)
-    저장전검증표 = 거래이력통합점검표직접생성(편집df)
-    if 저장전검증표 is not None and not 저장전검증표.empty:
-        대표오류 = 저장전검증표.iloc[0].to_dict()
-        return False, f"거래이력 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
     저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_TRADE_SHEET, 편집df)
     if 저장성공:
         meta = 거래이력저장메타생성(편집df, source="google_sheets")
@@ -2833,10 +3774,6 @@ def 최근업로드거래이력저장(df, 파일명=""):
         return False, f"Google Sheets 연결 실패로 업로드 반영을 중단했습니다: {info.get('메시지', '')}"
 
     편집df = 거래이력편집용자동보정(df)
-    저장전검증표 = 거래이력통합점검표직접생성(편집df)
-    if 저장전검증표 is not None and not 저장전검증표.empty:
-        대표오류 = 저장전검증표.iloc[0].to_dict()
-        return False, f"거래이력 입력 오류 {len(저장전검증표)}건으로 저장을 중단했습니다: {대표오류.get('점검항목', '')} / {대표오류.get('현재값', '')}"
     저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_TRADE_SHEET, 편집df)
     if 저장성공:
         거래이력복원메타저장(거래이력저장메타생성(편집df, source="google_sheets_latest_uploaded", file_name=파일명 or ""))
@@ -2975,7 +3912,6 @@ def 거래이력비교지문(df):
                 return ""
 
 def 거래이력세션반영(df, 저장강제=False, 자동저장허용=True):
-    df = 거래이력빈입력행제거(df)
     편집df = 거래이력편집용자동보정(df)
     계산df = 거래이력계산대상추출(편집df)
 
@@ -3005,33 +3941,11 @@ def 거래이력세션반영(df, 저장강제=False, 자동저장허용=True):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def 거래이력통합점검표캐시(거래이력json문자열):
-    """거래이력 입력 원본 기준 검증표를 생성합니다.
-    계산대상만 검증하면 '지출'처럼 잘못된 거래구분 행이 계산에서 제외되며 오류도 숨겨질 수 있으므로,
-    반드시 편집 원본 전체를 JSON으로 받아 검증합니다.
-    """
     try:
         원본 = json.loads(거래이력json문자열)
-        작업df = 거래이력표준열맞추기(pd.DataFrame(원본))
+        작업df = 거래이력정규화(pd.DataFrame(원본))
     except Exception:
         return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
-
-    입력검증표 = 거래이력검증표생성(작업df)
-    이상치점검표 = 거래이력이상치점검표생성(작업df)
-    통합점검표 = pd.concat([입력검증표, 이상치점검표], ignore_index=True) if not 이상치점검표.empty else 입력검증표.copy()
-    if not 통합점검표.empty:
-        통합점검표 = 통합점검표.drop_duplicates().reset_index(drop=True)
-    return 통합점검표
-
-
-def 거래이력통합점검표직접생성(편집df):
-    """현재 화면/세션의 편집 DataFrame을 기준으로 검증표를 즉시 재계산합니다.
-    v5.14.40: Google Sheets는 최신인데 검증표만 과거 상태로 남는 문제를 막기 위해,
-    화면 표시·저장 판단에 쓰는 검증은 cache_data가 아닌 현재 df 직접 계산을 우선합니다.
-    """
-    try:
-        작업df = 거래이력표준열맞추기(거래이력빈입력행제거(pd.DataFrame() if 편집df is None else pd.DataFrame(편집df).copy()))
-    except Exception:
-        작업df = pd.DataFrame() if 편집df is None else pd.DataFrame(편집df).copy()
 
     입력검증표 = 거래이력검증표생성(작업df)
     이상치점검표 = 거래이력이상치점검표생성(작업df)
@@ -3220,6 +4134,33 @@ def 안전정수포맷(값):
         return "-"
 
 
+def 원화정수포맷(값):
+    if pd.isna(값) or 값 is None:
+        return "-"
+    try:
+        return f"{float(값):,.0f}원"
+    except Exception:
+        return "-"
+
+
+def 정수수량포맷(값):
+    if pd.isna(값) or 값 is None:
+        return "-"
+    try:
+        return f"{float(값):,.0f}"
+    except Exception:
+        return "-"
+
+
+def 손익원화문자열(값):
+    if pd.isna(값) or 값 is None:
+        return "-"
+    try:
+        return f"{float(값):,.0f}원"
+    except Exception:
+        return "-"
+
+
 def 안전소수포맷(값, 소수점=2):
     if pd.isna(값) or 값 is None:
         return "-"
@@ -3380,35 +4321,31 @@ def 거래이력편집반영최적화(편집입력df):
     입력지문 = 거래이력비교지문(편집입력df)
     이전입력지문 = st.session_state.get("trade_editor_last_input_fp_v1", "")
 
-    # v5.14.42: 같은 입력 지문이라도 과거 trade_history_editor_df_v1을 재사용하지 않습니다.
-    # st.data_editor의 빈 신규 행/이전 검증 상태가 세션에 남아 검증표만 과거 오류를 계속 표시하는 문제를 막기 위해
-    # 매 실행마다 현재 편집입력df를 기준으로 정규화·빈행 제거·검증을 다시 수행합니다.
-    편집df = 거래이력편집용자동보정(pd.DataFrame() if 편집입력df is None else 편집입력df.reset_index(drop=True))
-    편집df, 거래이력변경됨, 자동저장성공, 자동저장메시지 = 거래이력세션반영(
-        편집df,
-        저장강제=False,
-        자동저장허용=True,
-    )
-    st.session_state["trade_editor_last_input_fp_v1"] = 거래이력비교지문(편집입력df)
-    st.session_state["trade_editor_last_output_fp_v1"] = 거래이력비교지문(편집df)
+    if 입력지문 == 이전입력지문 and "trade_history_editor_df_v1" in st.session_state:
+        편집df = st.session_state.get("trade_history_editor_df_v1", pd.DataFrame()).copy()
+        거래이력변경됨 = False
+        자동저장성공 = True
+        자동저장메시지 = "변경 없음"
+    else:
+        편집df = 거래이력편집용자동보정(편집입력df.reset_index(drop=True))
+        편집df, 거래이력변경됨, 자동저장성공, 자동저장메시지 = 거래이력세션반영(
+            편집df,
+            저장강제=False,
+            자동저장허용=True,
+        )
+        st.session_state["trade_editor_last_input_fp_v1"] = 입력지문
+        st.session_state["trade_editor_last_output_fp_v1"] = 거래이력비교지문(편집df)
 
     계산용거래이력 = st.session_state.get("trade_history_calc_df_v1", 거래이력계산대상추출(편집df))
     계산지문 = 거래이력서명생성(계산용거래이력)
-    검증json = json.dumps(거래이력JSON변환(편집df), ensure_ascii=False, sort_keys=True)
-    검증지문 = 거래이력서명생성(편집df)
 
-    # v5.14.40: 검증 결과는 캐시가 아니라 현재 화면/세션의 편집df를 기준으로 즉시 재계산합니다.
-    # Google Sheets 외부 수정 후 표와 계산은 최신인데 검증표만 과거 오류를 유지하는 문제를 차단합니다.
-    통합점검표 = 거래이력통합점검표직접생성(편집df)
-    st.session_state["trade_validation_cache_json_v1"] = 검증json
-    st.session_state["trade_validation_cache_fp_v1"] = 검증지문
-    st.session_state["trade_validation_cache_df_v1"] = 통합점검표.copy()
-    st.session_state["trade_check_cache_df_v1"] = 통합점검표.copy()
-
-    # 계산 캐시는 계산 대상 거래이력 기준으로 별도 관리합니다.
-    if 검증지문 != st.session_state.get("trade_calc_cache_key_v1", ""):
-        st.session_state["trade_calc_cache_key_v1"] = 검증지문
+    if 계산지문 != st.session_state.get("trade_calc_cache_key_v1", ""):
+        통합점검표 = 거래이력통합점검표캐시(계산지문)
+        st.session_state["trade_calc_cache_key_v1"] = 계산지문
         st.session_state["trade_calc_cache_df_v1"] = 계산용거래이력.copy()
+        st.session_state["trade_check_cache_df_v1"] = 통합점검표.copy()
+    else:
+        통합점검표 = st.session_state.get("trade_check_cache_df_v1", pd.DataFrame()).copy()
 
     포트폴리오캐시키 = 계산지문 + f"|{st.session_state.get('price_refresh_token_v51', 0)}"
     if 포트폴리오캐시키 != st.session_state.get("portfolio_cache_key_v1", ""):
@@ -6760,76 +7697,34 @@ def 캔들분석결과가져오기(데이터, 선택날짜, 선택행):
     }
 
 
-def 포트폴리오상품구분라벨(행):
-    """포트폴리오 비중 표시용 상품 구분 라벨입니다.
-    - ETF를 먼저 보여주고, 그 다음 개별주식을 보여주기 위한 내부 정렬 기준으로 사용합니다.
-    - 화면 표시에는 'ETF', '개별주식' 두 가지로 단순화합니다.
-    """
-    try:
-        코드 = 행.get("종목코드", "") if isinstance(행, pd.Series) else ""
-        이름 = 행.get("종목명", "") if isinstance(행, pd.Series) else ""
-        구분 = 종목구분판단(코드, 이름)
-        if 구분 == "etf":
-            return "ETF"
-        return "개별주식"
-    except Exception:
-        이름 = "" if not isinstance(행, pd.Series) else str(행.get("종목명", "")).upper()
-        if any(키 in 이름 for 키 in ["KODEX", "TIGER", "ACE", "KBSTAR", "ARIRANG", "HANARO", "SOL", "KOSEF"]):
-            return "ETF"
-        return "개별주식"
-
-
-def 포트폴리오비중정렬(계산표):
-    """ETF → 개별주식 순서로 묶고, 각 그룹 안에서는 비중/평가금액 내림차순으로 정렬합니다."""
-    작업 = pd.DataFrame() if 계산표 is None else 계산표.copy()
-    if 작업.empty:
-        return 작업
-
-    for 열 in ["종목명", "종목코드"]:
-        if 열 not in 작업.columns:
-            작업[열] = ""
-
-    작업["평가금액"] = pd.to_numeric(작업.get("평가금액", 0), errors="coerce").fillna(0)
-    if "현재비중" in 작업.columns:
-        작업["현재비중"] = pd.to_numeric(작업.get("현재비중"), errors="coerce").fillna(0)
-    else:
-        총평가금액 = float(작업["평가금액"].sum())
-        작업["현재비중"] = np.where(총평가금액 > 0, 작업["평가금액"] / 총평가금액 * 100, 0)
-
-    작업 = 작업[작업["평가금액"] > 0].copy()
-    if 작업.empty:
-        return 작업
-
-    작업["구분"] = 작업.apply(포트폴리오상품구분라벨, axis=1)
-    작업["_구분순서"] = 작업["구분"].map({"ETF": 0, "개별주식": 1}).fillna(9)
-    작업 = 작업.sort_values(["_구분순서", "현재비중", "평가금액", "종목명"], ascending=[True, False, False, True]).reset_index(drop=True)
-    return 작업
-
-
 def 비중그래프(계산표):
-    작업 = 포트폴리오비중정렬(계산표)
+    작업 = 계산표.copy()
     if 작업 is None or 작업.empty:
         그림 = go.Figure()
         그림.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10), title="현재 포트폴리오 비중")
         return 그림
 
+    작업 = 작업.copy()
+    작업["평가금액"] = pd.to_numeric(작업["평가금액"], errors="coerce").fillna(0)
+    작업 = 작업[작업["평가금액"] > 0].copy()
+    작업 = 작업.sort_values("평가금액", ascending=False)
+
     그림 = go.Figure(
         go.Pie(
             labels=작업["종목명"],
             values=작업["평가금액"],
-            customdata=작업[["구분", "현재비중"]],
             hole=0.52,
             sort=False,
             direction="clockwise",
             textinfo="percent",
             textposition="inside",
             insidetextorientation="auto",
-            hovertemplate="%{customdata[0]} · %{label}<br>평가금액: %{value:,.0f}원<br>비중: %{customdata[1]:.2f}%<extra></extra>",
+            hovertemplate="%{label}<br>평가금액: %{value:,.0f}원<br>비중: %{percent}<extra></extra>",
         )
     )
     그림.update_traces(marker=dict(line=dict(color="#0b1220", width=1.2)))
     그림.update_layout(
-        title=dict(text="현재 포트폴리오 비중 · ETF → 개별주식", x=0.02, xanchor="left", y=0.97),
+        title=dict(text="현재 포트폴리오 비중", x=0.02, xanchor="left", y=0.97),
         height=430,
         margin=dict(l=10, r=10, t=52, b=10),
         legend=dict(orientation="v", yanchor="top", y=0.98, xanchor="left", x=1.02, font=dict(size=13)),
@@ -9940,7 +10835,7 @@ def 시세관련캐시초기화():
 # -----------------------------------
 st.markdown("---")
 
-섹터목록 = ["주요 모니터링", "포트폴리오 현황", "분석 / 인사이트"]
+섹터목록 = ["주요 모니터링", "포트폴리오 현황", "자산원장", "자산변화로그", "분석 / 인사이트"]
 섹터선택키 = "main_section_selector_v5106d"
 
 # 이전 버전에서 저장된 선택값이 남아 있으면 화면이 표시되지 않을 수 있어 새 키와 유효성 검사를 함께 사용합니다.
@@ -9949,7 +10844,7 @@ if 섹터선택키 not in st.session_state or st.session_state.get(섹터선택�
 
 선택섹터 = st.session_state[섹터선택키]
 
-버튼칸 = st.columns(3, gap="small")
+버튼칸 = st.columns(len(섹터목록), gap="small")
 for idx, 섹터명 in enumerate(섹터목록):
     with 버튼칸[idx]:
         if st.button(
@@ -10175,7 +11070,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 
     if "trade_history_df_v22" not in st.session_state:
         현재거래이력가져오기()
-    if 선택섹터 in ["포트폴리오 현황", "분석 / 인사이트"] or st.session_state.get("show_trade_editor_v5106a", False):
+    if 선택섹터 in ["포트폴리오 현황", "자산원장", "자산변화로그", "분석 / 인사이트"] or st.session_state.get("show_trade_editor_v5106a", False):
         자동백업일일실행(st.session_state.get("trade_history_df_v22", pd.DataFrame()))
     else:
         st.caption("주요 모니터링 화면에서는 자동백업 점검을 건너뜁니다.")
@@ -10188,9 +11083,6 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
     else:
         st.caption(f"현재 거래이력: {현재거래건수}건")
     st.caption(거래이력자동복원상태문구())
-
-    with st.expander("운영 상태 요약", expanded=False):
-        운영상태요약카드(현재거래건수=현재거래건수)
 
     st.markdown("##### 1. 파일 불러오기")
     업로드파일 = st.file_uploader(
@@ -10321,7 +11213,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         st.caption(f"직접 편집 표를 숨겼습니다. 현재 거래이력 {len(수정포트폴리오)}건 기준으로 계산합니다.")
 
     # 포트폴리오/분석 화면에서만 무거운 계산을 실행합니다.
-    if 선택섹터 in ["포트폴리오 현황", "분석 / 인사이트"]:
+    if 선택섹터 in ["포트폴리오 현황", "자산원장", "자산변화로그", "분석 / 인사이트"]:
         최적화결과 = 거래이력편집반영최적화(수정포트폴리오)
         수정포트폴리오 = 최적화결과["편집df"]
         거래이력변경됨 = 최적화결과["거래이력변경됨"]
@@ -10389,7 +11281,20 @@ if 선택섹터 == "포트폴리오 현황":
             with st.expander(f"청산 또는 보유 0주 종목 보기 ({len(청산종목표)}건)", expanded=False):
                 청산표시 = 청산종목표[["종목코드", "종목명", "총매수수량", "총매도수량", "보유수량", "실현손익", "최근거래일자"]].copy()
                 청산표시 = 청산표시.rename(columns={"총매수수량": "총 매수수량", "총매도수량": "총 매도수량", "최근거래일자": "최근 거래일자"})
-                표데이터프레임(index_1부터(청산표시), use_container_width=True)
+                for 열 in ["총 매수수량", "총 매도수량", "보유수량", "실현손익"]:
+                    if 열 in 청산표시.columns:
+                        청산표시[열] = pd.to_numeric(청산표시[열], errors="coerce").fillna(0)
+                청산표시 = index_1부터(청산표시)
+                청산포맷 = {
+                    "총 매수수량": 정수수량포맷,
+                    "총 매도수량": 정수수량포맷,
+                    "보유수량": 정수수량포맷,
+                    "실현손익": 손익원화문자열,
+                }
+                try:
+                    표데이터프레임(청산표시.style.format(청산포맷).map(손익색상, subset=["실현손익"]), use_container_width=True)
+                except Exception:
+                    표데이터프레임(청산표시, use_container_width=True)
 
         요약정보 = 포트폴리오요약지표생성(계산포트폴리오, 표시대상포트폴리오)
         포트폴리오요약카드표시(요약정보)
@@ -10398,7 +11303,8 @@ if 선택섹터 == "포트폴리오 현황":
 
         st.markdown("---")
         IRP비주식자산df = IRP비주식자산편집UI()
-        통합자산표 = 통합자산현황UI(보유계산포트폴리오, IRP비주식자산df)
+        현금성자산df = 현금성자산불러오기()
+        통합자산표 = 통합자산현황UI(보유계산포트폴리오, IRP비주식자산df, 현금성자산df)
 
         st.markdown("---")
         위험분석결과_v514 = 포트폴리오리스크분석UI(보유계산포트폴리오, 통합자산표)
@@ -10495,9 +11401,11 @@ if 선택섹터 == "포트폴리오 현황":
                 config={"displaylogo": False, "responsive": True},
             )
         with 비중요약칸:
-            비중요약표 = 포트폴리오비중정렬(계산포트폴리오)
-            표시열 = [열 for 열 in ["구분", "종목명", "현재비중", "평가금액"] if 열 in 비중요약표.columns]
-            비중요약표 = 비중요약표[표시열].copy() if not 비중요약표.empty else pd.DataFrame(columns=["구분", "종목명", "현재비중", "평가금액"])
+            비중요약표 = 계산포트폴리오.copy()
+            비중요약표 = 비중요약표[["종목명", "현재비중", "평가금액"]].copy()
+            비중요약표["현재비중"] = pd.to_numeric(비중요약표["현재비중"], errors="coerce").fillna(0)
+            비중요약표["평가금액"] = pd.to_numeric(비중요약표["평가금액"], errors="coerce").fillna(0)
+            비중요약표 = 비중요약표[비중요약표["평가금액"] > 0].sort_values(["현재비중", "평가금액"], ascending=[False, False]).reset_index(drop=True)
 
             if not 비중요약표.empty:
                 최대행 = 비중요약표.iloc[0]
@@ -10529,6 +11437,16 @@ if 선택섹터 == "포트폴리오 현황":
 
 
     # -----------------------------------
+
+if 선택섹터 == "자산원장":
+    자산원장UI(최적화결과)
+
+
+if 선택섹터 == "자산변화로그":
+    계산포트폴리오 = 최적화결과["계산포트폴리오"]
+    보유계산포트폴리오 = 최적화결과["보유계산포트폴리오"]
+    자산변화로그UI(계산포트폴리오, 보유계산포트폴리오)
+
 
 if 선택섹터 == "분석 / 인사이트":
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
@@ -10780,3 +11698,11 @@ if "trade_history_df_v22" in st.session_state and "trade_history_last_saved_fing
     st.session_state["trade_history_last_saved_fingerprint_v43"] = 거래이력비교지문(st.session_state["trade_history_df_v22"])
 if "trade_history_df_v22" in st.session_state and "trade_history_last_calc_fingerprint_v43" not in st.session_state:
     st.session_state["trade_history_last_calc_fingerprint_v43"] = 거래이력비교지문(st.session_state["trade_history_df_v22"])
+
+
+# ------------------------------------------------------------
+# v5.14.47 transition-safe note
+# - 현금성자산 전환 단계에서 중복 반영 가능성을 낮추기 위해 안내 문구 정리
+# - 자산변화로그의 '인출/감액' 표현을 '원금 감소 또는 기준 변경'으로 완화
+# - 기존 비주식자산 현금성자산과 신규 현금성자산 시트의 역할 구분 강화
+# ------------------------------------------------------------
