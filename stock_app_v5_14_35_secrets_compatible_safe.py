@@ -97,7 +97,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.14.53-asset-change-monthly-trend"  # v5.14.52 기반 / 자산변화로그 월별 추세 요약 추가
+APP_VERSION = "v5.17.1-stable-risk-ui"  # v5.17.0 운영 안정판 기반 / Google Sheets 구조 유지 / 리스크 UI만 안정화
 
 
 # -----------------------------------
@@ -277,6 +277,60 @@ if "price_refresh_token_v51" not in st.session_state:
     st.session_state["price_refresh_token_v51"] = 0
 
 
+
+# -----------------------------------
+# v5.14.59 표·그래프 가독성 보강
+# - 표 셀 텍스트 줄바꿈
+# - 긴 표 화면 폭 맞춤
+# - Plotly 그래프 숫자 표시 단순화
+# -----------------------------------
+st.markdown(
+    """
+    <style>
+    div[data-testid="stDataFrame"] {
+        width: 100% !important;
+    }
+    div[data-testid="stDataFrame"] div[role="gridcell"],
+    div[data-testid="stDataFrame"] div[role="columnheader"] {
+        white-space: normal !important;
+        line-height: 1.35 !important;
+        word-break: keep-all !important;
+        overflow-wrap: anywhere !important;
+        font-size: 0.92rem !important;
+    }
+    div[data-testid="stDataFrame"] [data-testid="stTable"] {
+        width: 100% !important;
+    }
+    .stDataFrame, .stTable {
+        overflow-x: auto !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def 그래프금액축표기(값):
+    try:
+        값 = float(값)
+        절대값 = abs(값)
+        부호 = "-" if 값 < 0 else ""
+        if 절대값 >= 100000000:
+            return f"{부호}{절대값/100000000:.1f}억"
+        if 절대값 >= 10000:
+            return f"{부호}{절대값/10000:.0f}만"
+        return f"{값:,.0f}"
+    except Exception:
+        return str(값)
+
+
+def 그래프금액텍스트(값):
+    try:
+        return f"{float(값):,.0f}원"
+    except Exception:
+        return str(값)
+
+
 # -----------------------------------
 # 시간대 고정: 한국 서울 시간
 # -----------------------------------
@@ -370,32 +424,9 @@ if 모바일여부():
     st.caption("모바일 조회용 간소화 화면")
 else:
     st.title(f"📈 투자 분석 시스템 {APP_VERSION}")
+
+st.caption("본 화면의 분석은 보유자산·거래이력·외부지표를 바탕으로 한 참고용 해석이며, 매수·매도 권유가 아닙니다.")
     
-
-# Google Sheets 연결 상태 표시: 기존 UI 아래에 최소 노출
-def 구글시트연결상태표시():
-    try:
-        import streamlit as st
-
-        if "google_sheets_connected" in st.session_state and st.session_state["google_sheets_connected"]:
-
-            문서명 = st.session_state.get("google_sheet_title", "")
-            시트목록 = st.session_state.get("google_sheet_worksheets", [])
-
-            st.success("Google Sheets 연결됨")
-
-            if 문서명:
-                st.caption(f"문서명: {문서명}")
-
-            if 시트목록:
-                st.caption(f"시트 목록: {', '.join(시트목록)}")
-
-        else:
-            st.warning("Google Sheets 미설정 · 로컬 저장 사용")
-
-    except Exception as e:
-        st.error(f"Google Sheets 상태 표시 오류: {e}")
-
 
 
 if not PLOTLY_AVAILABLE:
@@ -443,6 +474,21 @@ GOOGLE_SHEETS_SUMMARY_SHEET = "통합요약"
 GOOGLE_SHEETS_ASSET_CHANGE_LOG_SHEET = "자산변화로그"
 GOOGLE_SHEETS_CASH_ASSET_SHEET = "현금성자산"
 GOOGLE_SHEETS_PRINCIPAL_LEDGER_SHEET = "원금변동원장"
+# -----------------------------------
+# v5.15.1 운영 방향 정리
+# - 핵심 운영 데이터는 거래이력·비주식자산·통합요약만 사용합니다.
+# - 아래 3개 시트는 과거 기록 보존용으로만 남기고, 화면 메뉴/계산 흐름에서는 사용하지 않습니다.
+# - Google Sheets에서 물리 삭제하지 않아도 앱 실행에는 영향을 주지 않도록 분리합니다.
+# -----------------------------------
+LEGACY_DISABLED_SHEETS_V515 = {"현금성자산", "원금변동원장", "자산변화로그"}
+
+def 운영시트목록정리(시트목록):
+    try:
+        return [s for s in list(시트목록 or []) if str(s).strip() not in LEGACY_DISABLED_SHEETS_V515]
+    except Exception:
+        return list(시트목록 or [])
+
+
 
 
 # -----------------------------------
@@ -779,6 +825,7 @@ def 구글시트사이드바간단표시():
         spreadsheet, info = 구글시트문서연결()
         if spreadsheet is not None:
             st.caption(f"Google Sheets 연결됨 · {info.get('문서명', '')}")
+            st.caption("운영 기준: 거래이력 · 비주식자산 · 통합요약 / 과거 자산원장 시트는 보존만 합니다.")
             인증방식 = info.get("인증방식", st.session_state.get("google_sheets_last_auth_mode", ""))
             연결시각 = info.get("마지막연결시각", st.session_state.get("google_sheets_last_connected_at", ""))
             시도횟수 = info.get("연결시도횟수", st.session_state.get("google_sheets_last_connection_attempts", ""))
@@ -786,7 +833,7 @@ def 구글시트사이드바간단표시():
                 st.caption(f"인증 방식: {인증방식}")
             if 연결시각:
                 st.caption(f"마지막 연결 {연결시각} · {시도횟수}회 시도")
-            if st.button("Google Sheets 새로고침", key="google_sheets_refresh_compact_v51436", use_container_width=True):
+            if st.button("Google Sheets 새로고침", key="google_sheets_refresh_compact_v51436", width="stretch"):
                 구글시트캐시초기화()
                 for k in [
                     "portfolio_df_v1",
@@ -802,7 +849,7 @@ def 구글시트사이드바간단표시():
             마지막오류 = st.session_state.get("google_sheets_last_error", "") or info.get("메시지", "")
             if 마지막오류:
                 st.caption(f"연결 오류: {마지막오류}")
-            if st.button("Google Sheets 재연결", key="google_sheets_reconnect_compact_v51436", use_container_width=True):
+            if st.button("Google Sheets 재연결", key="google_sheets_reconnect_compact_v51436", width="stretch"):
                 구글시트캐시초기화()
                 st.session_state.pop("google_sheets_startup_warmup_done_v51436", None)
                 for k in [
@@ -1067,7 +1114,9 @@ def 구글시트운영연결확인(화면표시=False):
 자산변화로그표준열 = [
     "저장시각", "기준일", "변화유형", "계좌", "자산구분", "종목명",
     "원금", "평가액", "평가손익", "실현손익", "보유종목수",
-    "원금변화", "평가액변화", "평가손익변화", "실현손익변화", "자동분석", "메모"
+    "원금변화", "평가액변화", "평가손익변화", "실현손익변화",
+    "원금변화사유", "원금변화확인금액", "원금변화설명",
+    "자동분석", "메모"
 ]
 
 
@@ -1079,8 +1128,10 @@ def 자산변화로그표준화(df):
     작업 = 작업[자산변화로그표준열].copy()
     for 열 in ["원금", "평가액", "평가손익", "실현손익", "보유종목수", "원금변화", "평가액변화", "평가손익변화", "실현손익변화"]:
         작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0)
-    for 열 in ["저장시각", "기준일", "변화유형", "계좌", "자산구분", "종목명", "메모"]:
+    for 열 in ["저장시각", "기준일", "변화유형", "계좌", "자산구분", "종목명", "원금변화사유", "원금변화설명", "메모"]:
         작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
+    if "원금변화확인금액" in 작업.columns:
+        작업["원금변화확인금액"] = pd.to_numeric(작업["원금변화확인금액"], errors="coerce").fillna(0)
     return 작업.reset_index(drop=True)
 
 
@@ -1159,6 +1210,9 @@ def 자산스냅샷행생성(계산포트폴리오, 보유계산포트폴리오,
         "평가액변화": 0,
         "평가손익변화": 0,
         "실현손익변화": 0,
+        "원금변화사유": "",
+        "원금변화확인금액": 0,
+        "원금변화설명": "",
         "자동분석": "현재 통합자산 기준 자동 저장 전 미리보기입니다.",
         "메모": 메모 or "현재 통합자산 기준 자동 저장",
     }
@@ -1235,10 +1289,19 @@ def 자산변화로그행보정(새행, 기존로그):
     return 행
 
 
-def 자산변화로그추가저장(계산포트폴리오, 보유계산포트폴리오, 비주식자산df=None, 메모=""):
+def 자산변화로그추가저장(계산포트폴리오, 보유계산포트폴리오, 비주식자산df=None, 메모="", 원금변화사유="", 원금변화확인금액=0, 원금변화설명=""):
     기존 = 자산변화로그읽기()
     새행 = 자산스냅샷행생성(계산포트폴리오, 보유계산포트폴리오, 비주식자산df, 메모=메모)
     새행 = 자산변화로그행보정(새행, 기존)
+    새행["원금변화사유"] = str(원금변화사유 or "").strip()
+    새행["원금변화확인금액"] = round(float(원금변화확인금액 or 0))
+    새행["원금변화설명"] = str(원금변화설명 or "").strip()
+    if 새행.get("원금변화사유") or 새행.get("원금변화설명"):
+        사유문 = f"원금변화사유: {새행.get('원금변화사유', '')}".strip()
+        금액문 = f"확인금액: {원화정수포맷(새행.get('원금변화확인금액', 0))}"
+        설명문 = f"설명: {새행.get('원금변화설명', '')}" if 새행.get("원금변화설명") else ""
+        추가메모 = " / ".join([x for x in [사유문, 금액문, 설명문] if x])
+        새행["메모"] = (str(새행.get("메모", "")).strip() + " | " + 추가메모).strip(" |")
     저장대상 = pd.concat([기존, pd.DataFrame([새행])], ignore_index=True)
     저장대상 = 자산변화로그표준화(저장대상)
     성공, 메시지 = 자산변화로그저장(저장대상)
@@ -1355,11 +1418,11 @@ def 자산변화요약표시(제목, df, 구분열):
     try:
         표데이터프레임(
             표시.style.format({k: v for k, v in 포맷.items() if k in 표시.columns}).map(손익색상, subset=[c for c in ["평가손익"] if c in 표시.columns]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     except Exception:
-        표데이터프레임(표시, use_container_width=True, hide_index=True)
+        표데이터프레임(표시, width="stretch", hide_index=True)
 
 
 
@@ -1420,20 +1483,58 @@ def 자산변화월별추세요약표시(로그df):
 
         if PLOTLY_AVAILABLE and len(월별) >= 1:
             try:
+                st.markdown("#### 월별 변화액")
+                st.caption("월별 원금 변화와 평가손익 변화만 나란히 비교합니다. 월말 평가액은 아래 선 그래프로 따로 표시합니다.")
                 fig = go.Figure()
-                fig.add_trace(go.Bar(x=월별["월"], y=월별["원금변화"], name="원금변화", width=0.28))
-                fig.add_trace(go.Bar(x=월별["월"], y=월별["평가손익변화"], name="평가손익변화", width=0.28))
-                fig.add_trace(go.Scatter(x=월별["월"], y=월별["월말 평가액"], mode="lines+markers", name="월말 평가액", yaxis="y2"))
+                원금변화값 = pd.to_numeric(월별["원금변화"], errors="coerce")
+                평가손익변화값 = pd.to_numeric(월별["평가손익변화"], errors="coerce")
+                fig.add_trace(go.Bar(
+                    x=월별["월"], y=원금변화값,
+                    name="원금변화",
+                    text=[그래프금액축표기(v) for v in 원금변화값],
+                    textposition="outside",
+                    width=0.30,
+                    hovertemplate="월=%{x}<br>원금변화=%{y:,.0f}원<extra></extra>",
+                ))
+                fig.add_trace(go.Bar(
+                    x=월별["월"], y=평가손익변화값,
+                    name="평가손익변화",
+                    text=[그래프금액축표기(v) for v in 평가손익변화값],
+                    textposition="outside",
+                    width=0.30,
+                    hovertemplate="월=%{x}<br>평가손익변화=%{y:,.0f}원<extra></extra>",
+                ))
                 fig.update_layout(
-                    height=360,
-                    margin=dict(l=20, r=20, t=40, b=20),
-                    title="월별 원금 변화 · 평가손익 변화 · 월말 평가액",
+                    height=330,
+                    margin=dict(l=20, r=20, t=35, b=20),
+                    title="월별 원금 변화와 평가손익 변화",
                     legend=dict(orientation="h"),
                     barmode="group",
-                    yaxis=dict(title="월별 변화액"),
-                    yaxis2=dict(title="월말 평가액", overlaying="y", side="right", showgrid=False),
+                    yaxis=dict(title="월별 변화액", tickformat=","),
+                    xaxis=dict(title=""),
                 )
-                st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "responsive": True})
+                st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "responsive": True})
+
+                st.markdown("#### 월말 평가액 흐름")
+                월말평가액값 = pd.to_numeric(월별["월말 평가액"], errors="coerce")
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(
+                    x=월별["월"], y=월말평가액값,
+                    mode="lines+markers+text",
+                    name="월말 평가액",
+                    text=[그래프금액축표기(v) for v in 월말평가액값],
+                    textposition="top center",
+                    hovertemplate="월=%{x}<br>월말 평가액=%{y:,.0f}원<extra></extra>",
+                ))
+                fig2.update_layout(
+                    height=300,
+                    margin=dict(l=20, r=20, t=35, b=20),
+                    title="월말 평가액",
+                    yaxis=dict(title="월말 평가액", tickformat=","),
+                    xaxis=dict(title=""),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig2, width="stretch", config={"displaylogo": False, "responsive": True})
             except Exception as e:
                 st.caption(f"월별 추세 그래프 표시 오류: {type(e).__name__}: {e}")
 
@@ -1447,13 +1548,95 @@ def 자산변화월별추세요약표시(로그df):
                 손익색상,
                 subset=[c for c in ["원금변화", "평가액변화", "평가손익변화", "실현손익변화", "월말 평가손익"] if c in 표시.columns],
             )
-            표데이터프레임(스타일, use_container_width=True, hide_index=True)
+            표데이터프레임(스타일, width="stretch", hide_index=True)
         except Exception:
-            표데이터프레임(표시, use_container_width=True, hide_index=True)
+            표데이터프레임(표시, width="stretch", hide_index=True)
     except Exception as e:
         st.caption(f"월별 자산 변화 요약 생성 오류: {type(e).__name__}: {e}")
 
 
+
+
+def 자산변화원금사유자동추정(미리보기행=None, 로그df=None, 현재스냅샷=None, 계좌요약=None, 자산군요약=None):
+    """직전대비 원금 변화의 가능한 원인을 자동으로 추정합니다.
+    이 함수는 확정 판정이 아니라 저장 전 확인을 돕는 해석 보조입니다.
+    """
+    try:
+        미리보기행 = 미리보기행 or {}
+        원금변화 = float(미리보기행.get("원금변화", 0) or 0)
+        평가액변화 = float(미리보기행.get("평가액변화", 0) or 0)
+        평가손익변화 = float(미리보기행.get("평가손익변화", 0) or 0)
+        if abs(원금변화) < 1:
+            return {
+                "추천사유": "원금 변화 없음",
+                "신뢰도": "높음",
+                "핵심해석": "직전 저장 대비 입력 원금 변화가 거의 없습니다.",
+                "확인사항": "평가액과 평가손익 변화만 확인하면 됩니다.",
+            }
+
+        로그 = 자산변화로그표준화(로그df)
+        직전사유 = ""
+        직전설명 = ""
+        if not 로그.empty:
+            직전 = 로그.iloc[-1]
+            직전사유 = str(직전.get("원금변화사유", "")).strip()
+            직전설명 = str(직전.get("원금변화설명", "")).strip()
+
+        # 사용자가 직전 저장 때 사유를 이미 남긴 경우에는 그 맥락을 우선 보여줍니다.
+        if 직전사유:
+            return {
+                "추천사유": 직전사유,
+                "신뢰도": "참고",
+                "핵심해석": f"직전 저장 기록에 '{직전사유}' 사유가 남아 있습니다. 이번 변화도 같은 흐름인지 확인해 주세요.",
+                "확인사항": 직전설명 or "거래이력, 현금성자산, 원금변동원장 변경 내역을 함께 확인해 주세요.",
+            }
+
+        자산군요약 = pd.DataFrame() if 자산군요약 is None else pd.DataFrame(자산군요약).copy()
+        현금성현재 = 0.0
+        주식ETF현재 = 0.0
+        if not 자산군요약.empty:
+            for _, row in 자산군요약.iterrows():
+                자산군 = str(row.get("자산군", "")).strip()
+                원금 = float(row.get("원금", 0) or 0)
+                if "현금" in 자산군 or "CMA" in 자산군 or "예수" in 자산군:
+                    현금성현재 += 원금
+                if 자산군 in ["주식", "ETF"]:
+                    주식ETF현재 += 원금
+
+        if 원금변화 > 0:
+            if 평가액변화 > 0:
+                추천 = "외부 입금 또는 신규 투자"
+                해석 = "입력 원금과 평가액이 함께 증가했습니다. 실제 추가 입금 또는 신규 매수 원금 증가 가능성이 큽니다."
+            else:
+                추천 = "외부 입금 후 평가하락"
+                해석 = "입력 원금은 증가했지만 평가액은 줄었습니다. 입금·매수 이후 평가손익 악화 가능성을 확인해야 합니다."
+            확인 = "원금변동원장에 외부 입금 기록이 있는지, 거래이력 신규 매수 금액과 일치하는지 확인해 주세요."
+        else:
+            if 평가액변화 >= 0:
+                추천 = "외부 인출 또는 자산 재분류"
+                해석 = "입력 원금은 감소했지만 평가액은 유지 또는 증가했습니다. 실제 인출보다는 자산 재분류나 현금성자산 정리 가능성도 있습니다."
+            else:
+                추천 = "외부 인출·기준 변경·자산 제외"
+                해석 = "입력 원금과 평가액이 함께 감소했습니다. 외부 인출, 현금성자산 차감, 일부 자산 제외, 기준 데이터 변경을 확인해야 합니다."
+            확인 = "원금변동원장 인출 기록, 현금성자산 잔액 감소, 비주식자산 제외/해지 항목, 거래이력 수량·단가 정정을 순서대로 확인해 주세요."
+
+        # 현금성자산이 존재하면서 원금 변화 절대값이 작거나 특정 매수금액처럼 보일 때 내부 이동 후보를 함께 제시합니다.
+        if 현금성현재 >= 0 and abs(원금변화) > 0:
+            확인 += " 현금성자산 감소와 ETF/주식 원금 증가가 같은 금액이면 총원금 변화가 아닌 내부 자산 이동으로 기록하는 것이 맞습니다."
+
+        return {
+            "추천사유": 추천,
+            "신뢰도": "중간",
+            "핵심해석": 해석,
+            "확인사항": 확인,
+        }
+    except Exception as e:
+        return {
+            "추천사유": "확인 필요",
+            "신뢰도": "낮음",
+            "핵심해석": f"자동 추정 중 오류가 발생했습니다: {type(e).__name__}",
+            "확인사항": "거래이력, 현금성자산, 비주식자산, 원금변동원장을 직접 비교해 주세요.",
+        }
 
 def 자산변화원금변동설명표시(미리보기행, 현재스냅샷, 로그df, 계좌요약=None, 자산군요약=None):
     """자산변화일지의 '현재 원금 직전대비'가 무엇을 의미하는지 설명합니다.
@@ -1485,13 +1668,90 @@ def 자산변화원금변동설명표시(미리보기행, 현재스냅샷, 로�
             {"구분": "직전대비 원금 변화", "금액": 원금변화, "확인 의미": "입금·인출·자산 재분류·거래원금 변경 여부 확인 필요"},
         ])
         try:
-            표데이터프레임(원인표.style.format({"금액": 손익원화문자열}).map(손익색상, subset=["금액"]), use_container_width=True, hide_index=True)
+            표데이터프레임(원인표.style.format({"금액": 손익원화문자열}).map(손익색상, subset=["금액"]), width="stretch", hide_index=True)
         except Exception:
-            표데이터프레임(원인표, use_container_width=True, hide_index=True)
+            표데이터프레임(원인표, width="stretch", hide_index=True)
+        추천 = 자산변화원금사유자동추정(미리보기행, 로그df, 현재스냅샷, 계좌요약, 자산군요약)
+        추천표 = pd.DataFrame([
+            {"항목": "자동 추정 사유", "내용": 추천.get("추천사유", "")},
+            {"항목": "신뢰도", "내용": 추천.get("신뢰도", "")},
+            {"항목": "핵심 해석", "내용": 추천.get("핵심해석", "")},
+            {"항목": "확인 사항", "내용": 추천.get("확인사항", "")},
+        ])
+        st.markdown("#### 원금 변화 자동 해석 후보")
+        표데이터프레임(추천표, width="stretch", hide_index=True)
         if 원금변화 < 0:
             st.caption("확인 순서: ① 원금변동원장에 실제 인출/감소 기록이 있는지 ② 현금성자산 금액이 줄었는지 ③ 비주식자산에서 현금성 항목이 제외되며 중복이 해소된 것인지 ④ 거래이력의 보유수량·매수원금이 바뀐 것인지 확인하면 됩니다.")
     except Exception as e:
         st.caption(f"원금 변화 설명 표시 오류: {type(e).__name__}: {e}")
+
+
+def 자산변화사유입력UI(미리보기행):
+    """직전대비 원금 변화가 있을 때 사용자가 사유를 명확히 기록하도록 돕습니다."""
+    원금변화 = float((미리보기행 or {}).get("원금변화", 0) or 0)
+    추천정보 = 자산변화원금사유자동추정(미리보기행)
+    추천사유 = str(추천정보.get("추천사유", "")).strip()
+    기본사유 = "자산 재분류"
+    if "입금" in 추천사유 or 원금변화 > 0:
+        기본사유 = "외부 입금"
+    elif "인출" in 추천사유 or 원금변화 < 0:
+        기본사유 = "외부 인출"
+    elif "내부" in 추천사유:
+        기본사유 = "계좌 간 이동"
+
+    st.markdown("#### 원금 변화 사유 기록")
+    st.caption("직전대비 원금 변화는 평가손익이 아니라 입금·인출·현금 사용·자산 재분류·입력 정정 때문에 생깁니다. 저장 전에 사유를 남기면 나중에 자산변화로그에서 원인을 확인할 수 있습니다.")
+    사유목록 = [
+        "외부 입금",
+        "외부 인출",
+        "현금→ETF/주식 매수",
+        "ETF/주식 매도→현금",
+        "계좌 간 이동",
+        "자산 재분류",
+        "입력 오류 정정",
+        "기준값 변경",
+        "기타",
+    ]
+    try:
+        기본인덱스 = 사유목록.index(기본사유)
+    except Exception:
+        기본인덱스 = 0
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        원금변화사유 = st.selectbox("원금 변화 사유", 사유목록, index=기본인덱스, key="principal_change_reason_v51458")
+    with c2:
+        원금변화확인금액 = st.number_input(
+            "확인 금액",
+            value=int(round(abs(원금변화))) if abs(원금변화) >= 1 else 0,
+            step=1000,
+            key="principal_change_reason_amount_v51458",
+        )
+
+    기본설명 = ""
+    if 원금변화사유 == "현금→ETF/주식 매수":
+        기본설명 = "현금성자산 감소와 ETF/주식 원금 증가가 같은 내부 자산 이동인지 확인"
+    elif 원금변화사유 == "외부 인출":
+        기본설명 = "생활비·출금 등 실제 외부 유출 여부 확인"
+    elif 원금변화사유 == "자산 재분류":
+        기본설명 = "비주식자산·현금성자산 중복 제외 또는 자산군 이동 반영"
+    if not 기본설명 and 추천정보.get("핵심해석"):
+        기본설명 = 추천정보.get("핵심해석", "")
+    원금변화설명 = st.text_input("사유 설명", value=기본설명, key="principal_change_reason_note_v51458")
+
+    확인표 = pd.DataFrame([
+        {"항목": "직전대비 원금 변화", "값": 원금변화, "의미": "평가손익이 아니라 입력 원금 기준 변화"},
+        {"항목": "선택한 사유", "값": 원금변화사유, "의미": "자산변화로그에 저장될 원금 변화 원인"},
+        {"항목": "확인 금액", "값": 원금변화확인금액, "의미": "입금·인출·재분류 등으로 확인한 금액"},
+    ])
+    try:
+        표시 = 확인표.copy()
+        표시["값"] = 표시["값"].apply(lambda v: 손익원화문자열(v) if isinstance(v, (int, float, np.integer, np.floating)) else v)
+        표데이터프레임(표시, width="stretch", hide_index=True)
+    except Exception:
+        pass
+    return 원금변화사유, 원금변화확인금액, 원금변화설명
+
 
 def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
     st.markdown("---")
@@ -1526,24 +1786,33 @@ def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
     try:
         표데이터프레임(
             요약표.style.format({"현재값": 원화정수포맷, "직전대비": 손익원화문자열}).map(손익색상, subset=["직전대비"]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     except Exception:
-        표데이터프레임(요약표, use_container_width=True, hide_index=True)
+        표데이터프레임(요약표, width="stretch", hide_index=True)
 
+    원금변화사유, 원금변화확인금액, 원금변화설명 = 자산변화사유입력UI(미리보기행)
     메모 = st.text_input("이번 저장 메모", value="현재 통합자산 기준 자동 저장", key="asset_change_log_memo_v51442")
     버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.2, 5])
     with 버튼1:
-        if st.button("현재 자산 상태 저장", key="save_asset_change_snapshot_v51442", use_container_width=True):
-            성공, 메시지, 새행, 저장대상 = 자산변화로그추가저장(계산포트폴리오, 보유계산포트폴리오, 비주식자산df, 메모=메모)
+        if st.button("현재 자산 상태 저장", key="save_asset_change_snapshot_v51442", width="stretch"):
+            성공, 메시지, 새행, 저장대상 = 자산변화로그추가저장(
+                계산포트폴리오,
+                보유계산포트폴리오,
+                비주식자산df,
+                메모=메모,
+                원금변화사유=원금변화사유,
+                원금변화확인금액=원금변화확인금액,
+                원금변화설명=원금변화설명,
+            )
             if 성공:
                 st.success(f"자산변화로그를 저장했습니다. 변화유형: {새행.get('변화유형', '')}")
                 st.rerun()
             else:
                 st.error(메시지)
     with 버튼2:
-        if st.button("시트 확인/생성", key="ensure_asset_change_sheet_v51442", use_container_width=True):
+        if st.button("시트 확인/생성", key="ensure_asset_change_sheet_v51442", width="stretch"):
             성공, 메시지 = 자산변화로그시트확보()
             if 성공:
                 st.success(메시지)
@@ -1552,13 +1821,15 @@ def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
     with 버튼3:
         st.caption("거래이력·비주식자산이 바뀐 뒤 저장하면 직전 저장값과 자동 비교됩니다. 이번 버전은 계좌별·자산군별 현재 구성까지 함께 보여줍니다.")
 
-    st.markdown("### 계좌별·자산군별 현재 구성")
+    st.markdown("### 현재 자산 구성")
+    st.caption("계좌별 요약은 돈이 어느 계좌에 있는지, 자산군별 요약은 어떤 종류의 자산으로 구성되어 있는지 보여줍니다. 상세 구성은 중복 표시를 줄이기 위해 필요한 경우에만 펼쳐 확인합니다.")
     탭1, 탭2, 탭3 = st.tabs(["계좌별 요약", "자산군별 요약", "상세 구성"])
     with 탭1:
         자산변화요약표시("계좌별 자산 요약", 계좌요약, "계좌")
     with 탭2:
         자산변화요약표시("자산군별 자산 요약", 자산군요약, "자산군")
     with 탭3:
+        st.caption("상세 구성은 계좌·자산군·상품 단위의 원천 확인용입니다.")
         표시상세 = 통합구성표.copy()
         if 표시상세.empty:
             st.info("상세 구성을 표시할 데이터가 없습니다.")
@@ -1578,11 +1849,11 @@ def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
                         "수익률": lambda v: f"{float(v):,.2f}%",
                         "전체비중": lambda v: f"{float(v):,.1f}%",
                     }).map(손익색상, subset=[c for c in ["평가손익"] if c in 표시상세.columns]),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
             except Exception:
-                표데이터프레임(표시상세, use_container_width=True, hide_index=True)
+                표데이터프레임(표시상세, width="stretch", hide_index=True)
 
     if 로그df.empty:
         st.info("아직 저장된 자산변화로그가 없습니다. '현재 자산 상태 저장'을 눌러 첫 스냅샷을 만드세요.")
@@ -1594,12 +1865,56 @@ def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
             그래프기준["저장시각"] = pd.to_datetime(그래프기준["저장시각"], errors="coerce")
             그래프기준 = 그래프기준.dropna(subset=["저장시각"])
             if not 그래프기준.empty:
+                st.markdown("#### 원금·평가액 흐름")
+                st.caption("원금과 평가액은 누적 규모를 보여주고, 평가손익은 아래 별도 그래프로 분리해 표시합니다.")
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=그래프기준["저장시각"], y=pd.to_numeric(그래프기준["원금"], errors="coerce"), mode="lines+markers", name="원금"))
-                fig.add_trace(go.Scatter(x=그래프기준["저장시각"], y=pd.to_numeric(그래프기준["평가액"], errors="coerce"), mode="lines+markers", name="평가액"))
-                fig.add_trace(go.Bar(x=그래프기준["저장시각"], y=pd.to_numeric(그래프기준["평가손익"], errors="coerce"), name="평가손익", opacity=0.35))
-                fig.update_layout(height=420, margin=dict(l=20, r=20, t=40, b=20), legend=dict(orientation="h"), title="원금 · 평가액 · 평가손익 흐름")
-                st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "responsive": True})
+                원금값 = pd.to_numeric(그래프기준["원금"], errors="coerce")
+                평가액값 = pd.to_numeric(그래프기준["평가액"], errors="coerce")
+                fig.add_trace(go.Scatter(
+                    x=그래프기준["저장시각"], y=원금값,
+                    mode="lines+markers+text", name="원금",
+                    text=[그래프금액축표기(v) for v in 원금값],
+                    textposition="top center",
+                    hovertemplate="저장시각=%{x}<br>원금=%{y:,.0f}원<extra></extra>",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=그래프기준["저장시각"], y=평가액값,
+                    mode="lines+markers+text", name="평가액",
+                    text=[그래프금액축표기(v) for v in 평가액값],
+                    textposition="bottom center",
+                    hovertemplate="저장시각=%{x}<br>평가액=%{y:,.0f}원<extra></extra>",
+                ))
+                fig.update_layout(
+                    height=340,
+                    margin=dict(l=20, r=20, t=35, b=20),
+                    legend=dict(orientation="h"),
+                    title="원금과 평가액 변화",
+                    yaxis=dict(title="금액", tickformat=","),
+                    xaxis=dict(title=""),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "responsive": True})
+
+                st.markdown("#### 평가손익 변화")
+                손익값 = pd.to_numeric(그래프기준["평가손익"], errors="coerce")
+                fig2 = go.Figure()
+                fig2.add_trace(go.Bar(
+                    x=그래프기준["저장시각"], y=손익값,
+                    name="평가손익",
+                    text=[그래프금액축표기(v) for v in 손익값],
+                    textposition="outside",
+                    hovertemplate="저장시각=%{x}<br>평가손익=%{y:,.0f}원<extra></extra>",
+                    width=0.35,
+                ))
+                fig2.update_layout(
+                    height=300,
+                    margin=dict(l=20, r=20, t=35, b=20),
+                    title="평가손익만 따로 보기",
+                    yaxis=dict(title="평가손익", tickformat=","),
+                    xaxis=dict(title=""),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig2, width="stretch", config={"displaylogo": False, "responsive": True})
         except Exception as e:
             st.caption(f"자산변화 그래프 표시 오류: {type(e).__name__}: {e}")
     else:
@@ -1610,16 +1925,16 @@ def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
     표시 = 로그df.copy().sort_values("저장시각", ascending=False).reset_index(drop=True)
     st.markdown("### 저장된 자산 변화 일지")
     st.caption(f"총 {len(표시)}건 · 핵심 변화 항목 중심으로 표시합니다.")
-    핵심열 = ["저장시각", "변화유형", "원금", "평가액", "평가손익", "실현손익", "원금변화", "평가액변화", "평가손익변화", "실현손익변화", "자동분석", "메모"]
+    핵심열 = ["저장시각", "변화유형", "원금", "평가액", "평가손익", "실현손익", "원금변화", "원금변화사유", "원금변화확인금액", "원금변화설명", "평가액변화", "평가손익변화", "실현손익변화", "자동분석", "메모"]
     표시용 = 표시[[열 for 열 in 핵심열 if 열 in 표시.columns]].copy()
     표시용 = index_1부터(표시용)
-    숫자열 = [열 for 열 in ["원금", "평가액", "평가손익", "실현손익", "원금변화", "평가액변화", "평가손익변화", "실현손익변화"] if 열 in 표시용.columns]
+    숫자열 = [열 for 열 in ["원금", "평가액", "평가손익", "실현손익", "원금변화", "원금변화확인금액", "평가액변화", "평가손익변화", "실현손익변화"] if 열 in 표시용.columns]
     포맷 = {열: 원화정수포맷 for 열 in 숫자열}
     try:
         스타일 = 표시용.style.format(포맷).map(손익색상, subset=[열 for 열 in ["평가손익", "실현손익", "원금변화", "평가액변화", "평가손익변화", "실현손익변화"] if 열 in 표시용.columns])
-        표데이터프레임(스타일, use_container_width=True)
+        표데이터프레임(스타일, width="stretch")
     except Exception:
-        표데이터프레임(표시용, use_container_width=True)
+        표데이터프레임(표시용, width="stretch")
 
 야후인덱스심볼 = {
     "1001": "^KS11",
@@ -2642,14 +2957,18 @@ def 통합자산대시보드데이터생성(최적화결과=None):
 
     상세목록 = []
     if not 보유.empty:
-        for _, r in 보유.iterrows():
+        보유계좌값 = _보유포트폴리오계좌값생성(보유)
+        for idx, r in 보유.iterrows():
             원금 = float(pd.to_numeric(pd.Series([r.get("투자원금", r.get("원금", 0))]), errors="coerce").fillna(0).iloc[0])
             평가 = float(pd.to_numeric(pd.Series([r.get("평가금액", r.get("평가액", 0))]), errors="coerce").fillna(0).iloc[0])
             손익 = float(pd.to_numeric(pd.Series([r.get("평가손익", 평가 - 원금)]), errors="coerce").fillna(0).iloc[0])
+            종목코드값 = str(r.get("종목코드", r.get("코드", "")))
+            종목명값 = str(r.get("종목명", r.get("상품명", "")))
+            자산군값 = "ETF" if 종목구분판단(종목코드값, 종목명값) == "etf" else "주식"
             상세목록.append({
-                "계좌": str(r.get("계좌", "미래에셋/증권계좌") or "미래에셋/증권계좌"),
-                "자산군": "주식" if str(r.get("종목명", r.get("상품명", ""))) != "KODEX 200" else "ETF",
-                "상품명": str(r.get("종목명", r.get("상품명", ""))),
+                "계좌": str(보유계좌값.loc[idx] if idx in 보유계좌값.index else "미래에셋/증권계좌"),
+                "자산군": 자산군값,
+                "상품명": 종목명값,
                 "원금": 원금, "평가금액": 평가, "평가손익": 손익,
                 "비고": str(r.get("비고", "실시간/준실시간 시세 반영") or "실시간/준실시간 시세 반영"),
             })
@@ -2727,7 +3046,7 @@ def 통합자산대시보드UI(최적화결과=None):
         if PLOTLY_AVAILABLE and not 자산군요약.empty:
             fig = go.Figure(data=[go.Pie(labels=자산군요약["자산군"], values=자산군요약["평가금액"], hole=0.45)])
             fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h"))
-            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+            st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
         else:
             st.info("자산군별 차트를 표시할 데이터가 없습니다.")
     with 차트2:
@@ -2747,7 +3066,7 @@ def 통합자산대시보드UI(최적화결과=None):
                 yaxis_title="평가금액",
                 bargap=0.55,
             )
-            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+            st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
         else:
             st.info("계좌별 차트를 표시할 데이터가 없습니다.")
 
@@ -2755,17 +3074,17 @@ def 통합자산대시보드UI(최적화결과=None):
     if not 계좌요약.empty:
         표시 = 계좌요약.copy()
         try:
-            표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%", "상품수": lambda v: f"{float(v):,.0f}개"}).map(손익색상, subset=["평가손익"]), use_container_width=True, hide_index=True)
+            표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%", "상품수": lambda v: f"{float(v):,.0f}개"}).map(손익색상, subset=["평가손익"]), width="stretch", hide_index=True)
         except Exception:
-            표데이터프레임(표시, use_container_width=True, hide_index=True)
+            표데이터프레임(표시, width="stretch", hide_index=True)
 
     st.markdown("##### 자산군별 요약")
     if not 자산군요약.empty:
         표시 = 자산군요약.copy()
         try:
-            표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%", "상품수": lambda v: f"{float(v):,.0f}개"}).map(손익색상, subset=["평가손익"]), use_container_width=True, hide_index=True)
+            표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%", "상품수": lambda v: f"{float(v):,.0f}개"}).map(손익색상, subset=["평가손익"]), width="stretch", hide_index=True)
         except Exception:
-            표데이터프레임(표시, use_container_width=True, hide_index=True)
+            표데이터프레임(표시, width="stretch", hide_index=True)
 
     with st.expander("상세 구성 보기", expanded=False):
         if 상세 is None or 상세.empty:
@@ -2773,14 +3092,166 @@ def 통합자산대시보드UI(최적화결과=None):
         else:
             표시 = 상세.copy()
             try:
-                표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%"}).map(손익색상, subset=["평가손익"]), use_container_width=True, hide_index=True)
+                표데이터프레임(표시.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열, "수익률": lambda v: f"{float(v):,.2f}%", "전체비중": lambda v: f"{float(v):,.1f}%"}).map(손익색상, subset=["평가손익"]), width="stretch", hide_index=True)
             except Exception:
-                표데이터프레임(표시, use_container_width=True, hide_index=True)
+                표데이터프레임(표시, width="stretch", hide_index=True)
+
+
+def 원금검증상태해석표생성(입력원금, 관리원금, 제안상세=None):
+    """원금·현금 요약에서 검증 차이의 의미를 사용자가 바로 이해할 수 있도록 해석 표를 생성합니다."""
+    제안상세 = 제안상세 or {}
+    입력원금 = float(입력원금 or 0)
+    관리원금 = float(관리원금 or 0)
+    차이 = 관리원금 - 입력원금 if 관리원금 else 0
+    상태 = "정상" if abs(차이) <= 1 else "점검필요"
+    if 관리원금 == 0:
+        상태 = "기준원금 없음"
+        의미 = "원금변동원장에 초기설정 또는 이후 입출금 기준값이 없습니다."
+        조치 = "원금변동원장에서 초기 총 자산원금을 먼저 저장합니다."
+    elif abs(차이) <= 1:
+        의미 = "입력자산 원금 합계와 원금변동원장 기준 원금이 일치합니다. 내부 자산 이동은 총원금 변동으로 보지 않습니다."
+        조치 = "추가 조치가 필요 없습니다. 자산변화로그에서 현재 자산 상태를 저장하면 됩니다."
+    elif abs(차이) <= max(1000, abs(float(제안상세.get('현금성자산원금', 0) or 0)) * 0.02):
+        의미 = "소액 차이입니다. 수수료, 세금, 체결금액 반올림, 미정산 예수금 차이일 가능성이 있습니다."
+        조치 = "거래 체결금액과 현금성자산 잔액을 한 번 더 확인합니다."
+    else:
+        의미 = "입력자산 원금과 기준 원금이 다릅니다. 외부 입금·인출이 아니라면 현금성자산 중복/누락 또는 내부 자산 이동 반영 문제일 수 있습니다."
+        조치 = "현금성자산은 현재 잔액만 1줄로 유지하고, 비주식자산에 같은 현금 항목이 남아 있는지 확인합니다. 외부 입출금이면 원금변동원장에 기록합니다."
+    return pd.DataFrame([
+        {"항목": "검증 상태", "내용": 상태},
+        {"항목": "차이 금액", "내용": 손익원화문자열(차이)},
+        {"항목": "해석", "내용": 의미},
+        {"항목": "권장 조치", "내용": 조치},
+    ])
+
+
+# -----------------------------------
+# v5.14.60 데이터 무결성 점검 패널
+# - 거래이력·비주식자산·현금성자산·원금변동원장·자산변화로그 간 기본 검증
+# - 현금성자산 중복, 원금 기준 차이, 비주식 현금 중복 제외 상태를 한 화면에서 확인
+# -----------------------------------
+def 데이터무결성상태등급(상태목록):
+    try:
+        if any(str(x.get("상태", "")) == "점검필요" for x in 상태목록):
+            return "점검필요"
+        if any(str(x.get("상태", "")) == "주의" for x in 상태목록):
+            return "주의"
+        return "정상"
+    except Exception:
+        return "주의"
+
+
+def 자산데이터무결성점검표생성(최적화결과=None):
+    """현재 자산 데이터의 핵심 무결성 점검 결과를 표로 반환합니다."""
+    점검 = []
+    try:
+        지표, 계좌요약, 자산군요약, 상세 = 통합자산대시보드데이터생성(최적화결과)
+    except Exception:
+        지표, 계좌요약, 자산군요약, 상세 = {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    try:
+        현금 = 현금성자산표준화(현금성자산불러오기())
+    except Exception:
+        현금 = 현금성자산표준화(pd.DataFrame())
+    try:
+        비주식원본 = IRP비주식자산표준열맞추기(IRP비주식자산불러오기())
+    except Exception:
+        비주식원본 = IRP비주식자산표준열맞추기(pd.DataFrame())
+    try:
+        원장 = 원금변동원장표준화(원금변동원장불러오기())
+    except Exception:
+        원장 = 원금변동원장표준화(pd.DataFrame())
+    try:
+        로그 = 자산변화로그표준화(자산변화로그읽기())
+    except Exception:
+        로그 = 자산변화로그표준화(pd.DataFrame())
+
+    관리원금 = float(지표.get("관리기준원금", 0) or 0)
+    입력원금 = float(지표.get("입력자산원금", 0) or 0)
+    검증차이 = float(지표.get("검증차이", 0) or 0)
+    중복제외건수 = int(지표.get("비주식현금성제외건수", 0) or 0)
+
+    if 관리원금 <= 0:
+        점검.append({"점검항목": "원금변동원장 기준값", "상태": "점검필요", "현재값": "기준 원금 없음", "확인내용": "초기설정 또는 이후 입금·인출 기준값이 없습니다.", "권장조치": "원금변동원장에서 초기 총 자산원금을 먼저 저장합니다."})
+    elif abs(검증차이) <= 1:
+        점검.append({"점검항목": "총 원금 일치", "상태": "정상", "현재값": 손익원화문자열(검증차이), "확인내용": "입력자산 원금과 원금변동원장 기준 원금이 일치합니다.", "권장조치": "추가 조치 없음"})
+    else:
+        점검.append({"점검항목": "총 원금 일치", "상태": "점검필요", "현재값": 손익원화문자열(검증차이), "확인내용": "입력자산 원금과 원금변동원장 기준 원금이 다릅니다.", "권장조치": "외부 입금·인출이면 원금변동원장에 기록하고, 내부 이동이면 현금성자산 현재 잔액과 거래이력을 확인합니다."})
+
+    if 현금.empty:
+        점검.append({"점검항목": "현금성자산 시트", "상태": "주의", "현재값": "0건", "확인내용": "현금성자산 시트가 비어 있습니다.", "권장조치": "예수금·CMA·현금성 대기자산을 현재 잔액 기준으로 입력합니다."})
+    else:
+        key_cols = [c for c in ["계좌", "유형"] if c in 현금.columns]
+        중복건수 = int(현금.duplicated(subset=key_cols, keep=False).sum()) if key_cols else 0
+        현금합계 = float(pd.to_numeric(현금.get("원금", 0), errors="coerce").fillna(0).sum())
+        상태 = "점검필요" if 중복건수 > 0 else "정상"
+        확인 = "같은 계좌·유형의 현금성자산이 중복되어 있을 수 있습니다." if 중복건수 > 0 else "현금성자산 현재 잔액 기준으로 읽혔습니다."
+        조치 = "중복 행은 현재 잔액 1줄만 남깁니다." if 중복건수 > 0 else "거래 후에는 현재 잔액만 수정합니다."
+        점검.append({"점검항목": "현금성자산 중복", "상태": 상태, "현재값": f"{len(현금):,}건 / {원화정수포맷(현금합계)}", "확인내용": 확인, "권장조치": 조치})
+
+    if 중복제외건수 > 0:
+        점검.append({"점검항목": "비주식 현금 중복 제외", "상태": "정상", "현재값": f"{중복제외건수:,}건 제외", "확인내용": "현금성자산 시트 사용으로 비주식자산 내 현금성 항목을 통합 계산에서 제외했습니다.", "권장조치": "전환 단계에서는 정상입니다. 비주식자산에는 TDF·정기예금 등 비현금 항목 중심으로 유지합니다."})
+    else:
+        점검.append({"점검항목": "비주식 현금 중복 제외", "상태": "정상", "현재값": "0건", "확인내용": "비주식자산과 현금성자산 중복 제외 대상이 없습니다.", "권장조치": "추가 조치 없음"})
+
+    if 원장.empty:
+        점검.append({"점검항목": "원금변동원장 기록", "상태": "점검필요", "현재값": "0건", "확인내용": "기준 원금 기록이 없습니다.", "권장조치": "초기설정 행을 생성합니다."})
+    else:
+        점검.append({"점검항목": "원금변동원장 기록", "상태": "정상", "현재값": f"{len(원장):,}건", "확인내용": "원금변동원장 기록을 읽었습니다.", "권장조치": "외부 입금·인출이 있을 때만 새 행을 추가합니다."})
+
+    if 로그.empty:
+        점검.append({"점검항목": "자산변화로그", "상태": "주의", "현재값": "0건", "확인내용": "저장된 자산변화로그가 없습니다.", "권장조치": "거래 또는 현금 수정 후 현재 자산 상태 저장을 실행합니다."})
+    else:
+        최근시각 = str(로그.iloc[-1].get("저장시각", ""))
+        점검.append({"점검항목": "자산변화로그", "상태": "정상", "현재값": f"{len(로그):,}건", "확인내용": f"최근 저장: {최근시각}", "권장조치": "자산 변동 후 저장하면 직전 대비 변화 분석이 누적됩니다."})
+
+    if 상세 is None or pd.DataFrame(상세).empty:
+        점검.append({"점검항목": "통합 상세 구성", "상태": "주의", "현재값": "0건", "확인내용": "통합 상세 구성을 만들 수 없습니다.", "권장조치": "거래이력·비주식자산·현금성자산 데이터를 확인합니다."})
+    else:
+        계좌빈값 = int((pd.DataFrame(상세).get("계좌", "").astype(str).str.strip() == "").sum()) if "계좌" in pd.DataFrame(상세).columns else 0
+        상태 = "점검필요" if 계좌빈값 > 0 else "정상"
+        점검.append({"점검항목": "계좌 매핑", "상태": 상태, "현재값": f"빈 계좌 {계좌빈값:,}건", "확인내용": "통합 상세 구성의 계좌 표시를 점검했습니다.", "권장조치": "빈 계좌가 있으면 거래이력의 계좌/운용사 열을 확인합니다."})
+
+    return pd.DataFrame(점검)
+
+
+def 자산데이터무결성점검UI(최적화결과=None):
+    st.markdown("#### 데이터 무결성 점검")
+    st.caption("v5.15부터 핵심 운영 데이터는 거래이력·비주식자산·통합요약입니다. 과거 자산원장 관련 시트는 점검 대상에서 제외합니다.")
+    점검표 = 자산데이터무결성점검표생성(최적화결과)
+    등급 = 데이터무결성상태등급(점검표.to_dict("records") if not 점검표.empty else [])
+    c1, c2, c3 = st.columns(3)
+    c1.metric("전체 상태", 등급)
+    c2.metric("점검필요", f"{int((점검표['상태'] == '점검필요').sum()) if not 점검표.empty else 0}건")
+    c3.metric("주의", f"{int((점검표['상태'] == '주의').sum()) if not 점검표.empty else 0}건")
+
+    if 등급 == "정상":
+        st.success("핵심 데이터 연결 상태가 정상입니다.")
+    elif 등급 == "주의":
+        st.warning("운영은 가능하지만 일부 확인이 필요한 항목이 있습니다.")
+    else:
+        st.error("총원금, 중복 현금, 계좌 매핑 중 점검이 필요한 항목이 있습니다.")
+
+    if not 점검표.empty:
+        try:
+            표데이터프레임(
+                점검표.style.applymap(
+                    lambda v: "color: #ff4b4b; font-weight: 700;" if v == "점검필요" else ("color: #f59e0b; font-weight: 700;" if v == "주의" else "color: #22c55e; font-weight: 700;"),
+                    subset=["상태"],
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+        except Exception:
+            표데이터프레임(점검표, width="stretch", hide_index=True)
+
+    st.info("v5.15부터 자산변화로그 저장 절차는 사용하지 않습니다. 거래이력과 비주식자산 입력값을 기준으로 투자 분석에 집중합니다.")
+
 
 def 자산원장UI(최적화결과=None):
     st.markdown("### 자산 원장")
     st.caption("현금성자산과 원금변동원장을 별도 관리합니다. 신규 현금성자산 시트에 값이 있으면 기존 비주식자산의 현금성자산 중복 반영을 방지합니다.")
-    대시탭, 현금탭, 원금탭, 요약탭 = st.tabs(["통합 대시보드", "현금성자산", "원금변동원장", "원금·현금 요약"])
+    대시탭, 현금탭, 원금탭, 요약탭, 점검탭 = st.tabs(["통합 대시보드", "현금성자산", "원금변동원장", "원금·현금 요약", "데이터 점검"])
 
     with 대시탭:
         통합자산대시보드UI(최적화결과)
@@ -2796,7 +3267,7 @@ def 자산원장UI(최적화결과=None):
         편집현금 = st.data_editor(
             현재현금,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             key="cash_assets_editor_v51446",
             column_config={
                 "기준일": st.column_config.TextColumn("기준일"),
@@ -2812,12 +3283,12 @@ def 자산원장UI(최적화결과=None):
             표시현금2 = 표시현금.copy()
             표시현금2["평가손익"] = 표시현금2["평가금액"] - 표시현금2["원금"]
             try:
-                표데이터프레임(표시현금2.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열}).map(손익색상, subset=["평가손익"]), use_container_width=True)
+                표데이터프레임(표시현금2.style.format({"원금": 원화정수포맷, "평가금액": 원화정수포맷, "평가손익": 손익원화문자열}).map(손익색상, subset=["평가손익"]), width="stretch")
             except Exception:
-                표데이터프레임(표시현금2, use_container_width=True)
+                표데이터프레임(표시현금2, width="stretch")
         버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.4, 5])
         with 버튼1:
-            if st.button("현금성자산 저장", key="save_cash_assets_v51446", use_container_width=True):
+            if st.button("현금성자산 저장", key="save_cash_assets_v51446", width="stretch"):
                 성공, 메시지 = 현금성자산저장(편집현금)
                 if 성공:
                     st.success("현금성자산을 저장했습니다.")
@@ -2825,7 +3296,7 @@ def 자산원장UI(최적화결과=None):
                 else:
                     st.error(메시지)
         with 버튼2:
-            if st.button("비주식 현금성자산 자동 이관", key="auto_migrate_cash_assets_v51449", use_container_width=True):
+            if st.button("비주식 현금성자산 자동 이관", key="auto_migrate_cash_assets_v51449", width="stretch"):
                 성공, 메시지, 결과 = 현금성자산초기자동이관(force=False)
                 if 성공:
                     st.success(메시지)
@@ -2863,7 +3334,7 @@ def 자산원장UI(최적화결과=None):
 
         if 현재원장.empty and 현금성자산표준화(현금성자산불러오기()).empty:
             st.warning("현금성자산과 원금변동원장이 모두 비어 있습니다. 아래 버튼으로 초기 운영 데이터를 한 번에 생성할 수 있습니다.")
-            if st.button("현금 이관 + 초기 원금 일괄 생성", key="cash_principal_auto_init_v51449", use_container_width=True):
+            if st.button("현금 이관 + 초기 원금 일괄 생성", key="cash_principal_auto_init_v51449", width="stretch"):
                 성공, 메시지 = 현금성자산및초기원금일괄초기화(
                     최적화결과=최적화결과,
                     기준일=기준일입력,
@@ -2877,7 +3348,7 @@ def 자산원장UI(최적화결과=None):
 
         b초1, b초2 = st.columns([1.4, 4])
         with b초1:
-            if st.button("초기 총 자산원금 저장", key="save_initial_principal_v51448", use_container_width=True, disabled=초기존재):
+            if st.button("초기 총 자산원금 저장", key="save_initial_principal_v51448", width="stretch", disabled=초기존재):
                 성공, 메시지, 저장대상, 상세 = 초기총자산원금자동생성(
                     최적화결과=최적화결과,
                     기준일=기준일입력,
@@ -2897,7 +3368,7 @@ def 자산원장UI(최적화결과=None):
         편집원장 = st.data_editor(
             현재원장,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             key="principal_ledger_editor_v51446",
             column_config={
                 "일자": st.column_config.TextColumn("일자"),
@@ -2912,10 +3383,10 @@ def 자산원장UI(최적화결과=None):
         표시원장 = 원금변동원장표준화(편집원장)
         if not 표시원장.empty:
             try:
-                표데이터프레임(표시원장.style.format({"금액": 원화정수포맷}), use_container_width=True)
+                표데이터프레임(표시원장.style.format({"금액": 원화정수포맷}), width="stretch")
             except Exception:
-                표데이터프레임(표시원장, use_container_width=True)
-        if st.button("원금변동원장 저장", key="save_principal_ledger_v51446", use_container_width=True):
+                표데이터프레임(표시원장, width="stretch")
+        if st.button("원금변동원장 저장", key="save_principal_ledger_v51446", width="stretch"):
             성공, 메시지 = 원금변동원장저장(편집원장)
             if 성공:
                 st.success("원금변동원장을 저장했습니다.")
@@ -2931,7 +3402,15 @@ def 자산원장UI(최적화결과=None):
         총현금원금 = 현금["원금"].sum() if not 현금.empty else 0
         총현금평가 = 현금["평가금액"].sum() if not 현금.empty else 0
         관리원금 = 관리기준총원금계산(원장)
-        제안원금, 제안상세 = 초기총자산원금계산(최적화결과)
+        # v5.14.54: 같은 화면에서 이미 읽어온 현금성자산 값을 초기원금 계산에 직접 전달합니다.
+        # Google Sheets 캐시/새로고침 시점 차이로 현금성자산이 0원으로 보이거나
+        # 비주식자산 현금 항목이 중복 계산되는 문제를 줄이기 위한 보정입니다.
+        비주식현재 = IRP비주식자산표준열맞추기(IRP비주식자산불러오기())
+        제안원금, 제안상세 = 초기총자산원금계산(
+            최적화결과,
+            비주식자산df=비주식현재,
+            현금성자산df=현금,
+        )
         입력원금 = 제안상세.get("초기총자산원금", 제안원금)
         원금차이 = 관리원금 - 입력원금 if 관리원금 else 0
 
@@ -2954,16 +3433,20 @@ def 자산원장UI(최적화결과=None):
             {"구분": "검증 차이", "금액": 원금차이, "의미": "0원이면 입력자산 원금과 원금변동원장이 일치"},
         ])
         try:
-            표데이터프레임(설명표.style.format({"금액": 손익원화문자열}).map(손익색상, subset=["금액"]), use_container_width=True, hide_index=True)
+            표데이터프레임(설명표.style.format({"금액": 손익원화문자열}).map(손익색상, subset=["금액"]), width="stretch", hide_index=True)
         except Exception:
-            표데이터프레임(설명표, use_container_width=True, hide_index=True)
+            표데이터프레임(설명표, width="stretch", hide_index=True)
+
+        st.markdown("##### 검증 차이 해석")
+        해석표 = 원금검증상태해석표생성(입력원금, 관리원금, 제안상세)
+        표데이터프레임(해석표, width="stretch", hide_index=True)
 
         if 관리원금 == 0:
             st.info("원금변동원장이 아직 비어 있습니다. 먼저 초기 총 자산원금 기준값을 저장하세요.")
         elif abs(float(원금차이 or 0)) <= 1:
             st.success("정상입니다. 입력자산 원금 합계와 원금변동원장 기준 원금이 일치합니다.")
         else:
-            st.warning("입력자산 원금 합계와 원금변동원장 기준 원금이 다릅니다. 최근 입금·인출, 현금성자산 이관, 비주식자산 재분류 여부를 확인하세요.")
+            st.warning("입력자산 원금 합계와 원금변동원장 기준 원금이 다릅니다. 외부 입출금이 아니라면 현금성자산 현재잔액, 비주식자산 내 현금성 항목 중복, 내부 자산 이동 반영 여부를 확인하세요.")
 
 
 def 기본IRP비주식자산표():
@@ -3046,6 +3529,10 @@ def IRP비주식자산표준열맞추기(df):
     작업 = 작업[(작업["원금"] > 0) | (작업["평가금액"] > 0) | (작업["상품명"].astype(str).str.strip() != "미입력 상품")].copy()
     return 작업.reset_index(drop=True)
 
+
+
+    with 점검탭:
+        자산데이터무결성점검UI(최적화결과)
 
 
 def IRP비주식자산불러오기():
@@ -3208,7 +3695,7 @@ def IRP비주식자산편집UI():
         편집df = st.data_editor(
             현재df,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             key="irp_non_stock_assets_editor_v513",
             column_config={
                 "계좌": st.column_config.TextColumn("계좌"),
@@ -3224,7 +3711,7 @@ def IRP비주식자산편집UI():
         )
 
         st.caption("입력표는 숫자 입력 안정성을 위해 원 단위 숫자로 저장하고, 아래 표시 기준 보기에서 천 단위 쉼표·원화·손익 색상을 적용해 확인합니다.")
-        표데이터프레임(IRP비주식자산표시용스타일(편집df), use_container_width=True)
+        표데이터프레임(IRP비주식자산표시용스타일(편집df), width="stretch")
 
         비주식점검표 = IRP비주식자산검증표생성(편집df)
         if 비주식점검표.empty:
@@ -3234,13 +3721,13 @@ def IRP비주식자산편집UI():
             with st.expander("비주식·현금성 자산 검증 상세 보기", expanded=False):
                 try:
                     점검표시 = 비주식점검표.copy()
-                    표데이터프레임(index_1부터(점검표시).style.map(손익색상, subset=["현재값"]), use_container_width=True)
+                    표데이터프레임(index_1부터(점검표시).style.map(손익색상, subset=["현재값"]), width="stretch")
                 except Exception:
-                    표데이터프레임(index_1부터(비주식점검표), use_container_width=True)
+                    표데이터프레임(index_1부터(비주식점검표), width="stretch")
 
         버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.6, 4.6])
         with 버튼1:
-            if st.button("비주식 자산 저장", key="save_irp_non_stock_assets_v513", use_container_width=True):
+            if st.button("비주식 자산 저장", key="save_irp_non_stock_assets_v513", width="stretch"):
                 성공, 메시지 = IRP비주식자산저장(편집df)
                 if 성공:
                     st.success("비주식·현금성 자산을 저장했습니다.")
@@ -3249,7 +3736,7 @@ def IRP비주식자산편집UI():
                     st.error(메시지)
         with 버튼2:
             복원확인 = st.checkbox("Jone 기준값 복원 확인", key="confirm_reset_irp_non_stock_assets_v51440")
-            if st.button("Jone 기준값 복원", key="reset_irp_non_stock_assets_v51440", use_container_width=True, disabled=not 복원확인):
+            if st.button("Jone 기준값 복원", key="reset_irp_non_stock_assets_v51440", width="stretch", disabled=not 복원확인):
                 성공, 메시지 = IRP비주식자산저장(기본IRP비주식자산표())
                 if 성공:
                     st.success("Jone 기준 비주식·현금성 자산 값으로 복원했습니다.")
@@ -3261,6 +3748,115 @@ def IRP비주식자산편집UI():
     return IRP비주식자산불러오기()
 
 
+def _계좌명정규화(값):
+    """계좌명 표기를 통일합니다."""
+    try:
+        문자 = "" if 값 is None else str(값).strip()
+    except Exception:
+        문자 = ""
+    if not 문자 or 문자 in ["nan", "None", "NaT"]:
+        return ""
+    치환 = {
+        "신한 IRP": "신한은행 IRP",
+        "신한은행IRP": "신한은행 IRP",
+        "신한은행 IRP계좌": "신한은행 IRP",
+        "미래에셋": "미래에셋/증권계좌",
+        "미래에셋증권": "미래에셋/증권계좌",
+        "미래에셋증권계좌": "미래에셋/증권계좌",
+        "미래에셋/증권": "미래에셋/증권계좌",
+    }
+    return 치환.get(문자, 문자)
+
+
+def _거래이력기반종목계좌매핑():
+    """거래이력의 종목코드/종목명별 실제 운용계좌를 만듭니다.
+    보유포트폴리오가 종목별로 집계되면서 운용사 컬럼이 사라진 경우에도
+    KODEX 200, KODEX 코스닥150 같은 ETF가 기본값인 미래에셋으로 잘못 표시되지 않도록 합니다.
+    """
+    try:
+        후보df = None
+        for 키 in [
+            "trade_history_edit_df_v1",
+            "trade_history_calc_df_v1",
+            "trade_history_df_v1",
+            "portfolio_df_v1",
+        ]:
+            if 키 in st.session_state and st.session_state.get(키) is not None:
+                tmp = pd.DataFrame(st.session_state.get(키)).copy()
+                if not tmp.empty:
+                    후보df = tmp
+                    break
+        if 후보df is None or 후보df.empty:
+            try:
+                후보df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_TRADE_SHEET)
+            except Exception:
+                후보df = pd.DataFrame()
+        if 후보df is None or 후보df.empty:
+            return {}, {}
+
+        df = 거래이력표준열맞추기(후보df) if "거래이력표준열맞추기" in globals() else pd.DataFrame(후보df).copy()
+        if "운용사" not in df.columns:
+            return {}, {}
+        df["_계좌"] = df["운용사"].apply(_계좌명정규화)
+        df = df[df["_계좌"].astype(str).str.strip() != ""].copy()
+        if df.empty:
+            return {}, {}
+
+        코드매핑 = {}
+        이름매핑 = {}
+        for 기준열, 대상 in [("종목코드", 코드매핑), ("종목명", 이름매핑)]:
+            if 기준열 not in df.columns:
+                continue
+            for 키값, 그룹 in df.groupby(df[기준열].fillna("").astype(str).str.strip(), dropna=False):
+                키값 = str(키값).strip()
+                if not 키값:
+                    continue
+                계좌목록 = [x for x in 그룹["_계좌"].dropna().astype(str).str.strip().tolist() if x]
+                if not 계좌목록:
+                    continue
+                # 가장 최근 거래 계좌를 우선하되, 해당 종목이 여러 계좌에 섞여 있으면 복수계좌로 표시합니다.
+                유니크 = list(dict.fromkeys(계좌목록))
+                if len(유니크) == 1:
+                    대상[키값] = 유니크[0]
+                else:
+                    대상[키값] = "복수계좌"
+        return 코드매핑, 이름매핑
+    except Exception:
+        return {}, {}
+
+
+def _보유포트폴리오계좌값생성(작업):
+    """보유 포트폴리오의 계좌명을 안전하게 생성합니다.
+    보유표 자체의 계좌/운용사 값을 우선 쓰고, 값이 없으면 거래이력의 종목코드·종목명별 운용사를 역참조합니다.
+    이를 통해 KODEX 200, KODEX 코스닥150 등 모든 ETF의 계좌가 기본값으로 잘못 표시되는 문제를 막습니다.
+    """
+    if 작업 is None or len(작업) == 0:
+        return pd.Series(dtype="object")
+    후보열목록 = ["계좌", "운용사", "증권사", "계좌명", "운용계좌"]
+    계좌값 = pd.Series([""] * len(작업), index=작업.index, dtype="object")
+    for 후보열 in 후보열목록:
+        if 후보열 in 작업.columns:
+            후보값 = 작업[후보열].fillna("").astype(str).str.strip().apply(_계좌명정규화)
+            계좌값 = 계좌값.mask(계좌값.astype(str).str.strip() == "", 후보값)
+
+    코드매핑, 이름매핑 = _거래이력기반종목계좌매핑()
+    if 코드매핑 or 이름매핑:
+        for idx in 작업.index:
+            현재값 = _계좌명정규화(계좌값.loc[idx])
+            if 현재값:
+                계좌값.loc[idx] = 현재값
+                continue
+            코드 = str(작업.loc[idx, "종목코드"]).strip() if "종목코드" in 작업.columns else ""
+            이름 = str(작업.loc[idx, "종목명"]).strip() if "종목명" in 작업.columns else ""
+            매핑값 = 코드매핑.get(코드, "") or 이름매핑.get(이름, "")
+            if 매핑값:
+                계좌값.loc[idx] = 매핑값
+
+    계좌값 = 계좌값.apply(_계좌명정규화)
+    계좌값 = 계좌값.replace({"": "미래에셋/증권계좌"})
+    return 계좌값.fillna("미래에셋/증권계좌").astype(str)
+
+
 def 주식ETF자산요약행생성(보유포트폴리오):
     if 보유포트폴리오 is None or 보유포트폴리오.empty:
         return pd.DataFrame(columns=["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"])
@@ -3269,9 +3865,9 @@ def 주식ETF자산요약행생성(보유포트폴리오):
         작업 = 작업[작업["데이터상태"].astype(str) == "정상"].copy()
     if 작업.empty:
         return pd.DataFrame(columns=["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"])
-    계좌값 = 작업["운용사"] if "운용사" in 작업.columns else pd.Series(["미래에셋/증권계좌"] * len(작업), index=작업.index)
+    계좌값 = _보유포트폴리오계좌값생성(작업)
     결과 = pd.DataFrame({
-        "계좌": 계좌값.fillna("미래에셋/증권계좌").astype(str).replace("", "미래에셋/증권계좌"),
+        "계좌": 계좌값,
         "자산군": 작업.apply(lambda 행: "ETF" if 종목구분판단(행.get("종목코드", ""), 행.get("종목명", "")) == "etf" else "주식", axis=1),
         "상품명": 작업.get("종목명", ""),
         "원금": pd.to_numeric(작업.get("투자원금", 0), errors="coerce").fillna(0),
@@ -3338,10 +3934,10 @@ def 통합자산현황UI(보유포트폴리오, irp_df, cash_df=None):
     자산군요약 = 자산군요약.sort_values("평가금액", ascending=False).reset_index(drop=True)
     숫자서식 = {"원금": 안전정수포맷, "평가금액": 안전정수포맷, "평가손익": 손익문자열, "수익률": 수익률문자열, "전체비중": lambda x: 안전소수포맷(x, 2)}
     st.caption("자산군별 요약")
-    표데이터프레임(index_1부터(자산군요약.copy()).style.format(숫자서식).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]), use_container_width=True)
+    표데이터프레임(index_1부터(자산군요약.copy()).style.format(숫자서식).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]), width="stretch")
     with st.expander("통합 자산 상세 보기", expanded=False):
         상세표시 = 통합표.sort_values(["계좌", "자산군", "평가금액"], ascending=[True, True, False]).reset_index(drop=True)
-        표데이터프레임(index_1부터(상세표시).style.format(숫자서식).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]), use_container_width=True)
+        표데이터프레임(index_1부터(상세표시).style.format(숫자서식).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]), width="stretch")
     return 통합표
 
 
@@ -3540,7 +4136,7 @@ def 자동백업관리UI(current_df, portfolio_df=None, holding_df=None):
 
         수동칸1, 수동칸2, 수동칸3 = st.columns([1.0, 1.25, 2.75])
         with 수동칸1:
-            if st.button("지금 수동 백업", key="manual_backup_now_v1", use_container_width=True):
+            if st.button("지금 수동 백업", key="manual_backup_now_v1", width="stretch"):
                 성공, 결과 = 자동백업파일저장(current_df, backup_type="edit", reason="manual_backup", source="backup_ui")
                 if 성공:
                     st.success("수동 백업을 저장했습니다.")
@@ -3556,7 +4152,7 @@ def 자동백업관리UI(current_df, portfolio_df=None, holding_df=None):
                     file_name=백업엑셀파일명(),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="backup_excel_download_current_v58",
-                    use_container_width=True,
+                    width="stretch",
                 )
             except Exception as e:
                 st.warning(f"xlsx 백업 준비 실패: {e}")
@@ -3586,7 +4182,7 @@ def 자동백업관리UI(current_df, portfolio_df=None, holding_df=None):
                 f"선택 백업 정보: 유형={메타.get('backup_type', '-')} / 저장시각={메타.get('saved_at', '-')} / 건수={메타.get('rows', 0)} / 사유={메타.get('reason', '-')}"
             )
             미리보기 = 거래이력표시용변환(복원df.head(10))
-            표데이터프레임(미리보기, use_container_width=True)
+            표데이터프레임(미리보기, width="stretch")
 
             선택백업계산포트폴리오 = pd.DataFrame()
             선택백업보유포트폴리오 = pd.DataFrame()
@@ -3607,7 +4203,7 @@ def 자동백업관리UI(current_df, portfolio_df=None, holding_df=None):
 
             복원칸1, 복원칸2, 복원칸3 = st.columns(3)
             with 복원칸1:
-                if st.button("선택 백업 복원", key="restore_backup_btn_v1", use_container_width=True):
+                if st.button("선택 백업 복원", key="restore_backup_btn_v1", width="stretch"):
                     반영df, 변경됨, 저장성공, 저장메시지 = 자동백업복원적용(복원df, source_label="backup_restore")
                     if 저장성공:
                         st.success(f"백업을 복원했습니다. ({len(반영df)}건)")
@@ -3624,7 +4220,7 @@ def 자동백업관리UI(current_df, portfolio_df=None, holding_df=None):
                         file_name=os.path.basename(선택경로),
                         mime="application/json",
                         key="download_backup_btn_v1",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 except Exception as e:
                     st.warning(f"선택 백업 다운로드 준비 실패: {e}")
@@ -3636,7 +4232,7 @@ def 자동백업관리UI(current_df, portfolio_df=None, holding_df=None):
                         file_name=백업엑셀파일명(prefix="selected_backup"),
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="download_backup_xlsx_btn_v58",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 else:
                     st.caption("선택 백업 xlsx 변환 준비 중")
@@ -4184,6 +4780,64 @@ def 증감문자열(값, suffix=""):
     return f"{값:,.2f}{suffix}"
 
 
+# -----------------------------------
+# v5.15.6 시장지표 표시 포맷 통합
+# - 환율·금리·유가·VIX 등 외부 변수의 원본 float 노출 방지
+# - 표, 카드, 인사이트 화면에서 같은 규칙으로 표시
+# -----------------------------------
+def 시장지표유형판단(지표명):
+    이름 = str(지표명 or "").upper()
+    if "USD" in 이름 or "KRW" in 이름 or "환율" in 이름:
+        return "환율"
+    if "금리" in 이름 or "10년" in 이름 or "YIELD" in 이름:
+        return "금리"
+    if "WTI" in 이름 or "유" in 이름 or "OIL" in 이름 or "브렌트" in 이름:
+        return "달러"
+    if "금" in 이름 or "GOLD" in 이름:
+        return "달러"
+    if "VIX" in 이름:
+        return "지수"
+    return "숫자"
+
+
+def 시장지표값표시(값, 지표명=""):
+    try:
+        if 값 is None or pd.isna(값):
+            return "-"
+        값 = float(값)
+        유형 = 시장지표유형판단(지표명)
+        if 유형 == "환율":
+            return f"{값:,.2f}원"
+        if 유형 == "금리":
+            return f"{값:,.2f}%"
+        if 유형 == "달러":
+            return f"${값:,.2f}"
+        if 유형 == "지수":
+            return f"{값:,.2f}"
+        return f"{값:,.2f}"
+    except Exception:
+        return "-"
+
+
+def 시장지표변화표시(전일대비=None, 등락률=None, 지표명=""):
+    try:
+        전일유효 = 전일대비 is not None and not pd.isna(전일대비)
+        등락유효 = 등락률 is not None and not pd.isna(등락률)
+        if 전일유효 and 등락유효:
+            전일값 = float(전일대비)
+            등락값 = float(등락률)
+            if 시장지표유형판단(지표명) == "금리":
+                return f"{전일값:+,.2f} ({등락값:+.2f}%)"
+            return f"{전일값:+,.2f} ({등락값:+.2f}%)"
+        if 등락유효:
+            return f"{float(등락률):+.2f}%"
+        if 전일유효:
+            return f"{float(전일대비):+,.2f}"
+        return "전일 비교값 없음"
+    except Exception:
+        return "전일 비교값 없음"
+
+
 def 기준일시표시문자열(기준일=None, 조회시각=None):
     기준문자 = "-"
     if 기준일 is not None and not pd.isna(기준일):
@@ -4581,7 +5235,11 @@ def 정렬대상숫자열여부(series, 컬럼명=""):
 
 
 
-def 표데이터프레임(입력객체, use_container_width=True, hide_index=False, **kwargs):
+def 표데이터프레임(입력객체, width="stretch", hide_index=False, **kwargs):
+    # Streamlit 2025-12-31 이후 use_container_width 제거 예정 경고 대응
+    # 기존 호출부의 width="stretch"/"content" 기준으로 표시 폭을 통일합니다.
+    use_container_width = True if width in [True, "stretch", None] else False
+    dataframe_width = "stretch" if use_container_width else "content"
     try:
         from pandas.io.formats.style import Styler
     except Exception:
@@ -4597,7 +5255,7 @@ def 표데이터프레임(입력객체, use_container_width=True, hide_index=Fal
         원본df = 입력객체.copy()
         스타일객체 = 원본df.style
     else:
-        st.dataframe(입력객체, use_container_width=use_container_width, hide_index=hide_index, **kwargs)
+        st.dataframe(입력객체, width=dataframe_width, hide_index=hide_index, **kwargs)
         return
 
     if hide_index:
@@ -4945,8 +5603,10 @@ def 시장지표표시문자열df(df):
     표시용 = df.copy()
     if 표시용.empty:
         return 표시용
-    표시용["현재값"] = 표시용["현재값"].apply(lambda x: 숫자표시(x, 2))
-    표시용["전일대비"] = 표시용["전일대비"].apply(lambda x: 증감문자열(x))
+    if "지표" not in 표시용.columns:
+        표시용["지표"] = ""
+    표시용["현재값"] = 표시용.apply(lambda r: 시장지표값표시(r.get("현재값"), r.get("지표", "")), axis=1)
+    표시용["전일대비"] = 표시용.apply(lambda r: 시장지표변화표시(r.get("전일대비"), None, r.get("지표", "")), axis=1)
     표시용["등락률"] = 표시용["등락률"].apply(lambda x: 증감문자열(x, "%"))
     return 표시용
 
@@ -6614,7 +7274,7 @@ def 월간수익률리포트UI(거래df, 계산포트폴리오):
                     "매도 원가": 안전정수포맷,
                     "실현수익률": 수익률문자열,
                 }).map(손익색상, subset=["실현손익"]).map(수익률색상, subset=["실현수익률"]),
-                use_container_width=True,
+                width="stretch",
             )
 
         with st.expander("실현손익 상세", expanded=False):
@@ -6633,7 +7293,7 @@ def 월간수익률리포트UI(거래df, 계산포트폴리오):
                         "실현손익": 손익문자열,
                         "매도수익률": 수익률문자열,
                     }).map(손익색상, subset=["실현손익"]).map(수익률색상, subset=["매도수익률"]),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
         try:
@@ -6643,7 +7303,7 @@ def 월간수익률리포트UI(거래df, 계산포트폴리오):
                 file_name=f"monthly_report_{선택년월}_{서울현재시각().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="monthly_report_download_v592",
-                use_container_width=True,
+                width="stretch",
             )
         except Exception as e:
             st.warning(f"월간 리포트 다운로드 준비 실패: {e}")
@@ -6745,7 +7405,7 @@ def 종목별누적성적표UI(거래df, 계산포트폴리오):
                 "승률": 비율표시,
                 "매도 거래수": 안전정수포맷,
             }).map(손익색상, subset=["실현손익", "평가손익", "총손익"]).map(수익률색상, subset=["총수익률(%)"]),
-            use_container_width=True,
+            width="stretch",
         )
         with st.expander("성적표 읽는 법", expanded=False):
             st.markdown("""
@@ -7081,7 +7741,7 @@ def 자동분석코멘트UI(성적표, 거래df=None):
         진단표 = 포트폴리오자동진단표(성적표)
         if not 진단표.empty:
             st.markdown("#### 포트폴리오 종합 해석")
-            표데이터프레임(index_1부터(진단표), use_container_width=True)
+            표데이터프레임(index_1부터(진단표), width="stretch")
 
         코멘트표 = 종목별자동코멘트생성(성적표, 거래df=거래df)
         if 코멘트표.empty:
@@ -7100,12 +7760,12 @@ def 자동분석코멘트UI(성적표, 거래df=None):
                 "총수익률": 수익률문자열,
                 "승률": 비율표시,
             }).map(손익색상, subset=["총손익"]).map(수익률색상, subset=["총수익률"]),
-            use_container_width=True,
+            width="stretch",
         )
 
         with st.expander("상세 근거 보기", expanded=False):
             상세표 = 코멘트표[["종목명", "판단등급", "요약코멘트", "상세근거"]].copy()
-            표데이터프레임(index_1부터(상세표), use_container_width=True)
+            표데이터프레임(index_1부터(상세표), width="stretch")
 
         with st.expander("개별 분석과 코멘트의 역할 구분", expanded=False):
             차이표 = pd.DataFrame([
@@ -7122,7 +7782,7 @@ def 자동분석코멘트UI(성적표, 거래df=None):
                     "사용 목적": "다음 거래 전에 확인할 행동 기준 정리",
                 },
             ])
-            표데이터프레임(index_1부터(차이표), use_container_width=True)
+            표데이터프레임(index_1부터(차이표), width="stretch")
 
 
 def 리밸런싱계산(계산표, 목표비중사전):
@@ -7757,14 +8417,14 @@ def 차트분석문구(자산명, 데이터):
                 "근거": ["시계열 길이가 짧음", "이동평균선 비교 제한", "RSI 해석 신뢰도 낮음"],
                 "리스크": ["성급한 추세 판단 가능성", "단기 변동성 과대해석 가능성"],
                 "보유자관점": "기존 보유자라면 추가 대응보다 데이터 축적을 먼저 확인하는 편이 좋습니다.",
-                "신규진입관점": "신규 진입은 조금 더 긴 시계열 확보 후 검토하는 것이 바람직합니다.",
+                "신규진입관점": "신규 진입은 조금 더 긴 시계열을 확보한 뒤 검토하는 편이 바람직합니다.",
             },
             "Gemini": {
                 "한줄요약": "데이터 부족으로 빠른 판단의 신뢰도가 낮습니다.",
                 "현재신호": 부족문구,
                 "근거": ["최근 데이터 부족", "모멘텀 확인 제한", "추세 지속성 판단 어려움"],
                 "리스크": ["짧은 데이터에 따른 오판 가능성", "반등·하락 신호 왜곡 가능성"],
-                "보유자관점": "보유 중이라면 섣부른 비중 조정보다 추세 확인이 우선입니다.",
+                "보유자관점": "보유 중이라면 섣부른 비중 조정보다 추세 확인이 우선적으로 필요해 보입니다.",
                 "신규진입관점": "신규 진입은 확인 가능한 데이터가 더 쌓인 뒤가 좋습니다.",
             },
             "Claude": {
@@ -7786,9 +8446,9 @@ def 차트분석문구(자산명, 데이터):
     추세 = "중립"
     if pd.notna(ma20) and pd.notna(ma60):
         if 종가 > ma20 > ma60:
-            추세 = "상승 추세"
+            추세 = "상승 흐름"
         elif 종가 < ma20 < ma60:
-            추세 = "하락 추세"
+            추세 = "하락 흐름"
 
     rsi해석 = "중립권"
     if pd.notna(rsi):
@@ -7814,14 +8474,14 @@ def 차트분석문구(자산명, 데이터):
 
     거래량문구 = "거래량 정보가 충분치 않다면 가격 신호만으로 성급히 판단하지 않는 편이 좋습니다."
 
-    방향성문구 = "양호" if 추세 == "상승 추세" else "둔화 또는 중립"
-    chatgpt_signal = f"{자산명}은 현재 {추세}로 해석됩니다. 종가와 20일·60일 이동평균선의 배열을 보면 방향성은 {방향성문구}합니다. RSI는 {rsi해석}이며, {지지저항문구}"
+    방향성문구 = "비교적 안정" if 추세 == "상승 흐름" else "둔화 또는 중립"
+    chatgpt_signal = f"{자산명}은 현재 가격 흐름 기준으로 {추세}에 가깝게 해석됩니다. 종가와 20일·60일 이동평균선 배열을 보면 방향성은 {방향성문구}으로 읽힙니다. RSI는 {rsi해석}이며, {지지저항문구}"
     gemini_signal = f"기술적으로 보면 {자산명}의 핵심 포인트는 이동평균선 정렬과 RSI입니다. 현재 판독은 {추세}, RSI는 {rsi해석}입니다. {변동문구}"
     claude_signal = f"종가와 이동평균선의 위치를 기준으로 보면 {추세}에 가깝고, RSI는 {rsi해석} 구간으로 읽힙니다. {지지저항문구}"
 
     return {
         "ChatGPT": {
-            "한줄요약": f"{자산명}은 현재 {추세}로 보되, 단기 추격 대응보다 지지 확인이 우선입니다.",
+            "한줄요약": f"{자산명}은 현재 {추세}로 보되, 단기 추격 대응보다는 지지 여부 확인이 우선적으로 필요해 보입니다.",
             "현재신호": chatgpt_signal,
             "근거": [
                 "종가와 20일·60일 이동평균선 배열",
@@ -7833,10 +8493,10 @@ def 차트분석문구(자산명, 데이터):
                 "거래량 확인 없이 가격만 보고 대응하면 오판 가능성",
             ],
             "보유자관점": "기존 보유자라면 단기 추격 매수보다 지지선 유지 여부를 먼저 확인하는 접근이 더 안정적입니다.",
-            "신규진입관점": "신규 진입은 한 번에 들어가기보다 분할 접근이 더 적절합니다.",
+            "신규진입관점": "신규 진입은 일괄 매수보다 분할 접근을 검토하는 편이 더 신중합니다.",
         },
         "Gemini": {
-            "한줄요약": f"{자산명}은 현재 빠른 판단 기준으로 {추세} 쪽 신호가 우세합니다.",
+            "한줄요약": f"{자산명}은 현재 추세 관점에서는 {추세} 쪽 신호가 상대적으로 우세해 보입니다.",
             "현재신호": gemini_signal,
             "근거": [
                 "이동평균선 정렬 상태",
@@ -7848,10 +8508,10 @@ def 차트분석문구(자산명, 데이터):
                 "최근 변동성이 큰 구간이면 신호 왜곡 가능성 존재",
             ],
             "보유자관점": "보유 중이라면 단기 추세 유지 여부와 20일선 회복·이탈을 함께 보는 것이 좋습니다.",
-            "신규진입관점": "신규 진입은 추세 확인 이후 소규모로 시작하는 편이 유리합니다.",
+            "신규진입관점": "신규 진입은 추세 확인 이후 소규모부터 검토하는 편이 더 신중합니다.",
         },
         "Claude": {
-            "한줄요약": f"{자산명}은 현재 {추세} 성격이 우세하지만, 이를 곧바로 강한 추세 전환으로 단정하기에는 아직 확인할 요소가 남아 있습니다.",
+            "한줄요약": f"{자산명}은 현재 {추세} 성격이 우세하지만, 이를 곧바로 강한 흐름 전환으로 단정하기에는 아직 확인할 요소가 남아 있습니다.",
             "현재신호": claude_signal,
             "근거": [
                 "종가의 이동평균선 대비 위치",
@@ -7863,34 +8523,93 @@ def 차트분석문구(자산명, 데이터):
                 거래량문구,
             ],
             "보유자관점": "기존 보유자라면 성급한 비중 확대보다 지지선 유지 여부를 먼저 확인하는 접근이 더 신중합니다.",
-            "신규진입관점": "신규 진입은 추세 확인 이후 분할 접근이 더 적절합니다.",
+            "신규진입관점": "신규 진입은 추세 확인 이후 분할 접근을 검토하는 편이 더 신중합니다.",
         },
     }
 
 
 def 분석카드표시(분석데이터):
-    st.markdown(f"### 한줄 요약")
-    st.info(분석데이터["한줄요약"])
+    """분석 관점별 해석 카드 표시.
+    실제 외부 AI 모델의 답변처럼 보이지 않도록 과장 표현을 줄이고,
+    데이터 기반 근거·한계·보유자 관점을 분리합니다.
+    """
+    if not isinstance(분석데이터, dict):
+        st.info("분석 데이터를 표시할 수 없습니다.")
+        return
 
-    col1, col2 = st.columns([1.6, 1])
+    st.markdown(
+        """
+        <style>
+        .insight-compare-summary {
+            font-size: 1.02rem;
+            line-height: 1.6;
+            color: #dbeafe;
+            background: rgba(30,64,175,.22);
+            border: 1px solid rgba(96,165,250,.18);
+            border-radius: 12px;
+            padding: .62rem .72rem;
+            margin: .35rem 0 .75rem 0;
+            word-break: keep-all;
+        }
+        .insight-compare-title {
+            font-size: 1.05rem;
+            font-weight: 620;
+            color: #f8fafc;
+            margin: .25rem 0 .35rem 0;
+        }
+        .insight-compare-text {
+            font-size: .96rem;
+            line-height: 1.65;
+            color: #e5e7eb;
+            word-break: keep-all;
+        }
+        .insight-compare-list {
+            font-size: .95rem;
+            line-height: 1.65;
+            color: #d1d5db;
+            margin-top: .15rem;
+            padding-left: 1.0rem;
+        }
+        .insight-compare-list li { margin-bottom: .22rem; }
+        .insight-compare-note {
+            font-size: .76rem;
+            line-height: 1.45;
+            color: #9ca3af;
+            margin-top: .55rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    한줄 = html.escape(str(분석데이터.get("한줄요약", "분석 요약이 없습니다.")))
+    st.markdown(f"<div class='insight-compare-summary'>{한줄}</div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns([1.55, 1], gap="large")
     with col1:
-        st.markdown("### 현재 신호")
-        st.write(분석데이터["현재신호"])
+        st.markdown("<div class='insight-compare-title'>현재 신호</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='insight-compare-text'>{html.escape(str(분석데이터.get('현재신호', '-')))}</div>", unsafe_allow_html=True)
 
-        st.markdown("### 근거")
-        for 항목 in 분석데이터["근거"]:
-            st.markdown(f"- {항목}")
+        st.markdown("<div class='insight-compare-title'>근거</div>", unsafe_allow_html=True)
+        근거목록 = 분석데이터.get("근거", []) or []
+        근거HTML = "".join([f"<li>{html.escape(str(x))}</li>" for x in 근거목록]) or "<li>표시할 근거가 부족합니다.</li>"
+        st.markdown(f"<ul class='insight-compare-list'>{근거HTML}</ul>", unsafe_allow_html=True)
 
     with col2:
-        st.markdown("### 주의할 리스크")
-        for 항목 in 분석데이터["리스크"]:
-            st.markdown(f"- {항목}")
+        st.markdown("<div class='insight-compare-title'>주의할 리스크</div>", unsafe_allow_html=True)
+        리스크목록 = 분석데이터.get("리스크", []) or []
+        리스크HTML = "".join([f"<li>{html.escape(str(x))}</li>" for x in 리스크목록]) or "<li>표시할 리스크가 부족합니다.</li>"
+        st.markdown(f"<ul class='insight-compare-list'>{리스크HTML}</ul>", unsafe_allow_html=True)
 
-    st.markdown("### 보유자 관점")
-    st.write(분석데이터["보유자관점"])
+    관점1, 관점2 = st.columns(2, gap="large")
+    with 관점1:
+        st.markdown("<div class='insight-compare-title'>보유자 관점</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='insight-compare-text'>{html.escape(str(분석데이터.get('보유자관점', '-')))}</div>", unsafe_allow_html=True)
+    with 관점2:
+        st.markdown("<div class='insight-compare-title'>신규 진입 관점</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='insight-compare-text'>{html.escape(str(분석데이터.get('신규진입관점', '-')))}</div>", unsafe_allow_html=True)
 
-    st.markdown("### 신규 진입 관점")
-    st.write(분석데이터["신규진입관점"])
+    st.markdown("<div class='insight-compare-note'>※ 이 해석은 가격·이동평균·RSI 등 제한된 데이터에 근거한 보조 판단입니다. 실제 매수·매도 결정은 계좌 비중, 투자기간, 현금 여력, 외부시장 상황을 함께 확인해야 합니다.</div>", unsafe_allow_html=True)
 
 
 def 종목거래이력표생성(거래df, 종목코드=None):
@@ -8276,7 +8995,7 @@ def 고급매매코멘트생성(종목명, 가격데이터, 포트폴리오행=N
         추세점수 += 1
 
     if 추세점수 >= 5:
-        추세판정 = "강한 상승 추세"
+        추세판정 = "강한 상승 흐름"
     elif 추세점수 == 4:
         추세판정 = "상승 우위"
     elif 추세점수 == 3:
@@ -8284,7 +9003,7 @@ def 고급매매코멘트생성(종목명, 가격데이터, 포트폴리오행=N
     elif 추세점수 == 2:
         추세판정 = "약세 압력"
     else:
-        추세판정 = "하락 추세"
+        추세판정 = "하락 흐름"
 
     if rsi is None:
         rsi판정 = "판정 제한"
@@ -8667,7 +9386,7 @@ def 대시보드스타일적용():
     .monitor-add-card [data-testid="stButton"] > button {{
         min-height: 112px;
         height: 176px;
-        border-radius: 16px;
+        border-radius: 18px;
         border: 1.5px dashed #60a5fa;
         background: linear-gradient(180deg, rgba(7,18,44,0.94) 0%, rgba(15,23,42,0.98) 100%);
         color: #dbeafe;
@@ -8708,7 +9427,7 @@ def 대시보드스타일적용():
     }}
     .ratio-summary-card {{
         border: 1px solid #1f2937;
-        border-radius: 16px;
+        border-radius: 18px;
         padding: 14px 16px;
         background: #020817;
         margin-bottom: 4px;
@@ -8780,7 +9499,7 @@ def 대시보드스타일적용():
         .simple-market-card {{
             min-height: 126px;
             padding: 11px 12px 9px 12px;
-            border-radius: 16px;
+            border-radius: 18px;
         }}
         .simple-market-title {{
             font-size: 0.96rem;
@@ -8822,16 +9541,9 @@ def 심플카드HTML(이름, 현재가, 전일대비, 등락률, 보조라벨=""
     if 현재가 is None or pd.isna(현재가):
         현재가문자 = "데이터 확인 필요"
     else:
-        현재가문자 = 숫자표시(현재가, 2)
+        현재가문자 = 시장지표값표시(현재가, 이름)
 
-    변화문자 = "전일 비교값 없음"
-    if 등락률 is not None and not pd.isna(등락률):
-        if 전일대비 is not None and not pd.isna(전일대비):
-            변화문자 = f"{전일대비:+,.2f} ({등락률:+.2f}%)"
-        else:
-            변화문자 = f"{등락률:+.2f}%"
-    elif 전일대비 is not None and not pd.isna(전일대비):
-        변화문자 = f"{전일대비:+,.2f}"
+    변화문자 = 시장지표변화표시(전일대비, 등락률, 이름)
 
     이름 = html.escape(str(이름))
     보조라벨 = html.escape(str(보조라벨)) if 보조라벨 else ""
@@ -9619,6 +10331,622 @@ def 캔들유형HTML(캔들유형):
 
 
 
+
+
+# -----------------------------------
+# v5.15.2 투자 인사이트 요약 강화
+# - 자산원장/변화로그 대신 현재 보유자산의 수익 기여도, 집중도, 최근 거래 메모를 한 화면에서 요약
+# -----------------------------------
+def 투자핵심인사이트요약UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown("---")
+    st.subheader("투자 핵심 인사이트")
+    st.caption("현재 보유자산 기준으로 수익 기여도, 손실 요인, 비중 집중도, 최근 거래 성향을 간단히 점검합니다.")
+
+    보유 = pd.DataFrame() if 보유계산포트폴리오 is None else pd.DataFrame(보유계산포트폴리오).copy()
+    계산 = pd.DataFrame() if 계산포트폴리오 is None else pd.DataFrame(계산포트폴리오).copy()
+    거래 = pd.DataFrame() if 거래이력df is None else pd.DataFrame(거래이력df).copy()
+
+    if 보유.empty:
+        st.info("현재 보유자산 기준 인사이트를 만들 데이터가 없습니다.")
+        return
+
+    if "데이터상태" in 보유.columns:
+        정상 = 보유[보유["데이터상태"].astype(str) == "정상"].copy()
+        if 정상.empty:
+            정상 = 보유.copy()
+    else:
+        정상 = 보유.copy()
+
+    for 열 in ["투자원금", "평가금액", "평가손익", "수익률", "현재비중", "보유수량"]:
+        if 열 in 정상.columns:
+            정상[열] = pd.to_numeric(정상[열], errors="coerce").fillna(0)
+
+    총원금 = float(정상.get("투자원금", pd.Series(dtype="float64")).sum()) if "투자원금" in 정상.columns else 0
+    총평가 = float(정상.get("평가금액", pd.Series(dtype="float64")).sum()) if "평가금액" in 정상.columns else 0
+    총평가손익 = float(정상.get("평가손익", pd.Series(dtype="float64")).sum()) if "평가손익" in 정상.columns else 0
+    총수익률 = (총평가손익 / 총원금 * 100) if 총원금 else 0
+
+    수익행 = 정상.sort_values("평가손익", ascending=False).iloc[0] if "평가손익" in 정상.columns and not 정상.empty else None
+    손실행 = 정상.sort_values("평가손익", ascending=True).iloc[0] if "평가손익" in 정상.columns and not 정상.empty else None
+    비중행 = 정상.sort_values("현재비중", ascending=False).iloc[0] if "현재비중" in 정상.columns and not 정상.empty else None
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("보유 투자원금", 금액표시(총원금))
+    c2.metric("보유 평가액", 금액표시(총평가))
+    c3.metric("평가손익", 금액표시(총평가손익), f"{총수익률:.2f}%")
+    if 비중행 is not None:
+        c4.metric("최대 비중", str(비중행.get("종목명", "")), f"{float(비중행.get('현재비중', 0)):.2f}%")
+    else:
+        c4.metric("최대 비중", "-")
+
+    문장 = []
+    if 수익행 is not None:
+        문장.append(f"현재 수익 기여 1위는 {수익행.get('종목명', '')}이며 평가손익은 {손익원화문자열(수익행.get('평가손익', 0))}입니다.")
+    if 손실행 is not None and float(손실행.get("평가손익", 0)) < 0:
+        문장.append(f"현재 손실 점검 1순위는 {손실행.get('종목명', '')}이며 평가손익은 {손익원화문자열(손실행.get('평가손익', 0))}입니다.")
+    if 비중행 is not None:
+        최대비중 = float(비중행.get("현재비중", 0) or 0)
+        if 최대비중 >= 30:
+            문장.append(f"{비중행.get('종목명', '')} 비중이 {최대비중:.1f}%로 높아 단일 종목 변동성이 전체 수익률에 크게 반영될 수 있습니다.")
+        elif 최대비중 >= 20:
+            문장.append(f"{비중행.get('종목명', '')} 비중이 {최대비중:.1f}%로 포트폴리오 영향도가 큰 편입니다.")
+        else:
+            문장.append("단일 종목 비중은 과도하게 높지 않은 편입니다.")
+    if not 문장:
+        문장.append("현재 보유 데이터 기준으로 특이 위험 신호는 제한적입니다.")
+
+    st.info(" ".join(문장))
+
+    요약행 = []
+    if 수익행 is not None:
+        요약행.append({"구분": "수익 기여 1위", "종목": 수익행.get("종목명", ""), "금액": 수익행.get("평가손익", 0), "비중/수익률": f"{float(수익행.get('수익률', 0)):.2f}%"})
+    if 손실행 is not None:
+        요약행.append({"구분": "손실 또는 수익 하위", "종목": 손실행.get("종목명", ""), "금액": 손실행.get("평가손익", 0), "비중/수익률": f"{float(손실행.get('수익률', 0)):.2f}%"})
+    if 비중행 is not None:
+        요약행.append({"구분": "최대 비중", "종목": 비중행.get("종목명", ""), "금액": 비중행.get("평가금액", 0), "비중/수익률": f"{float(비중행.get('현재비중', 0)):.2f}%"})
+
+    if 요약행:
+        요약표 = pd.DataFrame(요약행)
+        try:
+            표데이터프레임(
+                요약표.style.format({"금액": 손익원화문자열}).map(손익색상, subset=["금액"]),
+                width="stretch",
+                hide_index=True,
+            )
+        except Exception:
+            표데이터프레임(요약표, width="stretch", hide_index=True)
+
+    if not 거래.empty and "거래일자" in 거래.columns:
+        최근거래 = 거래.copy()
+        최근거래["거래일자_dt"] = pd.to_datetime(최근거래["거래일자"], errors="coerce")
+        최근거래 = 최근거래.dropna(subset=["거래일자_dt"]).sort_values("거래일자_dt", ascending=False).head(10)
+        if not 최근거래.empty:
+            st.markdown("##### 최근 거래 메모 점검")
+            표시열 = [c for c in ["거래일자", "종목명", "거래구분", "거래수량", "거래단가", "운용사", "비고"] if c in 최근거래.columns]
+            표시 = 최근거래[표시열].copy()
+            표데이터프레임(index_1부터(표시), width="stretch", hide_index=True)
+
+            메모텍스트 = " ".join(최근거래.get("비고", pd.Series(dtype=str)).fillna("").astype(str).tolist()) if "비고" in 최근거래.columns else ""
+            패턴 = []
+            for 단어, 설명 in [("추매", "하락·조정 구간에서 추가매수 판단이 포함되어 있습니다."), ("급락", "급락 이후 대응 거래가 포함되어 있습니다."), ("예약", "예약 주문 또는 자동 체결 관련 메모가 있습니다."), ("코스피", "시장지수 흐름을 참고한 거래 메모가 있습니다."), ("유가", "원자재·거시 변수를 참고한 거래 메모가 있습니다."), ("환율", "환율 변수를 참고한 거래 메모가 있습니다.")]:
+                if 단어 in 메모텍스트:
+                    패턴.append(설명)
+            if 패턴:
+                st.caption("최근 거래 메모에서 확인된 패턴: " + " ".join(패턴))
+            else:
+                st.caption("최근 거래 메모에서 반복적으로 감지된 핵심 키워드는 아직 많지 않습니다.")
+
+
+
+# -----------------------------------
+# v5.15.4 외부 거시지표 기반 시장 영향 인사이트
+# - 거래 메모 반복 요약은 보조 자료로 낮추고, 환율·금리·유가·VIX 등 외부 변수와 보유자산 노출을 함께 해석합니다.
+# - 실시간 뉴스 원문 판단이 아니라 현재 앱이 수집하는 시장지표 수치와 보유구성 기반의 1차 점검입니다.
+# -----------------------------------
+def _안전숫자변환(값, 기본값=0.0):
+    try:
+        if 값 is None:
+            return 기본값
+        if pd.isna(값):
+            return 기본값
+        문자 = str(값).replace(',', '').replace('%', '').replace('+', '').strip()
+        if 문자 == '' or 문자.lower() in ['nan', 'none', 'nat']:
+            return 기본값
+        return float(문자)
+    except Exception:
+        return 기본값
+
+
+def _지표행찾기(시장지표df, 지표명):
+    try:
+        df = pd.DataFrame(시장지표df).copy()
+        if df.empty or '지표' not in df.columns:
+            return {}
+        후보 = df[df['지표'].astype(str) == str(지표명)]
+        if 후보.empty:
+            return {}
+        return 후보.iloc[0].to_dict()
+    except Exception:
+        return {}
+
+
+def _지표상태문장(행, 이름, 우호조건='하락'):
+    현재 = 행.get('현재값', None)
+    등락률 = _안전숫자변환(행.get('등락률', 0))
+    전일대비 = _안전숫자변환(행.get('전일대비', 0))
+    방향 = '상승' if 등락률 > 0 else '하락' if 등락률 < 0 else '보합'
+    우호 = False
+    if 우호조건 == '하락':
+        우호 = 등락률 < 0
+    elif 우호조건 == '상승':
+        우호 = 등락률 > 0
+    else:
+        우호 = abs(등락률) < 0.3
+    톤 = '우호' if 우호 else '부담' if abs(등락률) >= 0.3 else '중립'
+    return {
+        '지표': 이름,
+        '현재값': 현재 if 현재 is not None else None,
+        '전일대비': 전일대비,
+        '등락률': 등락률,
+        '방향': 방향,
+        '시장해석': 톤,
+    }
+
+
+def 외부거시시장영향인사이트UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    """외부 시장 변수와 현재 보유자산 노출을 연결해 해석합니다.
+    v5.16.1 핵심 개선:
+    - 지표 숫자 표시와 해석을 분리
+    - 단순 '환율 상승=부담'이 아니라 보유자산 노출과 연결
+    - 시장부담 점수를 만들어 현재 환경의 강도를 직관적으로 표시
+    - 거래 메모는 마지막 참고자료로만 축소
+    """
+    st.markdown('---')
+    st.subheader('외부 변수 → 보유자산 영향 분석')
+    st.caption('환율·금리·유가·변동성 지표를 현재 보유자산 구조와 연결해 점검합니다. 이 내용은 예측이 아니라 현재 환경에 대한 규칙 기반 참고 해석입니다.')
+
+    보유 = pd.DataFrame() if 보유계산포트폴리오 is None else pd.DataFrame(보유계산포트폴리오).copy()
+    거래 = pd.DataFrame() if 거래이력df is None else pd.DataFrame(거래이력df).copy()
+
+    try:
+        시장지표df = 네이버시장지표목록가져오기()
+    except Exception:
+        시장지표df = pd.DataFrame()
+
+    if 시장지표df is None or pd.DataFrame(시장지표df).empty:
+        st.warning('외부 시장지표를 불러오지 못했습니다. 주요 모니터링에서 지표 새로고침 후 다시 확인해 주세요.')
+        return
+
+    시장지표df = pd.DataFrame(시장지표df).copy()
+
+    def 지표가져오기(이름, 우호조건='하락'):
+        행 = _지표행찾기(시장지표df, 이름)
+        if not 행:
+            return None
+        return _지표상태문장(행, 이름, 우호조건)
+
+    지표목록 = [
+        지표가져오기('USD/KRW', '하락'),
+        지표가져오기('미국 10년물 금리', '하락'),
+        지표가져오기('WTI', '하락'),
+        지표가져오기('VIX', '하락'),
+    ]
+    지표카드 = [x for x in 지표목록 if isinstance(x, dict)]
+
+    if not 지표카드:
+        st.warning('분석에 필요한 핵심 외부지표가 부족합니다.')
+        return
+
+    등락 = {x['지표']: float(x.get('등락률', 0) or 0) for x in 지표카드}
+    현재값 = {x['지표']: x.get('현재값', None) for x in 지표카드}
+
+    # 시장부담 점수: 0~100. 상승 시 부담으로 해석되는 지표만 가중 합산합니다.
+    환율 = 등락.get('USD/KRW', 0)
+    금리 = 등락.get('미국 10년물 금리', 0)
+    유가 = 등락.get('WTI', 0)
+    vix = 등락.get('VIX', 0)
+    부담점수 = 50
+    부담점수 += min(max(환율 * 8, -12), 12)
+    부담점수 += min(max(금리 * 10, -15), 15)
+    부담점수 += min(max(유가 * 4, -10), 10)
+    부담점수 += min(max(vix * 2.2, -18), 18)
+    부담점수 = int(round(max(0, min(100, 부담점수))))
+
+    if 부담점수 >= 70:
+        부담등급 = '경계'
+        부담문장 = '외부 변수 조합상 단기 변동성 관리가 우선으로 보입니다.'
+    elif 부담점수 <= 35:
+        부담등급 = '완화'
+        부담문장 = '외부 변수 조합은 위험자산 심리에 비교적 우호적으로 해석됩니다.'
+    else:
+        부담등급 = '중립'
+        부담문장 = '외부 변수만으로 한쪽 방향의 강한 신호는 뚜렷하지 않습니다.'
+
+    m1, m2, m3, m4, m5 = st.columns([1.05, 1, 1, 1, 1])
+    with m1:
+        st.metric('시장부담 점수', f'{부담점수}/100', 부담등급)
+        st.caption(부담문장)
+    for col, item in zip([m2, m3, m4, m5], 지표카드[:4]):
+        with col:
+            delta = f"{item.get('등락률', 0):+.2f}%"
+            st.metric(item.get('지표', ''), 시장지표값표시(item.get('현재값', None), item.get('지표', '')), delta)
+            st.caption(f"{item.get('방향', '-')} · {item.get('시장해석', '-')}")
+
+    표시 = pd.DataFrame(지표카드)
+    표시['해석 기준'] = 표시['지표'].map({
+        'USD/KRW': '상승 시 외국인 수급·국내 성장주에 부담 가능',
+        '미국 10년물 금리': '상승 시 성장주·기술주 밸류에이션 부담 가능',
+        'WTI': '상승 시 물가·금리 부담을 통한 간접 부담 가능',
+        'VIX': '상승 시 위험회피·단기 변동성 확대 가능',
+    }).fillna('현재 보유자산과 함께 점검')
+    try:
+        표데이터프레임(
+            index_1부터(표시).style.format({'전일대비': lambda v: f'{float(v):+,.2f}', '등락률': lambda v: f'{float(v):+,.2f}%'}),
+            width='stretch',
+            hide_index=True,
+        )
+    except Exception:
+        표데이터프레임(index_1부터(표시), width='stretch', hide_index=True)
+
+    # 보유자산 노출 분류
+    노출행 = []
+    if not 보유.empty:
+        작업 = 보유.copy()
+        for 열 in ['평가금액', '평가손익', '투자원금', '수익률']:
+            if 열 in 작업.columns:
+                작업[열] = pd.to_numeric(작업[열], errors='coerce').fillna(0)
+        if '데이터상태' in 작업.columns:
+            작업 = 작업[작업['데이터상태'].astype(str).isin(['정상', '', 'nan']) | 작업['데이터상태'].isna()].copy()
+        총평가 = float(작업['평가금액'].sum()) if '평가금액' in 작업.columns else 0
+        종목명열 = 작업['종목명'].fillna('').astype(str) if '종목명' in 작업.columns else pd.Series([''] * len(작업))
+
+        def 노출추가(마스크, 영역, 민감변수, 해석):
+            try:
+                대상 = 작업.loc[마스크].copy()
+                평가 = float(대상['평가금액'].sum()) if '평가금액' in 대상.columns else 0
+                손익 = float(대상['평가손익'].sum()) if '평가손익' in 대상.columns else 0
+                비중 = 평가 / 총평가 * 100 if 총평가 else 0
+                if 평가 > 0 or 비중 > 0:
+                    노출행.append({
+                        '노출영역': 영역,
+                        '민감 변수': 민감변수,
+                        '평가금액': 평가,
+                        '전체비중': 비중,
+                        '평가손익': 손익,
+                        '해석': 해석,
+                    })
+            except Exception:
+                pass
+
+        노출추가(종목명열.str.contains('KODEX 200|TIGER 200|코스피|200', regex=True, na=False),
+             '국내 대형주·코스피', '환율·외국인 수급', '환율 상승 시 외국인 수급 부담을 받을 수 있는 영역입니다.')
+        노출추가(종목명열.str.contains('코스닥|KODEX 코스닥150|성장', regex=True, na=False),
+             '코스닥·성장주', '미국금리·위험선호', '금리 상승과 위험회피 국면에서 변동성이 커질 수 있는 영역입니다.')
+        노출추가(종목명열.str.contains('하이닉스|삼성전자|반도체|AI|인공지능', regex=True, na=False),
+             '반도체·AI', '금리·VIX·AI 업황', 'AI 수요에는 우호적일 수 있으나 금리와 변동성에는 민감합니다.')
+        노출추가(종목명열.str.contains('TDF|타깃|Target', regex=True, na=False),
+             'TDF·분산형 자산', '글로벌 주식·채권', '단일 종목보다 분산 효과가 있지만 글로벌 금리와 주식시장 영향을 함께 받습니다.')
+        노출추가(종목명열.str.contains('CMA|예수금|현금|대기', regex=True, na=False),
+             '현금성 방어력', '변동성·매수여력', '시장 변동성이 커질 때 분할매수 여력을 제공하는 영역입니다.')
+
+    if 노출행:
+        st.markdown('##### 보유자산 노출 구조')
+        노출표 = pd.DataFrame(노출행).sort_values('평가금액', ascending=False).reset_index(drop=True)
+        try:
+            표데이터프레임(
+                index_1부터(노출표).style.format({
+                    '평가금액': 원화정수포맷,
+                    '전체비중': lambda v: f'{float(v):,.1f}%',
+                    '평가손익': 손익원화문자열,
+                }).map(손익색상, subset=[c for c in ['평가손익'] if c in 노출표.columns]),
+                width='stretch',
+                hide_index=True,
+            )
+        except Exception:
+            표데이터프레임(index_1부터(노출표), width='stretch', hide_index=True)
+
+        # 노출 구조와 외부 변수 연결 해석
+        st.markdown('##### 현재 환경에서의 포트폴리오 영향')
+        영향행 = []
+        노출비중 = {r.get('노출영역'): float(r.get('전체비중', 0) or 0) for r in 노출행}
+
+        def 영향추가(대상, 변수, 현재신호, 영향, 점검, 강도='중간'):
+            영향행.append({
+                '대상자산': 대상,
+                '관련 변수': 변수,
+                '현재 신호': 현재신호,
+                '영향 해석': 영향,
+                '점검 포인트': 점검,
+                '강도': 강도,
+            })
+
+        if 노출비중.get('반도체·AI', 0) > 0:
+            if 금리 > 0.5 or vix > 3:
+                영향추가('반도체·AI 보유자산', '미국금리·VIX', '금리 또는 변동성 상승', 'AI 수요 기대와 별개로 단기 가격 변동성이 커질 수 있습니다.', '비중 확대보다 평균단가·목표비중·실적 모멘텀을 함께 확인', '높음')
+            elif 금리 < -0.5 or vix < -3:
+                영향추가('반도체·AI 보유자산', '미국금리·VIX', '금리 또는 변동성 완화', '기술주 투자심리에는 상대적으로 우호적인 환경으로 해석됩니다.', '단기 급등 이후 추격매수보다 분할 기준 확인', '중간')
+            else:
+                영향추가('반도체·AI 보유자산', 'AI 업황·실적', '외부 변수 중립권', '거시지표보다 개별 기업 실적과 수급 영향이 더 중요해 보입니다.', '실적 발표·외국인 수급·업황 뉴스 확인', '보통')
+
+        if 노출비중.get('코스닥·성장주', 0) > 0:
+            if 금리 > 0.5:
+                영향추가('코스닥·성장주 자산', '미국 10년물 금리', '금리 상승', '성장주 밸류에이션 부담이 커질 수 있습니다.', '추가매수는 가격 하락폭보다 보유비중과 손실허용 범위 기준으로 판단', '높음')
+            elif vix > 3:
+                영향추가('코스닥·성장주 자산', 'VIX', '변동성 상승', '위험회피 심리가 강해지면 코스닥 계열 변동성이 확대될 수 있습니다.', '한 번에 매수하지 말고 분할 간격 확대', '중간')
+            else:
+                영향추가('코스닥·성장주 자산', '금리·위험선호', '강한 부담 신호 제한', '반등 탄력은 가능하지만 구조적으로 변동성은 큰 영역입니다.', '단기 수익률보다 목표 비중 점검', '보통')
+
+        if 노출비중.get('국내 대형주·코스피', 0) > 0:
+            if 환율 > 0.3:
+                영향추가('국내 대형주·코스피 자산', 'USD/KRW', '환율 상승', '외국인 수급 측면에서 부담 요인이 될 수 있습니다.', '외국인 순매수 전환 여부와 지수 지지선 확인', '중간')
+            elif 환율 < -0.3:
+                영향추가('국내 대형주·코스피 자산', 'USD/KRW', '환율 하락', '외국인 수급 개선 기대에는 상대적으로 우호적일 수 있습니다.', '환율 하락이 실제 수급 개선으로 연결되는지 확인', '중간')
+            else:
+                영향추가('국내 대형주·코스피 자산', '환율·외국인 수급', '환율 중립권', '시장 방향성은 실적과 외국인 수급의 영향이 더 커 보입니다.', '코스피 흐름과 반도체 대형주 동조 확인', '보통')
+
+        if 노출비중.get('TDF·분산형 자산', 0) > 0:
+            if 금리 > 0.5:
+                영향추가('TDF·분산형 자산', '미국금리', '금리 상승', '채권 가격과 글로벌 주식 밸류에이션에 동시에 부담이 될 수 있습니다.', '단기 손익보다 장기 배분 목적 유지 여부 확인', '중간')
+            else:
+                영향추가('TDF·분산형 자산', '글로벌 자산배분', '분산 효과 유지', '단일 종목 변동성을 완화하는 완충 역할을 기대할 수 있습니다.', '주식형 자산과의 전체 비중 균형 확인', '보통')
+
+        if 유가 > 1.0:
+            영향추가('전체 국내주식 포트폴리오', 'WTI', '유가 상승', '물가와 금리 부담을 통해 국내 증시에 간접 부담이 될 수 있습니다.', '유가 상승이 일시적 이벤트인지 추세인지 확인', '중간')
+        if vix > 3.0:
+            영향추가('전체 포트폴리오', 'VIX', '변동성 상승', '단기 위험관리와 매수 속도 조절이 필요한 환경입니다.', '신규 매수는 분할하고, 급락 시에도 현금 여력 확인', '높음')
+
+        if 영향행:
+            try:
+                표데이터프레임(index_1부터(pd.DataFrame(영향행)), width='stretch', hide_index=True)
+            except Exception:
+                st.dataframe(index_1부터(pd.DataFrame(영향행)), width='stretch', hide_index=True)
+
+    # 핵심 리서치형 요약
+    요약 = []
+    if 부담점수 >= 70:
+        요약.append('현재 외부 변수 조합은 공격적인 추가매수보다 변동성 관리와 분할 접근이 더 필요한 환경으로 해석됩니다.')
+    elif 부담점수 <= 35:
+        요약.append('현재 외부 변수 조합은 위험자산 심리에 비교적 우호적이지만, 단기 가격 급등 구간에서는 추격매수를 조심할 필요가 있습니다.')
+    else:
+        요약.append('현재 외부 변수만으로는 강한 방향성이 뚜렷하지 않아, 보유종목의 실적·수급·가격 위치를 함께 보는 편이 적절합니다.')
+
+    if 환율 > 0.3:
+        요약.append('환율 상승은 국내 대형주와 코스닥 자산에 외국인 수급 부담으로 연결될 수 있습니다.')
+    elif 환율 < -0.3:
+        요약.append('환율 하락은 외국인 수급 개선 기대에는 우호적일 수 있습니다.')
+
+    if 금리 > 0.5:
+        요약.append('미국 장기금리 상승은 성장주·기술주·코스닥 자산의 밸류에이션 부담을 높일 수 있습니다.')
+    elif 금리 < -0.5:
+        요약.append('미국 장기금리 하락은 기술주와 성장주 투자심리에는 상대적으로 우호적일 수 있습니다.')
+
+    if 유가 > 1.0:
+        요약.append('유가 상승은 물가와 금리 부담을 통해 주식시장에 간접 부담으로 작용할 수 있습니다.')
+    elif 유가 < -1.0:
+        요약.append('유가 하락은 인플레이션 부담 완화 측면에서 우호적으로 해석될 수 있습니다.')
+
+    if vix > 3.0:
+        요약.append('VIX 상승은 단기 위험회피 심리가 커졌다는 신호일 수 있어 매수 속도 조절이 필요합니다.')
+    elif vix < -3.0:
+        요약.append('VIX 하락은 위험선호 회복 신호일 수 있으나, 단기 낙관으로만 해석하지 않는 편이 안전합니다.')
+
+    st.info(' '.join(요약))
+
+    # 거래 메모는 참고자료로만 축소
+    메모열 = None
+    for 후보 in ['비고', '메모', '거래메모', '투자메모']:
+        if 후보 in 거래.columns:
+            메모열 = 후보
+            break
+    if 메모열:
+        최근메모 = 거래.copy()
+        if '거래일자' in 최근메모.columns:
+            최근메모['거래일자_dt'] = pd.to_datetime(최근메모['거래일자'], errors='coerce')
+            최근메모 = 최근메모.sort_values('거래일자_dt', ascending=False, na_position='last').head(10)
+        메모텍스트 = ' '.join(최근메모[메모열].fillna('').astype(str).tolist())
+        참고키워드 = [k for k in ['급락', '추매', '환율', '금리', '유가', '코스피', '코스닥', '반도체'] if k in 메모텍스트]
+        if 참고키워드:
+            st.caption('최근 거래 메모 참고 키워드: ' + ', '.join(참고키워드[:6]) + ' · 단, 위 해석은 메모 반복요약이 아니라 현재 외부지표와 보유구성 기준입니다.')
+
+
+# -----------------------------------
+# v5.15.3 거래 메모 기반 투자 패턴 분석
+# - 사용자가 입력한 거래 메모를 기반으로 반복되는 투자 판단 패턴을 요약합니다.
+# - 수동 장부 관리 대신 거래이력 안의 의사결정 단서를 분석하는 방향입니다.
+# -----------------------------------
+def 거래메모패턴인사이트UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    """투자 행동 회고 UI.
+    v5.16.3부터 메모 반복요약 중심을 줄이고, 실제 거래 흐름에서 관찰 가능한 행동 패턴을 먼저 보여줍니다.
+    메모는 판단의 근거가 아니라 보조 단서로만 사용합니다.
+    """
+    st.markdown("---")
+    st.subheader("투자 행동 회고")
+    st.caption("거래 메모는 당시 생각을 복기하는 보조자료로 사용하고, 핵심 평가는 실제 거래 흐름·보유 비중·최근 매수/매도 패턴을 기준으로 해석합니다.")
+
+    거래 = pd.DataFrame() if 거래이력df is None else pd.DataFrame(거래이력df).copy()
+    보유 = pd.DataFrame() if 보유계산포트폴리오 is None else pd.DataFrame(보유계산포트폴리오).copy()
+
+    if 거래.empty:
+        st.info("투자 행동을 분석할 거래이력 데이터가 없습니다.")
+        return
+
+    작업 = 거래.copy()
+    for 열 in ["거래일자", "종목명", "거래구분", "거래수량", "거래단가", "거래금액"]:
+        if 열 not in 작업.columns:
+            작업[열] = 0 if 열 in ["거래수량", "거래단가", "거래금액"] else ""
+
+    작업["거래일자_dt"] = pd.to_datetime(작업.get("거래일자", ""), errors="coerce")
+    작업["거래구분문자"] = 작업.get("거래구분", "").fillna("").astype(str)
+    작업["종목명문자"] = 작업.get("종목명", "").fillna("").astype(str).str.strip()
+    작업["거래수량_num"] = pd.to_numeric(작업.get("거래수량", 0), errors="coerce").fillna(0)
+    작업["거래단가_num"] = pd.to_numeric(작업.get("거래단가", 0), errors="coerce").fillna(0)
+    if "거래금액" in 작업.columns:
+        작업["거래금액_num"] = pd.to_numeric(작업.get("거래금액", 0), errors="coerce").fillna(0)
+    else:
+        작업["거래금액_num"] = 작업["거래수량_num"] * 작업["거래단가_num"]
+    작업["거래금액_num"] = 작업["거래금액_num"].where(작업["거래금액_num"].abs() > 0, 작업["거래수량_num"] * 작업["거래단가_num"])
+
+    유효 = 작업[(작업["종목명문자"] != "") | (작업["거래금액_num"].abs() > 0)].copy()
+    if 유효.empty:
+        st.info("분석 가능한 유효 거래 데이터가 부족합니다.")
+        return
+
+    매수마스크 = 유효["거래구분문자"].str.contains("매수|입금|납입|추가", na=False)
+    매도마스크 = 유효["거래구분문자"].str.contains("매도|출금|해지|환매", na=False)
+    매수 = 유효[매수마스크].copy()
+    매도 = 유효[매도마스크].copy()
+
+    기준일 = 유효["거래일자_dt"].dropna().max()
+    if pd.isna(기준일):
+        기준일 = pd.Timestamp(서울현재시각()).tz_localize(None) if getattr(pd.Timestamp(서울현재시각()), "tzinfo", None) else pd.Timestamp(서울현재시각())
+    최근기준 = 기준일 - pd.Timedelta(days=90)
+    최근 = 유효[유효["거래일자_dt"].fillna(pd.Timestamp("1900-01-01")) >= 최근기준].copy()
+    최근매수 = 최근[최근["거래구분문자"].str.contains("매수|입금|납입|추가", na=False)].copy()
+    최근매도 = 최근[최근["거래구분문자"].str.contains("매도|출금|해지|환매", na=False)].copy()
+
+    매수금액 = float(매수["거래금액_num"].abs().sum()) if not 매수.empty else 0
+    매도금액 = float(매도["거래금액_num"].abs().sum()) if not 매도.empty else 0
+    최근매수금액 = float(최근매수["거래금액_num"].abs().sum()) if not 최근매수.empty else 0
+    최근매도금액 = float(최근매도["거래금액_num"].abs().sum()) if not 최근매도.empty else 0
+    순투자금액 = 최근매수금액 - 최근매도금액
+
+    종목별매수횟수 = pd.Series(dtype="int64")
+    분할매수종목수 = 0
+    if not 매수.empty and "종목명문자" in 매수.columns:
+        종목별매수횟수 = 매수[매수["종목명문자"] != ""].groupby("종목명문자").size().sort_values(ascending=False)
+        분할매수종목수 = int((종목별매수횟수 >= 2).sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("최근 90일 매수", f"{len(최근매수):,}건")
+    c2.metric("최근 90일 매도", f"{len(최근매도):,}건")
+    c3.metric("최근 순투자", 손익원화문자열(순투자금액))
+    c4.metric("분할매수 종목", f"{분할매수종목수:,}개")
+
+    행동행 = []
+    전체거래수 = max(len(유효), 1)
+    매수비율 = len(매수) / 전체거래수 * 100
+    매도비율 = len(매도) / 전체거래수 * 100
+
+    if 매수비율 >= 70:
+        행동행.append({
+            "관찰 항목": "매수 중심 거래",
+            "근거": f"전체 유효 거래 중 매수성 거래가 {매수비율:.1f}%입니다.",
+            "해석": "자산을 줄이기보다 보유를 늘리는 방향의 행동이 상대적으로 강하게 관찰됩니다.",
+            "점검 포인트": "추가매수 후 특정 종목·섹터 비중이 과도하게 커지지 않았는지 확인",
+            "주의도": "중간",
+        })
+    elif 매도비율 >= 45:
+        행동행.append({
+            "관찰 항목": "매도·현금화 비중 증가",
+            "근거": f"전체 유효 거래 중 매도성 거래가 {매도비율:.1f}%입니다.",
+            "해석": "일부 차익실현 또는 위험 축소 행동이 나타난 것으로 해석할 수 있습니다.",
+            "점검 포인트": "매도 후 현금 운용 계획과 재진입 기준이 정리되어 있는지 확인",
+            "주의도": "보통",
+        })
+
+    if 분할매수종목수 > 0:
+        상위분할 = ", ".join(종목별매수횟수[종목별매수횟수 >= 2].head(5).index.astype(str).tolist())
+        행동행.append({
+            "관찰 항목": "분할매수 성향",
+            "근거": f"2회 이상 매수한 종목이 {분할매수종목수:,}개입니다.",
+            "해석": "일시에 진입하기보다 가격 변동을 보면서 나누어 접근하는 패턴이 관찰됩니다.",
+            "점검 포인트": f"{상위분할} 등 반복 매수 종목의 최종 비중과 평균단가 확인",
+            "주의도": "중간",
+        })
+
+    if 순투자금액 > 0:
+        행동행.append({
+            "관찰 항목": "최근 순매수 기조",
+            "근거": f"최근 90일 순투자금액은 {손익원화문자열(순투자금액)}입니다.",
+            "해석": "최근에는 현금화보다 추가 투자 쪽으로 행동이 기울어져 있습니다.",
+            "점검 포인트": "외부 변수 부담이 높을 때는 매수 속도와 현금 여력을 함께 확인",
+            "주의도": "중간",
+        })
+    elif 순투자금액 < 0:
+        행동행.append({
+            "관찰 항목": "최근 순현금화 기조",
+            "근거": f"최근 90일 순투자금액은 {손익원화문자열(순투자금액)}입니다.",
+            "해석": "최근에는 일부 자산을 줄이거나 현금 비중을 높이는 행동이 나타납니다.",
+            "점검 포인트": "현금화 사유가 생활비·계좌이동·위험관리 중 무엇인지 구분",
+            "주의도": "보통",
+        })
+
+    메모열 = None
+    for 후보 in ["비고", "메모", "거래메모", "투자메모"]:
+        if 후보 in 유효.columns:
+            메모열 = 후보
+            break
+
+    if 메모열:
+        메모작업 = 유효.copy()
+        메모작업["메모문자"] = 메모작업[메모열].fillna("").astype(str).str.strip()
+        메모있는거래 = 메모작업[메모작업["메모문자"] != ""].copy()
+        전체메모 = " ".join(메모있는거래["메모문자"].tolist())
+        메모키워드 = [k for k in ["추매", "분할", "급락", "조정", "환율", "금리", "유가", "반도체", "실적", "손절", "리스크"] if k in 전체메모]
+        if 메모키워드:
+            행동행.append({
+                "관찰 항목": "메모상 반복 키워드",
+                "근거": ", ".join(메모키워드[:8]),
+                "해석": "거래 당시 의사결정에서 반복적으로 언급된 참고 단서입니다. 다만 메모 자체를 투자 성과의 직접 원인으로 단정하지 않습니다.",
+                "점검 포인트": "같은 키워드가 반복될 때 실제 손익 결과와 연결되는지 사후 점검",
+                "주의도": "참고",
+            })
+
+    if not 행동행:
+        행동행.append({
+            "관찰 항목": "행동 패턴 제한",
+            "근거": "거래 건수·메모·최근 거래 흐름이 아직 충분하지 않습니다.",
+            "해석": "현재 데이터만으로 특정 투자 행동을 강하게 해석하기는 어렵습니다.",
+            "점검 포인트": "거래 사유와 계좌 이동 사유를 꾸준히 남기면 이후 분석 품질이 높아집니다.",
+            "주의도": "참고",
+        })
+
+    st.markdown("##### 관찰된 투자 행동 패턴")
+    행동표 = pd.DataFrame(행동행)
+    try:
+        표데이터프레임(index_1부터(행동표), width="stretch", hide_index=True)
+    except Exception:
+        st.dataframe(index_1부터(행동표), width="stretch", hide_index=True)
+
+    핵심문장 = []
+    if 매수비율 >= 70:
+        핵심문장.append("전체 거래 흐름에서는 매수 중심의 누적 투자 성향이 비교적 뚜렷합니다.")
+    if 분할매수종목수 > 0:
+        핵심문장.append("동일 종목을 여러 차례 나누어 매수한 기록이 있어 분할 접근 성향이 관찰됩니다.")
+    if 순투자금액 > 0:
+        핵심문장.append("최근 90일 기준으로는 포트폴리오를 확대하는 방향의 거래가 우세합니다.")
+    elif 순투자금액 < 0:
+        핵심문장.append("최근 90일 기준으로는 일부 현금화 또는 비중 축소 흐름이 관찰됩니다.")
+    if not 핵심문장:
+        핵심문장.append("현재 거래 데이터만으로는 특정 행동 성향을 강하게 단정하기보다, 이후 거래 기록이 누적될수록 해석 신뢰도가 높아질 수 있습니다.")
+    st.info(" ".join(핵심문장) + " 이 해석은 투자 권유가 아니라 과거 거래 기록을 바탕으로 한 행동 회고입니다.")
+
+    if not 보유.empty and "종목명" in 보유.columns:
+        st.markdown("##### 현재 보유와 행동 패턴 연결")
+        보유종목 = set(보유["종목명"].dropna().astype(str).str.strip().tolist())
+        매수종목 = set(매수["종목명문자"].dropna().astype(str).str.strip().tolist()) if not 매수.empty else set()
+        연결종목 = sorted([x for x in 매수종목 if x in 보유종목 and x])
+        if 연결종목:
+            st.caption("매수 이력이 있고 현재도 보유 중인 주요 종목: " + ", ".join(연결종목[:10]))
+        else:
+            st.caption("현재 보유 종목과 최근 매수 행동의 직접 연결 항목은 제한적입니다.")
+
+    if 메모열:
+        최근메모 = 유효.copy()
+        최근메모["메모문자"] = 최근메모[메모열].fillna("").astype(str).str.strip()
+        최근메모 = 최근메모[최근메모["메모문자"] != ""].sort_values("거래일자_dt", ascending=False, na_position="last").head(8)
+        if not 최근메모.empty:
+            with st.expander("최근 거래 메모 보기", expanded=False):
+                표시열 = [c for c in ["거래일자", "종목명", "거래구분", "거래수량", "거래단가", 메모열] if c in 최근메모.columns]
+                표시 = 최근메모[표시열].copy()
+                try:
+                    fmt = {"거래단가": 원화정수포맷} if "거래단가" in 표시.columns else {}
+                    표데이터프레임(index_1부터(표시).style.format(fmt), width="stretch", hide_index=True)
+                except Exception:
+                    표데이터프레임(index_1부터(표시), width="stretch", hide_index=True)
+
+
+
 # -----------------------------------
 # v5.14.0 분석 인사이트 고도화 / 거래원장 표시 정리
 # -----------------------------------
@@ -9756,9 +11084,112 @@ def 보유포트폴리오리스크표생성(보유포트폴리오, 통합자산�
     return 결과
 
 
+
+def _리스크요약값(분석, 항목명, 기본값=0):
+    try:
+        요약 = 분석.get("요약", pd.DataFrame()) if isinstance(분석, dict) else pd.DataFrame()
+        if 요약 is None or 요약.empty or "항목" not in 요약.columns or "값" not in 요약.columns:
+            return 기본값
+        값 = 요약.loc[요약["항목"].astype(str) == str(항목명), "값"]
+        if 값.empty:
+            return 기본값
+        return float(pd.to_numeric(값.iloc[0], errors="coerce"))
+    except Exception:
+        return 기본값
+
+
+def 리스크판정라벨(항목명, 값):
+    try:
+        값 = float(값 or 0)
+    except Exception:
+        값 = 0
+    항목명 = str(항목명)
+    if "상위 1종목" in 항목명:
+        if 값 >= 40:
+            return "집중 높음"
+        if 값 >= 30:
+            return "집중 유의"
+        return "관리 가능"
+    if "상위 3종목" in 항목명:
+        if 값 >= 75:
+            return "편중 높음"
+        if 값 >= 60:
+            return "편중 유의"
+        return "분산 양호"
+    if "손실 종목 비중" in 항목명:
+        if 값 >= 40:
+            return "손실 부담"
+        if 값 >= 20:
+            return "점검 필요"
+        return "부담 낮음"
+    if "통합 현금성" in 항목명:
+        if 값 < 5:
+            return "방어력 낮음"
+        if 값 < 15:
+            return "보통"
+        return "방어력 양호"
+    return "점검"
+
+
+def 리스크상태문장생성(분석):
+    try:
+        등급 = 분석.get("등급", "양호")
+        점수 = float(분석.get("리스크점수", 0) or 0)
+        상위1 = _리스크요약값(분석, "상위 1종목 비중", 0)
+        상위3 = _리스크요약값(분석, "상위 3종목 비중", 0)
+        손실비중 = _리스크요약값(분석, "손실 종목 비중", 0)
+        현금비중 = _리스크요약값(분석, "통합 현금성 비중", None)
+
+        문장 = []
+        문장.append(f"현재 리스크 등급은 {등급}({점수:.1f}/100) 수준으로 계산됩니다.")
+
+        if 상위1 >= 40:
+            문장.append(f"상위 1종목 비중이 {상위1:.1f}%로 높아 개별 종목 변동이 전체 성과에 크게 반영될 수 있습니다.")
+        elif 상위3 >= 60:
+            문장.append(f"상위 3종목 비중이 {상위3:.1f}%로 높은 편이어서 섹터·종목 편중 여부를 함께 확인하는 것이 좋습니다.")
+        else:
+            문장.append("종목 집중도는 과도한 수준보다는 관리 가능한 범위에 가깝게 해석됩니다.")
+
+        if 손실비중 >= 30:
+            문장.append(f"손실 종목 평가액 비중이 {손실비중:.1f}%로, 손실 구간이 포트폴리오에 미치는 영향을 점검할 필요가 있습니다.")
+        else:
+            문장.append("현재 보유 기준 손실 종목 비중은 큰 부담 구간으로 보이지 않습니다.")
+
+        if 현금비중 is not None:
+            if 현금비중 < 5:
+                문장.append(f"통합 현금성 비중은 {현금비중:.1f}%로 낮아 조정장 대응 여력은 제한적으로 해석됩니다.")
+            elif 현금비중 >= 15:
+                문장.append(f"통합 현금성 비중은 {현금비중:.1f}%로, 추가 매수 또는 변동성 대응 여력이 비교적 안정적입니다.")
+            else:
+                문장.append(f"통합 현금성 비중은 {현금비중:.1f}%로, 방어력은 중간 수준으로 볼 수 있습니다.")
+
+        return " ".join(문장)
+    except Exception:
+        return "현재 보유 데이터 기준으로 리스크 상태를 해석하는 중 일부 값이 부족합니다. 상세 표를 함께 확인해 주세요."
+
+
+def _리스크짧은문장(값, 기본값="점검 필요", 최대길이=18):
+    """st.metric delta 영역에 들어갈 문장을 짧게 정리합니다."""
+    try:
+        문자 = "" if 값 is None else str(값).strip()
+        if not 문자:
+            return 기본값
+        if len(문자) > 최대길이:
+            return 문자[:최대길이] + "..."
+        return 문자
+    except Exception:
+        return 기본값
+
+
 def 포트폴리오리스크분석UI(보유포트폴리오, 통합자산표=None):
+    """
+    v5.17.1-stable-risk-ui
+    - 기존 HTML 카드 출력 제거
+    - Streamlit native st.metric 기반 리스크 요약
+    - Google Sheets / 데이터 로딩 / 저장 / 계산 로직은 변경하지 않음
+    """
     st.markdown("### 포트폴리오 리스크 점검")
-    st.caption("현재 보유 평가금액 기준의 1차 리스크 분석입니다. MDD·변동성은 과거 가격 이력 기반 기능으로 다음 단계에서 확장합니다.")
+    st.caption("현재 보유 평가금액 기준으로 집중도·손실비중·현금 방어력을 함께 점검합니다. 예측이 아니라 현재 구조의 위험 노출을 해석하는 보조 지표입니다.")
 
     분석 = 보유포트폴리오리스크표생성(보유포트폴리오, 통합자산표)
     if 분석.get("종목별", pd.DataFrame()).empty:
@@ -9766,26 +11197,63 @@ def 포트폴리오리스크분석UI(보유포트폴리오, 통합자산표=None
         return 분석
 
     등급 = 분석.get("등급", "양호")
-    점수 = 분석.get("리스크점수", 0)
-    코멘트 = 분석.get("코멘트", "")
+    점수 = float(분석.get("리스크점수", 0) or 0)
+    상위1 = _리스크요약값(분석, "상위 1종목 비중", 0)
+    손실비중 = _리스크요약값(분석, "손실 종목 비중", 0)
+    현금비중 = _리스크요약값(분석, "통합 현금성 비중", None)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("리스크 등급", 등급)
-    c2.metric("리스크 점수", f"{점수:.1f}/100")
-    요약 = 분석["요약"]
-    상위1 = 요약.loc[요약["항목"] == "상위 1종목 비중", "값"]
-    손실비중 = 요약.loc[요약["항목"] == "손실 종목 비중", "값"]
-    c3.metric("상위 1종목 비중", f"{float(상위1.iloc[0]) if not 상위1.empty else 0:.2f}%")
-    c4.metric("손실 종목 비중", f"{float(손실비중.iloc[0]) if not 손실비중.empty else 0:.2f}%")
+    현금표시 = "-" if 현금비중 is None else f"{float(현금비중):.1f}%"
+    현금보조 = "현금성 데이터 없음" if 현금비중 is None else 리스크판정라벨("통합 현금성 비중", 현금비중)
 
-    st.info(f"{등급}: {코멘트}")
+    col1, col2 = st.columns(2)
+    col3, col4 = st.columns(2)
+
+    with col1:
+        st.metric(
+            label="리스크 등급",
+            value=str(등급),
+            delta=_리스크짧은문장(f"종합 점수 {점수:.1f}/100", "현재 구조")
+        )
+
+    with col2:
+        st.metric(
+            label="상위 1종목 비중",
+            value=f"{float(상위1):.1f}%",
+            delta=_리스크짧은문장(리스크판정라벨("상위 1종목 비중", 상위1))
+        )
+
+    with col3:
+        st.metric(
+            label="손실 종목 비중",
+            value=f"{float(손실비중):.1f}%",
+            delta=_리스크짧은문장(리스크판정라벨("손실 종목 비중", 손실비중))
+        )
+
+    with col4:
+        st.metric(
+            label="현금 방어력",
+            value=현금표시,
+            delta=_리스크짧은문장(현금보조)
+        )
+
+    st.info(리스크상태문장생성(분석))
 
     with st.expander("리스크 상세 보기", expanded=False):
         탭1, 탭2, 탭3 = st.tabs(["요약", "종목 집중도", "자산군"])
+
         with 탭1:
             표시요약 = 분석["요약"].copy()
-            표시요약["값"] = 표시요약.apply(lambda 행: 안전소수포맷(행["값"], 2) + "%" if "비중" in 행["항목"] or "수익률" in 행["항목"] else 안전정수포맷(행["값"]), axis=1)
-            표데이터프레임(index_1부터(표시요약), use_container_width=True)
+            표시요약["판정"] = 표시요약.apply(
+                lambda 행: 리스크판정라벨(행.get("항목", ""), 행.get("값", 0)),
+                axis=1
+            )
+            표시요약["값"] = 표시요약.apply(
+                lambda 행: 안전소수포맷(행["값"], 2) + "%" if "비중" in 행["항목"] or "수익률" in 행["항목"] else 안전정수포맷(행["값"]),
+                axis=1
+            )
+            표시열 = [열 for 열 in ["항목", "값", "판정", "해석"] if 열 in 표시요약.columns]
+            표데이터프레임(index_1부터(표시요약[표시열]), width="stretch")
+
         with 탭2:
             종목표 = 분석["종목별"].copy()
             표시열 = ["종목코드", "종목명", "자산군", "평가금액", "평가손익", "수익률", "보유비중"]
@@ -9795,10 +11263,11 @@ def 포트폴리오리스크분석UI(보유포트폴리오, 통합자산표=None
                     "평가금액": 안전정수포맷,
                     "평가손익": 손익문자열,
                     "수익률": 수익률문자열,
-                    "보유비중": lambda x: 안전소수포맷(x, 2),
-                }).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]),
-                use_container_width=True,
+                    "보유비중": lambda x: 안전소수포맷(x, 2) + "%",
+                }).map(손익색상, subset=[c for c in ["평가손익"] if c in 종목표.columns]).map(수익률색상, subset=[c for c in ["수익률"] if c in 종목표.columns]),
+                width="stretch",
             )
+
         with 탭3:
             자산군표 = 분석["자산군"].copy()
             표데이터프레임(
@@ -9807,11 +11276,13 @@ def 포트폴리오리스크분석UI(보유포트폴리오, 통합자산표=None
                     "평가금액": 안전정수포맷,
                     "평가손익": 손익문자열,
                     "수익률": 수익률문자열,
-                    "보유비중": lambda x: 안전소수포맷(x, 2),
-                }).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]),
-                use_container_width=True,
+                    "보유비중": lambda x: 안전소수포맷(x, 2) + "%",
+                }).map(손익색상, subset=[c for c in ["평가손익"] if c in 자산군표.columns]).map(수익률색상, subset=[c for c in ["수익률"] if c in 자산군표.columns]),
+                width="stretch",
             )
+
     return 분석
+
 
 
 # -----------------------------------
@@ -10003,7 +11474,7 @@ def 포트폴리오종합인사이트UI(보유포트폴리오, 통합자산표=N
         }
         .insight-status {
             font-size: clamp(1.65rem, 2.6vw, 2.25rem);
-            font-weight: 620;
+            font-weight: 580;
             letter-spacing: -0.04em;
             line-height: 1.05;
             margin-top: 0.15rem;
@@ -10117,10 +11588,10 @@ def 포트폴리오종합인사이트UI(보유포트폴리오, 통합자산표=N
                     {"selector": "th", "props": [("font-size", "0.86rem"), ("font-weight", "500")]},
                     {"selector": "td", "props": [("padding", "0.46rem 0.55rem")]},
                 ]),
-                use_container_width=True,
+                width="stretch",
             )
         except Exception:
-            표데이터프레임(index_1부터(표시), use_container_width=True)
+            표데이터프레임(index_1부터(표시), width="stretch")
 
     with st.expander("우선 점검 종목 보기", expanded=False):
         우선 = 인사이트.get("우선점검", pd.DataFrame())
@@ -10137,7 +11608,7 @@ def 포트폴리오종합인사이트UI(보유포트폴리오, 통합자산표=N
                     "보유비중": lambda x: 안전소수포맷(x, 2),
                     "점검점수": 안전소수포맷,
                 }).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]),
-                use_container_width=True,
+                width="stretch",
             )
     st.markdown("</div>", unsafe_allow_html=True)
     return 인사이트
@@ -10406,7 +11877,7 @@ def 월간투자리포트초안생성(거래df=None, 계산포트폴리오=None,
 
     if 통합기준사용:
         if 현금성비중 >= 20:
-            리스크문장.append(f"현금성 자산 비중은 {현금성비중:.1f}%로 충분해 조정장 대응 여력이 양호합니다.")
+            리스크문장.append(f"현금성 자산 비중은 {현금성비중:.1f}%로 충분해 조정장 대응 여력이 비교적 안정적으로 해석됩니다.")
         elif 현금성비중 >= 8:
             리스크문장.append(f"현금성 자산 비중은 {현금성비중:.1f}%로 기본 대응 여력은 있으나 큰 조정장에서는 추가 점검이 필요합니다.")
         else:
@@ -10680,15 +12151,191 @@ def 월간투자리포트워드문서생성(리포트):
         return None, f"Word 문서 생성 중 오류가 발생했습니다: {e}"
 
 def 월간투자리포트초안UI(거래df=None, 계산포트폴리오=None, 보유포트폴리오=None, 통합자산표=None, 위험분석=None):
-    st.markdown("### 월간 투자 리포트")
-    st.caption("현재 계산된 포트폴리오, 월간 거래 흐름, 통합 자산 현황을 바탕으로 읽기 쉬운 보고서 본문을 자동 생성합니다.")
-
+    """월간 투자 리포트 UI.
+    v5.15.9: 포트폴리오 현황·분석 화면과 맞도록 텍스트 크기, 카드 높이, 상세본문 밀도를 다시 정리합니다.
+    """
     기본년월 = 서울현재시각().strftime("%Y-%m")
-    좌, 우 = st.columns([1.1, 4.0])
+
+    st.markdown(
+        """
+        <style>
+        .monthly-report-shell {
+            border: 1px solid rgba(148,163,184,.22);
+            border-radius: 18px;
+            padding: 1.05rem 1.15rem 1.1rem 1.15rem;
+            background: linear-gradient(180deg, rgba(15,23,42,.38), rgba(15,23,42,.20));
+            margin-top: .2rem;
+            margin-bottom: .8rem;
+        }
+        .monthly-report-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            align-items: flex-start;
+            margin-bottom: .65rem;
+        }
+        .monthly-report-eyebrow {
+            font-size: .74rem;
+            color: #60a5fa;
+            font-weight: 650;
+            margin-bottom: .18rem;
+            letter-spacing: -.01em;
+        }
+        .monthly-report-h1 {
+            font-size: 1.55rem;
+            line-height: 1.22;
+            font-weight: 660;
+            letter-spacing: -.035em;
+            color: #f8fafc;
+            margin: 0;
+        }
+        .monthly-report-help {
+            font-size: .92rem;
+            line-height: 1.55;
+            color: #a7b0bf;
+            max-width: 760px;
+            margin-top: .25rem;
+            word-break: keep-all;
+        }
+        .monthly-report-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid rgba(96,165,250,.38);
+            background: rgba(37,99,235,.18);
+            color: #bfdbfe;
+            border-radius: 999px;
+            padding: .22rem .55rem;
+            font-size: .72rem;
+            font-weight: 600;
+            white-space: nowrap;
+            margin-top: .1rem;
+        }
+        .monthly-report-control {
+            border-top: 1px solid rgba(148,163,184,.16);
+            padding-top: .62rem;
+        }
+        .monthly-report-note {
+            font-size: .88rem;
+            line-height: 1.55;
+            color: #9ca3af;
+            padding: .48rem .62rem;
+            border-radius: 13px;
+            background: rgba(2,6,23,.20);
+            border: 1px solid rgba(148,163,184,.14);
+            word-break: keep-all;
+        }
+        .monthly-report-summary-title {
+            font-size: 1.42rem;
+            line-height: 1.28;
+            font-weight: 650;
+            letter-spacing: -.03em;
+            color: #f8fafc;
+            margin: .7rem 0 .14rem 0;
+        }
+        .monthly-report-summary-sub {
+            font-size: .88rem;
+            color: #a7b0bf;
+            margin-bottom: .65rem;
+            line-height: 1.45;
+        }
+        .monthly-report-card {
+            border: 1px solid rgba(148,163,184,.18);
+            border-left: 3px solid #60a5fa;
+            padding: .88rem .95rem;
+            background: rgba(17,24,39,.52);
+            border-radius: 15px;
+            min-height: 112px;
+            box-shadow: none;
+        }
+        .monthly-report-label {
+            font-size: .82rem;
+            color: #93c5fd;
+            font-weight: 620;
+            margin-bottom: .24rem;
+        }
+        .monthly-report-main {
+            font-size: 1.28rem;
+            font-weight: 680;
+            letter-spacing: -.025em;
+            line-height: 1.25;
+            color: #f8fafc;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .monthly-report-desc {
+            font-size: .86rem;
+            color: #cbd5e1;
+            line-height: 1.42;
+            margin-top: .30rem;
+        }
+        .monthly-report-section {
+            font-size: 1.03rem;
+            font-weight: 650;
+            margin-top: .75rem;
+            margin-bottom: .35rem;
+            color: #f8fafc;
+        }
+        .monthly-report-text {
+            font-size: .95rem;
+            line-height: 1.65;
+            color: #e5e7eb;
+            word-break: keep-all;
+        }
+        .monthly-report-list {
+            margin-top: .25rem;
+            padding-left: 1.0rem;
+        }
+        .monthly-report-list li {
+            margin-bottom: .24rem;
+        }
+        .monthly-report-comment {
+            font-size: .95rem;
+            line-height: 1.65;
+            color: #e5e7eb;
+            background: rgba(2,6,23,.22);
+            border: 1px solid rgba(148,163,184,.12);
+            border-radius: 14px;
+            padding: .62rem .72rem;
+            word-break: keep-all;
+        }
+        .monthly-download-help {
+            font-size: .84rem;
+            color: #9ca3af;
+            line-height: 1.45;
+            margin-top: .4rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div class='monthly-report-shell'>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class='monthly-report-head'>
+            <div>
+                <div class='monthly-report-eyebrow'>MONTHLY PORTFOLIO REPORT</div>
+                <div class='monthly-report-h1'>월간 투자 리포트</div>
+                <div class='monthly-report-help'>월간 거래 흐름과 현재 통합 자산 상태를 함께 정리한 투자 점검 리포트입니다.</div>
+            </div>
+            <div class='monthly-report-badge'>{html.escape(APP_VERSION)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div class='monthly-report-control'>", unsafe_allow_html=True)
+    좌, 우 = st.columns([1.0, 2.7], gap="large")
     with 좌:
-        기준년월 = st.text_input("리포트 기준월", value=기본년월, key="monthly_report_base_month_v5143")
+        기준년월 = st.text_input("리포트 기준월", value=기본년월, key="monthly_report_base_month_v5159")
     with 우:
-        st.caption("v5.14.4는 문장형 리포트를 Word 문서로 다운로드할 수 있도록 확장한 단계입니다. PDF는 Word 안정화 후 확장하는 방식이 가장 안전합니다.")
+        st.markdown(
+            "<div class='monthly-report-note'>Word 문서 다운로드를 우선 제공합니다. PDF는 한글 글꼴과 배포 환경 안정성을 확인한 뒤 확장하는 방식이 안전합니다.</div>",
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
     리포트 = 월간투자리포트초안생성(
         거래df=거래df,
@@ -10699,51 +12346,26 @@ def 월간투자리포트초안UI(거래df=None, 계산포트폴리오=None, 보
         기준년월=기준년월,
     )
 
-    st.markdown(
-        """
-        <style>
-        .monthly-report-wrap {border:1px solid rgba(148,163,184,.24); border-radius:24px; padding:1.35rem 1.45rem; background:rgba(15,23,42,.30); margin-top:.65rem; box-shadow:0 10px 28px rgba(0,0,0,.14);} 
-        .monthly-report-title {font-size:1.28rem; font-weight:620; letter-spacing:-.025em; margin-bottom:.25rem; color:#f8fafc;}
-        .monthly-report-sub {font-size:.89rem; color:#9ca3af; margin-bottom:1.05rem; line-height:1.45;}
-        .monthly-report-card {border-left:4px solid #60a5fa; padding:.82rem .98rem; background:rgba(30,41,59,.38); border-radius:16px; min-height:122px;}
-        .monthly-report-label {font-size:.78rem; color:#93c5fd; margin-bottom:.35rem;}
-        .monthly-report-main {font-size:1.22rem; font-weight:620; letter-spacing:-.03em; line-height:1.25;}
-        .monthly-report-desc {font-size:.86rem; color:#cbd5e1; line-height:1.45; margin-top:.35rem;}
-        .monthly-report-section {font-size:1.04rem; font-weight:600; margin-top:1.15rem; margin-bottom:.35rem; color:#f8fafc;}
-        .monthly-report-text {font-size:.97rem; line-height:1.74; color:#e5e7eb; word-break:keep-all;}
-        .monthly-report-list {margin-top:.25rem; padding-left:1.25rem;}
-        .monthly-report-list li {margin-bottom:.42rem;}
-        .monthly-report-comment {font-size:.98rem; line-height:1.78; color:#e5e7eb; background:rgba(2,6,23,.26); border-radius:16px; padding:.95rem 1.05rem; word-break:keep-all;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<div class='monthly-report-summary-title'>월간 투자 리포트 · {html.escape(str(리포트['기준년월']))}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='monthly-report-summary-sub'>작성 기준 {서울조회문자열(리포트['작성시각'], '%Y-%m-%d %H:%M')} · 현재가 새로고침 결과 기준</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='monthly-report-wrap'>", unsafe_allow_html=True)
-    st.markdown(f"<div class='monthly-report-title'>월간 투자 리포트 · {html.escape(str(리포트['기준년월']))}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='monthly-report-sub'>작성 기준 {서울조회문자열(리포트['작성시각'], '%Y-%m-%d %H:%M')} · 현재가 새로고침 결과 기준</div>", unsafe_allow_html=True)
-
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4, gap="small")
     with c1:
-        st.markdown(f"<div class='monthly-report-card'><div class='monthly-report-label'>총 평가액</div><div class='monthly-report-main'>{금액표시(리포트['총평가'])}</div><div class='monthly-report-desc'>통합 자산 기준 평가 규모</div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='monthly-report-card'><div class='monthly-report-label'>총 손익</div><div class='monthly-report-main'>{손익문자열(리포트['총손익'])}원</div><div class='monthly-report-desc'>현재 평가 기준 누적 손익</div></div>", unsafe_allow_html=True)
     with c2:
-        st.markdown(f"<div class='monthly-report-card'><div class='monthly-report-label'>총 손익</div><div class='monthly-report-main'>{손익문자열(리포트['총손익'])}</div><div class='monthly-report-desc'>평가 손익 중심 요약</div></div>", unsafe_allow_html=True)
-    with c3:
         st.markdown(f"<div class='monthly-report-card'><div class='monthly-report-label'>수익률</div><div class='monthly-report-main'>{수익률문자열(리포트['총수익률'])}</div><div class='monthly-report-desc'>원금 대비 현재 성과</div></div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"<div class='monthly-report-card'><div class='monthly-report-label'>총 평가액</div><div class='monthly-report-main'>{금액표시(리포트['총평가'])}</div><div class='monthly-report-desc'>통합 자산 기준 평가 규모</div></div>", unsafe_allow_html=True)
     with c4:
         st.markdown(f"<div class='monthly-report-card'><div class='monthly-report-label'>핵심 리스크</div><div class='monthly-report-main'>{html.escape(str(리포트['최대비중명']))}</div><div class='monthly-report-desc'>{리포트['최대비중']:.1f}% · 최대 비중 종목</div></div>", unsafe_allow_html=True)
 
-    # 화면 기본 표시를 카드 요약 중심으로 축소합니다.
-    # 핵심 요약, 월간 거래 흐름 등 긴 본문은 필요할 때만 펼쳐보도록 숨김 처리합니다.
-    st.markdown("</div>", unsafe_allow_html=True)
-
     with st.expander("월간 리포트 상세 보기", expanded=False):
         섹션목록 = [
-            ("1. 핵심 요약", 리포트["핵심요약"]),
-            ("2. 월간 거래 흐름", 리포트["월간거래문장"]),
-            ("3. 주요 종목 변화", 리포트["주요종목문장"]),
-            ("4. 리스크 상태", 리포트["리스크문장"]),
-            ("5. 다음 점검 포인트", 리포트["점검포인트"]),
+            ("핵심 요약", 리포트["핵심요약"]),
+            ("월간 거래 흐름", 리포트["월간거래문장"]),
+            ("주요 종목 변화", 리포트["주요종목문장"]),
+            ("리스크 상태", 리포트["리스크문장"]),
+            ("다음 점검 포인트", 리포트["점검포인트"]),
         ]
         for 제목, 문장목록 in 섹션목록:
             st.markdown(f"<div class='monthly-report-section'>{html.escape(제목)}</div>", unsafe_allow_html=True)
@@ -10752,11 +12374,11 @@ def 월간투자리포트초안UI(거래df=None, 계산포트폴리오=None, 보
             else:
                 st.info("표시할 데이터가 부족합니다.")
 
-        st.markdown("<div class='monthly-report-section'>6. 종합 코멘트</div>", unsafe_allow_html=True)
+        st.markdown("<div class='monthly-report-section'>종합 코멘트</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='monthly-report-comment'>{html.escape(str(리포트['종합코멘트']))}</div>", unsafe_allow_html=True)
 
     with st.expander("리포트 숫자 요약표 보기", expanded=False):
-        표데이터프레임(index_1부터(리포트["요약표"]), use_container_width=True)
+        표데이터프레임(index_1부터(리포트["요약표"]), width="stretch")
         자산군표 = 리포트.get("자산군표", pd.DataFrame())
         if 자산군표 is not None and not 자산군표.empty:
             자산군표시 = 자산군표.copy()
@@ -10766,18 +12388,18 @@ def 월간투자리포트초안UI(거래df=None, 계산포트폴리오=None, 보
                     "평가손익": 손익문자열,
                     "비중": lambda x: 안전소수포맷(x, 2),
                 }).map(손익색상, subset=["평가손익"]),
-                use_container_width=True,
+                width="stretch",
             )
 
-    다운로드좌, 다운로드우 = st.columns(2)
+    다운로드좌, 다운로드우 = st.columns(2, gap="small")
     with 다운로드좌:
         st.download_button(
             "리포트 본문 텍스트 다운로드",
             data=리포트["본문"].encode("utf-8-sig"),
             file_name=f"월간_투자_리포트_{리포트['기준년월'].replace('-', '')}.txt",
             mime="text/plain",
-            key="download_monthly_report_text_v5144",
-            use_container_width=True,
+            key="download_monthly_report_text_v5159",
+            width="stretch",
         )
     with 다운로드우:
         워드바이트, 워드오류 = 월간투자리포트워드문서생성(리포트)
@@ -10787,12 +12409,12 @@ def 월간투자리포트초안UI(거래df=None, 계산포트폴리오=None, 보
                 data=워드바이트,
                 file_name=f"월간_투자_리포트_{리포트['기준년월'].replace('-', '')}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key="download_monthly_report_docx_v5144",
-                use_container_width=True,
+                key="download_monthly_report_docx_v5159",
+                width="stretch",
             )
         else:
             st.caption(워드오류)
-    st.caption("PDF 리포트는 한글 폰트와 배포 환경 안정성을 확인한 뒤 다음 단계에서 확장하는 것을 권장합니다.")
+    st.markdown("<div class='monthly-download-help'>PDF 리포트는 한글 폰트와 배포 환경 안정성을 확인한 뒤 다음 단계에서 확장하는 것을 권장합니다.</div>", unsafe_allow_html=True)
     return 리포트
 
 선택위젯키정리()
@@ -10831,11 +12453,17 @@ def 시세관련캐시초기화():
 
 
 # -----------------------------------
+
+# v5.15.1: 화면 구조는 3개 섹터로 고정합니다.
+# - 주요 모니터링
+# - 포트폴리오 현황
+# - 분석 / 인사이트
+# 자산원장·원금변동원장·자산변화로그 화면은 실행 경로에서 제외합니다.
 # 메인 화면 3섹터 구조
 # -----------------------------------
 st.markdown("---")
 
-섹터목록 = ["주요 모니터링", "포트폴리오 현황", "자산원장", "자산변화로그", "분석 / 인사이트"]
+섹터목록 = ["주요 모니터링", "포트폴리오 현황", "분석 / 인사이트"]
 섹터선택키 = "main_section_selector_v5106d"
 
 # 이전 버전에서 저장된 선택값이 남아 있으면 화면이 표시되지 않을 수 있어 새 키와 유효성 검사를 함께 사용합니다.
@@ -10850,7 +12478,7 @@ for idx, 섹터명 in enumerate(섹터목록):
         if st.button(
             섹터명,
             key=f"main_section_btn_v5106d_{idx}",
-            use_container_width=True,
+            width="stretch",
             type="primary" if 선택섹터 == 섹터명 else "secondary",
         ):
             st.session_state[섹터선택키] = 섹터명
@@ -10938,7 +12566,7 @@ if 선택섹터 == "주요 모니터링":
 
     모니터헤더칸1, 모니터헤더칸2 = st.columns([1.25, 8.75], gap="small")
     with 모니터헤더칸1:
-        새로고침클릭 = st.button("시세 새로고침", key="refresh_monitor_btn_v851g", use_container_width=True)
+        새로고침클릭 = st.button("시세 새로고침", key="refresh_monitor_btn_v851g", width="stretch")
     if 새로고침클릭:
         시세관련캐시초기화()
         st.session_state["monitor_realtime_mode_v1"] = True
@@ -11070,7 +12698,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 
     if "trade_history_df_v22" not in st.session_state:
         현재거래이력가져오기()
-    if 선택섹터 in ["포트폴리오 현황", "자산원장", "자산변화로그", "분석 / 인사이트"] or st.session_state.get("show_trade_editor_v5106a", False):
+    if 선택섹터 in ["포트폴리오 현황", "분석 / 인사이트"] or st.session_state.get("show_trade_editor_v5106a", False):
         자동백업일일실행(st.session_state.get("trade_history_df_v22", pd.DataFrame()))
     else:
         st.caption("주요 모니터링 화면에서는 자동백업 점검을 건너뜁니다.")
@@ -11096,7 +12724,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         "업로드 파일 반영",
         disabled=업로드파일 is None,
         key="apply_upload_btn_v26",
-        use_container_width=True,
+        width="stretch",
     ):
         try:
             불러온df = 업로드파일에서거래이력읽기(업로드파일)
@@ -11138,7 +12766,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
                 if 비주식반영건수 > 0:
                     st.write("비주식자산 반영 건수:", 비주식반영건수)
                 if not 반영df.empty:
-                    표데이터프레임(반영df.head(10), use_container_width=True)
+                    표데이터프레임(반영df.head(10), width="stretch")
             st.rerun()
         except Exception as e:
             st.error(f"불러오기 중 오류가 발생했습니다: {e}")
@@ -11150,7 +12778,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         file_name=저장파일명,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="save_trade_history_btn_v26",
-        use_container_width=True,
+        width="stretch",
     )
     st.download_button(
         "JSON 백업",
@@ -11158,7 +12786,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         file_name=f"거래이력_백업_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
         mime="application/json",
         key="save_trade_history_json_btn_v26",
-        use_container_width=True,
+        width="stretch",
     )
 
     자동백업관리열기 = st.toggle(
@@ -11192,7 +12820,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         수정포트폴리오 = st.data_editor(
             편집대상거래이력,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             disabled=[],
             column_order=["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"],
@@ -11213,7 +12841,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         st.caption(f"직접 편집 표를 숨겼습니다. 현재 거래이력 {len(수정포트폴리오)}건 기준으로 계산합니다.")
 
     # 포트폴리오/분석 화면에서만 무거운 계산을 실행합니다.
-    if 선택섹터 in ["포트폴리오 현황", "자산원장", "자산변화로그", "분석 / 인사이트"]:
+    if 선택섹터 in ["포트폴리오 현황", "분석 / 인사이트"]:
         최적화결과 = 거래이력편집반영최적화(수정포트폴리오)
         수정포트폴리오 = 최적화결과["편집df"]
         거래이력변경됨 = 최적화결과["거래이력변경됨"]
@@ -11236,7 +12864,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         else:
             st.warning(f"거래이력 입력 점검 결과: {len(통합점검표)}건의 확인 사항이 있습니다.")
             with st.expander("입력 검증 상세 보기", expanded=False):
-                표데이터프레임(index_1부터(통합점검표), use_container_width=True)
+                표데이터프레임(index_1부터(통합점검표), width="stretch")
     else:
         최적화결과 = None
         st.caption("주요 모니터링 화면에서는 포트폴리오 상세 계산을 생략해 첫 로딩을 줄입니다.")
@@ -11292,9 +12920,9 @@ if 선택섹터 == "포트폴리오 현황":
                     "실현손익": 손익원화문자열,
                 }
                 try:
-                    표데이터프레임(청산표시.style.format(청산포맷).map(손익색상, subset=["실현손익"]), use_container_width=True)
+                    표데이터프레임(청산표시.style.format(청산포맷).map(손익색상, subset=["실현손익"]), width="stretch")
                 except Exception:
-                    표데이터프레임(청산표시, use_container_width=True)
+                    표데이터프레임(청산표시, width="stretch")
 
         요약정보 = 포트폴리오요약지표생성(계산포트폴리오, 표시대상포트폴리오)
         포트폴리오요약카드표시(요약정보)
@@ -11335,7 +12963,7 @@ if 선택섹터 == "포트폴리오 현황":
             모바일스타일 = 포트폴리오표시.style.format(모바일형식사전)
             if "수익률" in 포트폴리오표시.columns:
                 모바일스타일 = 모바일스타일.map(수익률색상, subset=["수익률"])
-            표데이터프레임(모바일스타일, use_container_width=True)
+            표데이터프레임(모바일스타일, width="stretch")
         else:
             표데이터프레임(
                 포트폴리오표시.style.format({
@@ -11352,7 +12980,7 @@ if 선택섹터 == "포트폴리오 현황":
                     "수익률": 수익률문자열,
                     "현재비중": lambda x: 안전소수포맷(x, 2),
                 }).map(손익색상, subset=["평가손익", "실현손익"]).map(수익률색상, subset=["수익률"]),
-                use_container_width=True,
+                width="stretch",
             )
         st.markdown("### 포트폴리오 거래 원장 조회")
         st.caption("입력 원장과 같은 데이터를 누적보유수량 기준으로 정렬·필터해서 보는 조회용 표입니다. 직접 수정은 위 거래 이력 입력 표에서 진행해 주세요.")
@@ -11381,7 +13009,7 @@ if 선택섹터 == "포트폴리오 현황":
                     조회대상거래표 = 조회대상거래표[조회대상거래표["운용사"] == 선택운용사].copy()
 
                 st.caption(f"조회 결과 {len(조회대상거래표)}건")
-                표데이터프레임(거래기록표시용서식(index_1부터(조회대상거래표)), use_container_width=True)
+                표데이터프레임(거래기록표시용서식(index_1부터(조회대상거래표)), width="stretch")
 
         오류행 = 계산포트폴리오[(계산포트폴리오["과잉매도수량"] > 0) | (계산포트폴리오["데이터상태"] != "정상")]
         if not 오류행.empty:
@@ -11391,13 +13019,13 @@ if 선택섹터 == "포트폴리오 현황":
         if not 현재가실패표.empty:
             st.error(f"현재가 조회 실패 종목이 {len(현재가실패표)}개 있습니다. 종목코드와 장중/휴장 여부, 네트워크 상태를 확인해 주세요.")
             with st.expander("현재가 조회 실패 종목 보기", expanded=False):
-                표데이터프레임(index_1부터(현재가실패표), use_container_width=True)
+                표데이터프레임(index_1부터(현재가실패표), width="stretch")
 
         비중그래프칸, 비중요약칸 = st.columns([1.45, 0.85], gap="large")
         with 비중그래프칸:
             st.plotly_chart(
                 비중그래프(계산포트폴리오),
-                use_container_width=True,
+                width="stretch",
                 config={"displaylogo": False, "responsive": True},
             )
         with 비중요약칸:
@@ -11431,27 +13059,25 @@ if 선택섹터 == "포트폴리오 현황":
                     **{"text-align": "left"}
                 )
 
-                표데이터프레임(표시용비중요약표_styled, use_container_width=True, hide_index=False)
+                표데이터프레임(표시용비중요약표_styled, width="stretch", hide_index=False)
             else:
                 st.info("비중 요약을 표시할 보유 종목이 없습니다.")
 
 
     # -----------------------------------
 
-if 선택섹터 == "자산원장":
-    자산원장UI(최적화결과)
-
-
-if 선택섹터 == "자산변화로그":
-    계산포트폴리오 = 최적화결과["계산포트폴리오"]
-    보유계산포트폴리오 = 최적화결과["보유계산포트폴리오"]
-    자산변화로그UI(계산포트폴리오, 보유계산포트폴리오)
+# v5.15.0: 자산원장·자산변화로그는 사용 피로도가 높아 화면 메뉴와 실행 경로에서 제거했습니다.
+# 기존 데이터 시트는 보존되며, 앱은 거래이력·비주식자산 기반 투자분석과 인사이트에 집중합니다.
 
 
 if 선택섹터 == "분석 / 인사이트":
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
     보유계산포트폴리오 = 최적화결과["보유계산포트폴리오"]
     보유종목옵션 = 최적화결과["보유종목옵션"]
+
+    투자핵심인사이트요약UI(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오)
+    외부거시시장영향인사이트UI(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오)
+    거래메모패턴인사이트UI(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오)
 
     # 보유 종목 개별 분석
     # -----------------------------------
@@ -11535,9 +13161,9 @@ if 선택섹터 == "분석 / 인사이트":
                     st.info(자동코멘트결과["핵심문구"])
 
                     요약칸1, 요약칸2, 요약칸3, 요약칸4 = st.columns(4)
-                    요약칸1.metric("자동 판정", 자동코멘트결과["판정"])
+                    요약칸1.metric("참고 판정", 자동코멘트결과["판정"])
                     요약칸2.metric("추세 판정", 자동코멘트결과["추세판정"])
-                    요약칸3.metric("실행 방향", 자동코멘트결과["실행"])
+                    요약칸3.metric("참고 방향", 자동코멘트결과["실행"])
                     요약칸4.metric("복합 총점", f"{자동코멘트결과['총점']:.2f}점" if 자동코멘트결과.get("총점") is not None else "-")
 
                     st.markdown("#### 핵심 판독 요약")
@@ -11546,7 +13172,7 @@ if 선택섹터 == "분석 / 인사이트":
                     판독칸2.metric("RSI 판정", 자동코멘트결과.get("RSI판정", "-"))
                     판독칸3.metric("거래량 판정", 자동코멘트결과.get("거래량판정", "-"))
                     판독칸4.metric("단순 신호", 신호결과.get("종합신호", "-"))
-                    st.caption(f"간단 실행 의견: {신호결과.get('실행의견', '-')}")
+                    st.caption(f"간단 참고 의견: {신호결과.get('실행의견', '-')}")
 
                     if not 선택포트폴리오행.empty:
                         포지션행 = 선택포트폴리오행.iloc[0]
@@ -11562,7 +13188,7 @@ if 선택섹터 == "분석 / 인사이트":
                                 최근거래일 = "-"
                         추가칸4.metric("최근 거래일", 최근거래일)
 
-                    st.plotly_chart(가격그래프(가격데이터, f"{선택종목명} 주가 추이"), use_container_width=True, config={"displaylogo": False, "responsive": True})
+                    st.plotly_chart(가격그래프(가격데이터, f"{선택종목명} 주가 추이"), width="stretch", config={"displaylogo": False, "responsive": True})
 
                     최근거래요약 = pd.DataFrame()
                     if not 종목거래표.empty:
@@ -11584,44 +13210,45 @@ if 선택섹터 == "분석 / 인사이트":
                         if 최근거래요약.empty:
                             st.info("이 종목의 최근 거래 요약을 표시할 데이터가 없습니다.")
                         else:
-                            표데이터프레임(index_1부터(최근거래요약.reset_index(drop=True)), use_container_width=True)
+                            표데이터프레임(index_1부터(최근거래요약.reset_index(drop=True)), width="stretch")
                     with 개요오른쪽:
                         st.markdown("#### 빠른 해석")
                         st.markdown(f"- 현재 자동 판정은 **{자동코멘트결과['판정']}**입니다.")
                         st.markdown(f"- 추세는 **{자동코멘트결과.get('추세판정', '-')}**, 가격 위치는 **{자동코멘트결과.get('위치판정', '-')}**입니다.")
                         st.markdown(f"- RSI는 **{자동코멘트결과.get('RSI판정', '-')}**, 거래량은 **{자동코멘트결과.get('거래량판정', '-')}**입니다.")
-                        st.markdown(f"- 현재 실행 방향은 **{자동코멘트결과['실행']}** 쪽으로 해석됩니다.")
+                        st.markdown(f"- 현재 참고 방향은 **{자동코멘트결과['실행']}** 쪽으로 해석됩니다.")
 
                     개요체크표 = pd.concat([
                         자동코멘트결과["근거표"],
                         신호결과["체크표"]
                     ], axis=0, ignore_index=True)
                     with st.expander("세부 체크표 보기", expanded=False):
-                        표데이터프레임(index_1부터(개요체크표), use_container_width=True)
+                        표데이터프레임(index_1부터(개요체크표), width="stretch")
 
                 with 보유분석탭2:
-                    st.markdown("#### 자동 매수·매도 코멘트")
+                    st.markdown("#### 기술지표 기반 참고 코멘트")
                     st.success(f"**{자동코멘트결과['판정']} / {자동코멘트결과['실행']}**")
                     st.write(자동코멘트결과["핵심문구"])
                     for 문장 in 자동코멘트결과["세부코멘트"]:
                         st.markdown(f"- {문장}")
-                    with st.expander("자동 판단 근거 보기", expanded=True):
+                    with st.expander("참고 판정 근거 보기", expanded=True):
                         for 항목 in 자동코멘트결과["근거"]:
                             st.markdown(f"- {항목}")
-                        표데이터프레임(index_1부터(자동코멘트결과["근거표"]), use_container_width=True)
+                        표데이터프레임(index_1부터(자동코멘트결과["근거표"]), width="stretch")
                         st.warning(자동코멘트결과["위험문구"])
 
-                    with st.expander("자동 판정 기준 설명", expanded=True):
-                        st.markdown("- 자동 판정은 **추세·가격 위치·RSI·거래량·당일 흐름**을 함께 점수화해 계산합니다.")
-                        st.markdown("- 따라서 한 항목이 같아도 다른 항목이 변하면 최종 판정이 바뀔 수 있습니다.")
-                        표데이터프레임(index_1부터(자동코멘트결과["기준표"]), use_container_width=True)
+                    with st.expander("참고 판정 기준 설명", expanded=True):
+                        st.markdown("- 참고 판정은 **추세·가격 위치·RSI·거래량·당일 흐름**을 함께 점수화해 계산합니다.")
+                        st.markdown("- 따라서 한 항목이 같아도 다른 항목이 변하면 참고 판정이 바뀔 수 있습니다.")
+                        표데이터프레임(index_1부터(자동코멘트결과["기준표"]), width="stretch")
 
                     st.markdown("#### 차트 해설")
                     for 문장 in 상세해설문장:
                         st.markdown(f"- {문장}")
 
-                    st.markdown("#### 모델별 해석 비교")
-                    모델탭1, 모델탭2, 모델탭3 = st.tabs(["ChatGPT", "Gemini 스타일", "Claude"])
+                    st.markdown("#### 분석 관점별 해석 비교")
+                    st.caption("아래 내용은 실제 외부 AI 모델 호출 결과가 아니라, 동일한 가격 데이터와 기술지표를 서로 다른 관점으로 해석한 규칙 기반 참고자료입니다.")
+                    모델탭1, 모델탭2, 모델탭3 = st.tabs(["균형 관점", "추세 관점", "위험 관점"])
                     with 모델탭1:
                         분석카드표시(모델분석["ChatGPT"])
                     with 모델탭2:
@@ -11638,7 +13265,7 @@ if 선택섹터 == "분석 / 인사이트":
                         실전칸1.metric("추세 배열", 기술진단.get("추세배열", "-"))
                         실전칸2.metric("20일 지지", 금액표시(기술진단.get("지지")))
                         실전칸3.metric("20일 저항", 금액표시(기술진단.get("저항")))
-                        실전칸4.metric("단순 신호", 신호결과.get("종합신호", "-"))
+                        실전칸4.metric("단순 참고 신호", 신호결과.get("종합신호", "-"))
 
                         st.markdown("#### 실전 해석 요약")
                         for 문장 in 기술진단.get("요약문장", []):
@@ -11647,13 +13274,13 @@ if 선택섹터 == "분석 / 인사이트":
                         요약왼쪽, 요약오른쪽 = st.columns([1.05, 1.15])
                         with 요약왼쪽:
                             st.markdown("#### 핵심 체크")
-                            표데이터프레임(index_1부터(기술진단["핵심표"]), use_container_width=True, hide_index=False)
+                            표데이터프레임(index_1부터(기술진단["핵심표"]), width="stretch", hide_index=False)
                         with 요약오른쪽:
                             st.markdown("#### 지지·저항 및 기준선")
                             레벨표표시 = 기술진단["레벨표"].copy()
                             if not 레벨표표시.empty:
                                 레벨표표시["가격"] = 레벨표표시["가격"].map(금액표시)
-                            표데이터프레임(index_1부터(레벨표표시), use_container_width=True, hide_index=False)
+                            표데이터프레임(index_1부터(레벨표표시), width="stretch", hide_index=False)
 
                         with st.expander("실전 체크포인트", expanded=True):
                             st.markdown("1. **상승 배열**이면 20일선 이탈 여부를 먼저 확인합니다.")
@@ -11676,16 +13303,16 @@ if 선택섹터 == "분석 / 인사이트":
                             {"항목": "60일 고가", "값": 숫자표시(가격데이터.tail(60)["고가"].max(), 2)},
                             {"항목": "60일 저가", "값": 숫자표시(가격데이터.tail(60)["저가"].min(), 2)},
                         ])
-                        표데이터프레임(index_1부터(기술체크), use_container_width=True)
+                        표데이터프레임(index_1부터(기술체크), width="stretch")
                         with st.expander("신호 체크표 함께 보기", expanded=False):
-                            표데이터프레임(index_1부터(신호결과["체크표"]), use_container_width=True)
+                            표데이터프레임(index_1부터(신호결과["체크표"]), width="stretch")
 
                 with 보유분석탭4:
                     st.markdown("#### 선택 종목 매수·매도 전체 기록")
                     if 종목거래표.empty:
                         st.info("선택 종목의 거래기록이 없습니다.")
                     else:
-                        표데이터프레임(거래기록표시용서식(index_1부터(종목거래표)), use_container_width=True)
+                        표데이터프레임(거래기록표시용서식(index_1부터(종목거래표)), width="stretch")
     except Exception as e:
         st.error(f"보유 종목 개별 분석 영역 오류: {e}")
 
@@ -11706,3 +13333,11 @@ if "trade_history_df_v22" in st.session_state and "trade_history_last_calc_finge
 # - 자산변화로그의 '인출/감액' 표현을 '원금 감소 또는 기준 변경'으로 완화
 # - 기존 비주식자산 현금성자산과 신규 현금성자산 시트의 역할 구분 강화
 # ------------------------------------------------------------
+
+
+# =========================================================
+# v5.15.5 투자 행동 분석(Investment Behavior Insight)
+# - 원금 감소 대신 '투자 행동' 중심 해석
+# - 현금 -> ETF / 주식 이동 감지
+# - 외부 인출과 내부 자산 이동 구분
+# =========================================================
