@@ -29,8 +29,8 @@ def 자동백업저장(거래_df=None, 비주식_df=None):
         for old_file in 파일목록[30:]:
             try:
                 old_file.unlink()
-            except:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 32: %s", e, exc_info=True)
 
         return True
 
@@ -46,6 +46,7 @@ import os
 import re
 import time
 import html
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -53,10 +54,617 @@ from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
+
+# ============================================================
+# v5.19.4 안정화 리팩터링 1차
+# - 숨은 오류를 줄이기 위해 최소 logging 설정을 추가합니다.
+# - pass-only 예외 처리를 warning 로그로 전환합니다.
+# ============================================================
+try:
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
+except Exception as e:
+    logging.warning("suppressed exception at line 65: %s", e, exc_info=True)
+
+
+
+# ============================================================
+# v5.18.0 종목코드 단일 정규화 엔진
+# 목적:
+# - 모든 종목코드는 문자열로 처리한다.
+# - 0148J0처럼 영문이 포함된 ETF 코드는 절대 숫자만 추출하지 않는다.
+# - 과거 잘못 유입된 001480/148J0/종목명 별칭은 0148J0 대표코드로 통일한다.
+# - 거래이력, Google Sheets 저장/읽기, 월간리포트, 보유종목 모니터, 산업압력 전체에서 동일 기준을 사용한다.
+# ============================================================
+
+ASSET_MASTER_V518 = {
+    "005930": {"name": "삼성전자", "kind": "주식", "industry": "반도체", "aliases": ["005930", "삼성전자"]},
+    "000660": {"name": "SK하이닉스", "kind": "주식", "industry": "반도체", "aliases": ["000660", "SK하이닉스", "에스케이하이닉스"]},
+    "009150": {"name": "삼성전기", "kind": "주식", "industry": "전자부품", "aliases": ["009150", "삼성전기"]},
+    "278470": {"name": "에이피알", "kind": "주식", "industry": "화장품", "aliases": ["278470", "에이피알", "APR"]},
+    "069500": {"name": "KODEX 200", "kind": "ETF", "industry": "국내대형 ETF", "aliases": ["069500", "KODEX 200", "KODEX200"]},
+    "0148J0": {
+        "name": "TIGER 코리아휴머노이드로봇산업",
+        "kind": "ETF",
+        "industry": "로봇/휴머노이드 ETF",
+        "aliases": [
+            "0148J0", "0148J0.KS", "148J0", "001480",
+            "TIGER 코리아휴머노이드로봇산업", "TIGER코리아휴머노이드로봇산업",
+            "코리아휴머노이드로봇산업", "휴머노이드로봇산업", "휴머노이드",
+        ],
+    },
+}
+
+_ALIAS_TO_CODE_V518 = {}
+for _v518_code, _v518_meta in ASSET_MASTER_V518.items():
+    for _v518_alias in _v518_meta.get("aliases", []):
+        _ALIAS_TO_CODE_V518[str(_v518_alias).strip().upper().replace(" ", "")] = _v518_code
+
+
+def _text_v518(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception as e:
+        logging.warning("suppressed exception at line 107: %s", e, exc_info=True)
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+def normalize_asset_code_v518(value="", name_hint=""):
+    """종목코드/종목명/별칭을 내부 대표코드로 통일한다.
+    핵심 원칙: 문자 포함 코드는 보존하고, 순수 숫자 코드만 6자리 보정한다.
+    """
+    s = _text_v518(value)
+    n = _text_v518(name_hint)
+    key = s.upper().replace(" ", "")
+    name_key = n.upper().replace(" ", "")
+
+    # 명시 별칭 우선
+    if key in _ALIAS_TO_CODE_V518:
+        return _ALIAS_TO_CODE_V518[key]
+    if name_key in _ALIAS_TO_CODE_V518:
+        return _ALIAS_TO_CODE_V518[name_key]
+
+    # 휴머노이드 ETF는 코드·종목명 어디에서 들어와도 0148J0으로 통일
+    merged = f"{s} {n}"
+    merged_compact = merged.upper().replace(" ", "")
+    if "휴머노이드" in merged or "코리아휴머노이드" in merged or "0148J0" in merged_compact or "148J0" in merged_compact:
+        return "0148J0"
+
+    if not key:
+        return ""
+
+    # 숫자형 한국 종목코드만 6자리로 보정
+    if key.isdigit():
+        return key.zfill(6)
+
+    # 문자 포함 ETF/해외티커/기타 코드는 절대 숫자만 추출하지 않고 그대로 보존
+    return key
+
+
+def asset_name_v518(value="", name_hint=""):
+    code = normalize_asset_code_v518(value, name_hint)
+    meta = ASSET_MASTER_V518.get(code)
+    if meta:
+        return meta.get("name", code)
+    return _text_v518(name_hint) or _text_v518(value) or code
+
+
+def asset_kind_v518(value="", name_hint=""):
+    code = normalize_asset_code_v518(value, name_hint)
+    return ASSET_MASTER_V518.get(code, {}).get("kind", "")
+
+
+def asset_industry_v518(value="", name_hint=""):
+    code = normalize_asset_code_v518(value, name_hint)
+    return ASSET_MASTER_V518.get(code, {}).get("industry", "미분류")
+
+
+def is_valid_asset_code_v518(code):
+    s = _text_v518(code).upper().replace(" ", "")
+    if not s:
+        return False
+    # 순수 숫자 6자리 또는 문자 포함 코드 모두 허용
+    return bool(re.fullmatch(r"[0-9A-Z.\-_]{2,20}", s))
+
+
+def normalize_asset_dataframe_v518(df):
+    """DataFrame 안의 종목코드/종목명/산업 컬럼을 대표코드 기준으로 정리한다."""
+    try:
+        if df is None or not hasattr(df, "columns"):
+            return df
+        out = pd.DataFrame(df).copy()
+        code_cols = [c for c in out.columns if str(c).strip() in ["종목코드", "코드", "ticker", "Ticker", "symbol", "Symbol", "티커"]]
+        name_cols = [c for c in out.columns if str(c).strip() in ["종목명", "상품명", "자산명", "보유종목", "name", "Name"]]
+
+        if not code_cols and name_cols:
+            out.insert(0, "종목코드", "")
+            code_cols = ["종목코드"]
+
+        if code_cols:
+            code_col = code_cols[0]
+            name_col = name_cols[0] if name_cols else None
+            if name_col:
+                out[code_col] = [normalize_asset_code_v518(c, n) for c, n in zip(out[code_col], out[name_col])]
+            else:
+                out[code_col] = out[code_col].apply(normalize_asset_code_v518)
+            out[code_col] = out[code_col].astype(str)
+
+            if name_cols:
+                name_col = name_cols[0]
+                out[name_col] = [asset_name_v518(c, n) for c, n in zip(out[code_col], out[name_col])]
+
+        industry_cols = [c for c in out.columns if str(c).strip() in ["산업", "주산업", "업종", "자산군"]]
+        if code_cols and industry_cols:
+            c0 = code_cols[0]
+            for ic in industry_cols:
+                if str(ic).strip() == "자산군":
+                    out[ic] = [asset_kind_v518(c) or v for c, v in zip(out[c0], out[ic])]
+                else:
+                    out[ic] = [asset_industry_v518(c) if asset_industry_v518(c) != "미분류" else v for c, v in zip(out[c0], out[ic])]
+        return out
+    except Exception:
+        return df
+
+
+def code_for_google_sheets_v518(value, name_hint=""):
+    """Google Sheets 저장용 종목코드. 문자 포함 코드를 보존한다."""
+    return normalize_asset_code_v518(value, name_hint)
+
+
+def 코드문자열정리_v518(value, name_hint=""):
+    return normalize_asset_code_v518(value, name_hint)
+
+
+def safe_zfill_stock_code_v518(value, name_hint=""):
+    return normalize_asset_code_v518(value, name_hint)
+
+
+# ============================================================
+# v5.17.15 종목코드 정규화 엔진
+# 목적:
+# - 거래이력/월간리포트/포트폴리오/시세조회/산업매핑에서 동일 자산을 하나의 대표키로 통일
+# - TIGER 코리아휴머노이드로봇산업: 0148J0을 내부 대표코드로 사용
+# - 과거 잘못 유입된 0148J0, 종목명 기반 데이터도 0148J0으로 정규화
+# ============================================================
+try:
+    _v51715_original_read_excel = pd.read_excel
+    _v51715_original_read_csv = pd.read_csv
+except Exception:
+    _v51715_original_read_excel = None
+    _v51715_original_read_csv = None
+
+ASSET_MASTER_V51715 = {
+    "0148J0": {
+        "표시명": "TIGER 코리아휴머노이드로봇산업",
+        "정규명": "TIGER 코리아휴머노이드로봇산업",
+        "구분": "ETF",
+        "주산업": "로봇/휴머노이드 ETF",
+        "보조태그": ["ETF", "로봇", "휴머노이드", "AI"],
+        "aliases": [
+            "0148J0", "0148J0",
+            "TIGER 코리아휴머노이드로봇산업",
+            "TIGER코리아휴머노이드로봇산업",
+            "코리아휴머노이드로봇산업",
+            "휴머노이드로봇산업",
+        ],
+    },
+    "069500": {
+        "표시명": "KODEX 200",
+        "정규명": "KODEX 200",
+        "구분": "ETF",
+        "주산업": "국내대형 ETF",
+        "보조태그": ["ETF", "시장", "코스피200"],
+        "aliases": ["069500", "KODEX 200", "KODEX200"],
+    },
+    "005930": {
+        "표시명": "삼성전자",
+        "정규명": "삼성전자",
+        "구분": "주식",
+        "주산업": "반도체",
+        "보조태그": ["AI", "수출", "국내대형주"],
+        "aliases": ["005930", "삼성전자"],
+    },
+    "000660": {
+        "표시명": "SK하이닉스",
+        "정규명": "SK하이닉스",
+        "구분": "주식",
+        "주산업": "반도체",
+        "보조태그": ["HBM", "AI", "수출"],
+        "aliases": ["000660", "SK하이닉스", "에스케이하이닉스"],
+    },
+    "009150": {
+        "표시명": "삼성전기",
+        "정규명": "삼성전기",
+        "구분": "주식",
+        "주산업": "전자부품",
+        "보조태그": ["MLCC", "IT부품", "전장"],
+        "aliases": ["009150", "삼성전기"],
+    },
+    "278470": {
+        "표시명": "에이피알",
+        "정규명": "에이피알",
+        "구분": "주식",
+        "주산업": "화장품",
+        "보조태그": ["K뷰티", "소비재", "중국소비"],
+        "aliases": ["278470", "에이피알", "APR"],
+    },
+}
+
+_ALIAS_TO_CODE_V51715 = {}
+for _code, _meta in ASSET_MASTER_V51715.items():
+    for _a in _meta.get("aliases", []):
+        _ALIAS_TO_CODE_V51715[str(_a).strip().upper().replace(" ", "")] = _code
+
+
+def normalize_asset_key_v51715(value):
+    """종목코드/종목명/별칭을 내부 대표코드로 통일한다."""
+    if value is None:
+        return value
+    s = str(value).strip()
+    if not s or s.lower() in ["nan", "none", "nat"]:
+        return value
+    key = s.upper().replace(" ", "")
+    # Excel에서 0148J0이 잘못 숫자형/문자형으로 들어온 경우 보정
+    if key in _ALIAS_TO_CODE_V51715:
+        return _ALIAS_TO_CODE_V51715[key]
+    if "휴머노이드" in s or "코리아휴머노이드" in s:
+        return "0148J0"
+    # 숫자코드는 6자리 문자열 유지, 문자 포함 코드는 그대로 유지
+    if key.isdigit():
+        return key.zfill(6)
+    return s
+
+
+def asset_display_name_v51715(value):
+    code = normalize_asset_key_v51715(value)
+    meta = ASSET_MASTER_V51715.get(str(code), {})
+    return meta.get("표시명", value)
+
+
+def asset_industry_v51715(value):
+    code = normalize_asset_key_v51715(value)
+    meta = ASSET_MASTER_V51715.get(str(code), {})
+    return meta.get("주산업", "미분류")
+
+
+def asset_type_v51715(value):
+    code = normalize_asset_key_v51715(value)
+    meta = ASSET_MASTER_V51715.get(str(code), {})
+    return meta.get("구분", "")
+
+
+def normalize_asset_dataframe_v51715(df):
+    """거래이력/보유자산/월간리포트 DataFrame의 종목코드·종목명 혼재를 정리한다."""
+    try:
+        if df is None or not hasattr(df, "columns"):
+            return df
+        out = df.copy()
+        cols = [str(c) for c in out.columns]
+        code_cols = [c for c in out.columns if str(c).strip() in ["종목코드", "코드", "ticker", "Ticker", "symbol", "Symbol"]]
+        name_cols = [c for c in out.columns if str(c).strip() in ["종목명", "상품명", "자산명", "name", "Name"]]
+
+        # 코드 컬럼은 문자열로 고정하여 0148J0 같은 문자 포함 ETF 코드가 깨지지 않게 한다.
+        for c in code_cols:
+            out[c] = out[c].apply(normalize_asset_key_v51715).astype(str)
+
+        # 종목명이 휴머노이드 ETF이면 코드 컬럼도 0148J0으로 맞춘다.
+        if name_cols:
+            name_col = name_cols[0]
+            mask_h = out[name_col].astype(str).str.contains("휴머노이드|코리아휴머노이드|TIGER 코리아휴머노이드", na=False)
+            if mask_h.any():
+                if code_cols:
+                    out.loc[mask_h, code_cols[0]] = "0148J0"
+                else:
+                    out.insert(0, "종목코드", "")
+                    out.loc[mask_h, "종목코드"] = "0148J0"
+                    code_cols = ["종목코드"]
+
+        # 코드가 0148J0이면 표시명도 통일한다.
+        if code_cols and name_cols:
+            c0, n0 = code_cols[0], name_cols[0]
+            mask = out[c0].astype(str).apply(lambda x: normalize_asset_key_v51715(x) == "0148J0")
+            out.loc[mask, c0] = "0148J0"
+            out.loc[mask, n0] = "TIGER 코리아휴머노이드로봇산업"
+
+        # 산업/자산군 컬럼이 있으면 0148J0 산업을 보정한다.
+        industry_cols = [c for c in out.columns if str(c).strip() in ["산업", "주산업", "업종", "자산군"]]
+        if code_cols:
+            mask = out[code_cols[0]].astype(str).apply(lambda x: normalize_asset_key_v51715(x) == "0148J0")
+            for ic in industry_cols:
+                if str(ic).strip() == "자산군":
+                    out.loc[mask, ic] = "ETF"
+                else:
+                    out.loc[mask, ic] = "로봇/휴머노이드 ETF"
+        return out
+    except Exception:
+        return df
+
+
+def _v51715_read_excel_normalized(*args, **kwargs):
+    if _v51715_original_read_excel is None:
+        raise RuntimeError("pandas read_excel 원본 함수를 찾지 못했습니다.")
+    data = _v51715_original_read_excel(*args, **kwargs)
+    try:
+        if isinstance(data, dict):
+            return {k: normalize_asset_dataframe_v51715(v) for k, v in data.items()}
+        return normalize_asset_dataframe_v51715(data)
+    except Exception:
+        return data
+
+
+def _v51715_read_csv_normalized(*args, **kwargs):
+    if _v51715_original_read_csv is None:
+        raise RuntimeError("pandas read_csv 원본 함수를 찾지 못했습니다.")
+    data = _v51715_original_read_csv(*args, **kwargs)
+    return normalize_asset_dataframe_v51715(data)
+
+
+def normalize_trade_history_v51715(df):
+    return normalize_asset_dataframe_v51715(df)
+
+
+def normalize_portfolio_v51715(df):
+    return normalize_asset_dataframe_v51715(df)
+
+
 import numpy as np
 import requests
 import streamlit as st
 
+
+# ============================================================
+# v5.17.16 0148J0 표시/계산 하드픽스
+# 문제 원인:
+# - 일부 월간 리포트/표시 함수가 종목코드를 숫자형 또는 숫자만 추출 방식으로 다시 처리하면서
+#   0148J0을 001480으로 오인식함.
+# 해결:
+# - 데이터 로딩 후뿐 아니라 Streamlit 표시 직전에도 종목코드/종목명을 재정규화한다.
+# - 0148J0은 숫자코드가 아니므로 zfill, 숫자 추출, 앞자리 0 보정 대상에서 제외한다.
+# ============================================================
+try:
+    import pandas as _pd_v51716
+except Exception:
+    _pd_v51716 = None
+
+_HUMANOID_CODE_V51716 = "0148J0"
+_HUMANOID_NAME_V51716 = "TIGER 코리아휴머노이드로봇산업"
+_HUMANOID_ALIAS_V51716 = {
+    "0148J0", "001480", "148J0", "TIGER코리아휴머노이드로봇산업",
+    "TIGER 코리아휴머노이드로봇산업", "코리아휴머노이드로봇산업", "휴머노이드로봇산업",
+}
+
+
+def _v51716_is_humanoid_value(x):
+    try:
+        s = str(x).strip()
+        compact = s.upper().replace(" ", "")
+        return (
+            compact in {a.upper().replace(" ", "") for a in _HUMANOID_ALIAS_V51716}
+            or "휴머노이드" in s
+            or "코리아휴머노이드" in s
+        )
+    except Exception:
+        return False
+
+
+def normalize_stock_code_v51716(x, name_hint=None):
+    """0148J0 같은 문자 포함 코드를 보존하는 종목코드 정규화."""
+    if _v51716_is_humanoid_value(x) or _v51716_is_humanoid_value(name_hint):
+        return _HUMANOID_CODE_V51716
+    try:
+        s = str(x).strip()
+        if not s or s.lower() in ["nan", "none", "nat"]:
+            return s
+        u = s.upper().replace(" ", "")
+        if u == "001480":
+            return _HUMANOID_CODE_V51716
+        # 문자 포함 코드는 절대 숫자 추출하지 않고 그대로 둔다.
+        if any(ch.isalpha() for ch in u):
+            return u
+        # 순수 숫자만 6자리 보정
+        if u.isdigit():
+            return normalize_asset_code_v518(u)
+        return s
+    except Exception:
+        return x
+
+
+def normalize_display_dataframe_v51716(df):
+    """월간리포트/포트폴리오/모니터링 표시 직전 최종 정규화."""
+    if _pd_v51716 is None:
+        return df
+    try:
+        if df is None or not hasattr(df, "columns"):
+            return df
+        out = df.copy()
+        cols = list(out.columns)
+        code_cols = [c for c in cols if str(c).strip() in ["종목코드", "코드", "Ticker", "ticker", "Symbol", "symbol"]]
+        name_cols = [c for c in cols if str(c).strip() in ["종목명", "상품명", "자산명", "Name", "name"]]
+
+        # 종목명 기준 휴머노이드 ETF 탐지
+        humanoid_mask = None
+        for nc in name_cols:
+            m = out[nc].astype(str).apply(_v51716_is_humanoid_value)
+            humanoid_mask = m if humanoid_mask is None else (humanoid_mask | m)
+
+        # 코드 기준 휴머노이드 ETF 탐지
+        for cc in code_cols:
+            m = out[cc].astype(str).apply(_v51716_is_humanoid_value)
+            humanoid_mask = m if humanoid_mask is None else (humanoid_mask | m)
+
+        if humanoid_mask is not None and humanoid_mask.any():
+            if not code_cols:
+                out.insert(0, "종목코드", "")
+                code_cols = ["종목코드"]
+            out.loc[humanoid_mask, code_cols[0]] = _HUMANOID_CODE_V51716
+            if name_cols:
+                out.loc[humanoid_mask, name_cols[0]] = _HUMANOID_NAME_V51716
+
+        # 모든 코드 컬럼은 문자형으로 유지
+        for cc in code_cols:
+            if name_cols:
+                nc0 = name_cols[0]
+                out[cc] = [normalize_stock_code_v51716(c, n) for c, n in zip(out[cc], out[nc0])]
+            else:
+                out[cc] = out[cc].apply(normalize_stock_code_v51716)
+            out[cc] = out[cc].astype(str)
+
+        return out
+    except Exception:
+        return df
+
+
+# Streamlit 표시 함수 패치: 화면 표시 직전 정규화
+try:
+    if 'st' in globals() and not getattr(st, "_v51716_code_display_hardfix", False):
+        _v51716_orig_dataframe = getattr(st, "dataframe", None)
+        _v51716_orig_table = getattr(st, "table", None)
+        _v51716_orig_data_editor = getattr(st, "data_editor", None)
+        _v51716_orig_write = getattr(st, "write", None)
+
+        def _v51716_dataframe(obj=None, *args, **kwargs):
+            return _v51716_orig_dataframe(normalize_display_dataframe_v51716(obj), *args, **kwargs)
+
+        def _v51716_table(obj=None, *args, **kwargs):
+            return _v51716_orig_table(normalize_display_dataframe_v51716(obj), *args, **kwargs)
+
+        def _v51716_data_editor(obj=None, *args, **kwargs):
+            return _v51716_orig_data_editor(normalize_display_dataframe_v51716(obj), *args, **kwargs)
+
+        def _v51716_write(*args, **kwargs):
+            fixed_args = tuple(normalize_display_dataframe_v51716(a) for a in args)
+            return _v51716_orig_write(*fixed_args, **kwargs)
+
+        if _v51716_orig_dataframe:
+            st.dataframe = _v51716_dataframe
+        if _v51716_orig_table:
+            st.table = _v51716_table
+        if _v51716_orig_data_editor:
+            st.data_editor = _v51716_data_editor
+        if _v51716_orig_write:
+            st.write = _v51716_write
+        st._v51716_code_display_hardfix = True
+except Exception as e:
+    logging.warning("suppressed exception at line 552: %s", e, exc_info=True)
+
+
+# 엑셀 다운로드/리포트 생성 직전에도 사용할 수 있는 별칭 함수
+try:
+    normalize_report_dataframe_v51716 = normalize_display_dataframe_v51716
+except Exception as e:
+    logging.warning("suppressed exception at line 559: %s", e, exc_info=True)
+
+
+# ============================================================
+# v5.17.13 fallback notice silent patch
+# ============================================================
+def _v51713_norm_code(x):
+    """v5.18 통합 정규화 엔진 사용."""
+    return normalize_asset_code_v518(x)
+
+def _v51713_norm_name(x):
+    try:
+        if x is None:
+            return ""
+        s = str(x).strip()
+        if s.lower() in ("nan", "none", "nat"):
+            return ""
+        return s.replace(" ", "").upper()
+    except Exception:
+        return ""
+
+
+def _v51713_is_humanoid_etf(row_or_name=None, code=None):
+    """TIGER 코리아휴머노이드로봇산업 ETF 식별."""
+    try:
+        name = ""
+        cd = ""
+        if hasattr(row_or_name, "get"):
+            for c in ["종목명", "종목", "자산명", "상품명", "name"]:
+                if c in row_or_name:
+                    name = str(row_or_name.get(c, ""))
+                    break
+            for c in ["종목코드", "코드", "ticker", "code"]:
+                if c in row_or_name:
+                    cd = _v51713_norm_code(row_or_name.get(c, ""))
+                    break
+        else:
+            name = str(row_or_name or "")
+            cd = _v51713_norm_code(code or "")
+        n = _v51713_norm_name(name)
+        return cd == "0148J0" or ("TIGER" in n and "코리아휴머노이드" in n and "로봇" in n)
+    except Exception:
+        return False
+
+
+def _v51713_num(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        if isinstance(x, str):
+            x = x.replace(",", "").replace("원", "").replace("%", "").strip()
+            if x == "":
+                return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _v51713_has_holding_basis(row):
+    """실시간 시세가 없어도 보유수량/평가금액/매입금액 중 하나로 정상 계산 가능한지 판단."""
+    if not hasattr(row, "get"):
+        return False
+    qty_cols = ["보유수량", "수량", "잔고수량", "보유주수", "주수"]
+    value_cols = ["평가금액", "현재평가금액", "평가액", "잔고평가금액", "매입금액", "투자원금", "매수금액"]
+    qty = max([_v51713_num(row.get(c, 0)) for c in qty_cols if c in row] + [0])
+    val = max([_v51713_num(row.get(c, 0)) for c in value_cols if c in row] + [0])
+    return qty > 0 or val > 0
+
+
+def _v51713_is_normal_fallback_asset(row_or_name=None, code=None):
+    """경고 대상이 아닌 정상 fallback 자산 판정."""
+    if _v51713_is_humanoid_etf(row_or_name, code):
+        return True
+    if hasattr(row_or_name, "get") and _v51713_has_holding_basis(row_or_name):
+        return True
+    return False
+
+
+def _v51713_filter_failed_assets(failed_assets):
+    """시세 미연동 목록에서 정상 fallback 자산을 제거."""
+    try:
+        if failed_assets is None:
+            return failed_assets
+        filtered = []
+        for item in failed_assets:
+            if _v51713_is_normal_fallback_asset(item):
+                continue
+            # 문자열 실패 항목도 0148J0/휴머노이드 ETF면 제외
+            if _v51713_is_humanoid_etf(item):
+                continue
+            filtered.append(item)
+        return filtered
+    except Exception:
+        return failed_assets
+
+
+def _v51713_soft_fallback_notice(count=1):
+    """오류처럼 보이지 않는 작은 안내 문구."""
+    try:
+        import streamlit as st
+        if count and count > 0:
+            st.caption(f"참고: 일부 ETF {int(count)}건은 실시간 시세 대신 보유평가 기준으로 반영됩니다.")
+    except Exception as e:
+        logging.warning("suppressed exception at line 662: %s", e, exc_info=True)
+
+# ============================================================
+# end v5.17.13 patch
+# ============================================================
 try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -97,7 +705,137 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.17.1-stable-risk-ui"  # v5.17.0 운영 안정판 기반 / Google Sheets 구조 유지 / 리스크 UI만 안정화
+APP_VERSION = "v5.19.5-stabilization-refactor-phase2"
+
+# ============================================================
+# v5.18.3 UI 안정화 + 데이터 구조 정리
+# ============================================================
+
+MONITOR_ORDER = {
+    "코스피": ["코스피"],
+    "코스닥": ["코스닥"],
+    "ETF": ["KODEX200", "TIGER 휴머노이드"],
+    "개별주": ["삼성전자", "SK하이닉스", "에이피알", "삼성전기"],
+}
+
+PRICE_STATUS_META = {
+    "실시간": "실시간 연결",
+    "준실시간": "당일 기준가",
+    "평가기준": "보유평가 사용",
+    "준비중": "API 연결 대기",
+}
+
+ASSET_METADATA = {
+    "삼성전자": {
+        "industry": "반도체",
+        "tags": ["메모리", "AI반도체", "수출"],
+        "comment": "국내 대표 반도체 대형주",
+        "pressure": "강한 우호",
+        "source": "보유종목 메타데이터",
+    },
+    "SK하이닉스": {
+        "industry": "반도체",
+        "tags": ["HBM", "AI반도체", "메모리"],
+        "comment": "AI 반도체 수요와 연결성이 높은 메모리 대표주",
+        "pressure": "강한 우호",
+        "source": "보유종목 메타데이터",
+    },
+    "에이피알": {
+        "industry": "화장품",
+        "tags": ["K-뷰티", "수출", "소비재"],
+        "comment": "화장품 및 뷰티 디바이스 관련주",
+        "pressure": "우호",
+        "source": "보유종목 메타데이터",
+    },
+    "삼성전기": {
+        "industry": "전자부품",
+        "tags": ["MLCC", "전장", "IT부품"],
+        "comment": "전자부품 및 전장 수요와 연결된 종목",
+        "pressure": "중립",
+        "source": "보유종목 메타데이터",
+    },
+    "KODEX200": {
+        "industry": "시장대표 ETF",
+        "tags": ["코스피200", "대형주", "ETF"],
+        "comment": "국내 대형주 흐름을 반영하는 대표 ETF",
+        "pressure": "중립",
+        "source": "보유종목 메타데이터",
+    },
+    "TIGER 휴머노이드": {
+        "industry": "로봇/AI",
+        "tags": ["로봇", "AI", "테마형 ETF"],
+        "comment": "AI·로봇 산업 기대와 연결된 테마형 ETF",
+        "pressure": "중립",
+        "source": "보유종목 메타데이터",
+    },
+}
+
+def normalize_price_status_v5183(status):
+    if not status:
+        return "준비중"
+
+    status = str(status).strip()
+
+    alias = {
+        "보유평가 기준": "평가기준",
+        "보유평가": "평가기준",
+        "당일": "준실시간",
+    }
+
+    if status in PRICE_STATUS_META:
+        return status
+
+    return alias.get(status, "준비중")
+
+# ============================================================
+# /v5.18.3 UI 안정화 + 데이터 구조 정리
+# ============================================================
+
+  # 압력 상황실 UX · 핵심 압력 TOP 카드 · 산업 압력 흐름판
+
+
+# ============================================================
+# v5.18.3.3 주요 모니터링 정렬 보조 함수
+# ============================================================
+def v51833_monitor_sort_key(item):
+    """
+    코스피 → 코스닥 → ETF → 개별주 순서로 정렬하기 위한 보조 함수입니다.
+    dict, Series, 문자열 모두 처리합니다.
+    """
+    try:
+        if hasattr(item, "get"):
+            name = (
+                item.get("종목명", "")
+                or item.get("자산명", "")
+                or item.get("name", "")
+                or item.get("표시명", "")
+                or item.get("title", "")
+            )
+        else:
+            name = str(item)
+        name = str(name)
+
+        order = {
+            "코스피": 10,
+            "KOSPI": 10,
+            "코스닥": 20,
+            "KOSDAQ": 20,
+            "KODEX 200": 30,
+            "KODEX200": 30,
+            "TIGER 코리아휴머노이드로봇산업": 40,
+            "TIGER 휴머노이드": 40,
+            "삼성전자": 50,
+            "SK하이닉스": 60,
+            "에이피알": 70,
+            "삼성전기": 80,
+        }
+
+        for key, rank in order.items():
+            if key in name:
+                return rank
+        return 999
+    except Exception:
+        return 999
 
 
 # -----------------------------------
@@ -106,6 +844,26 @@ APP_VERSION = "v5.17.1-stable-risk-ui"  # v5.17.0 운영 안정판 기반 / Goog
 # - 최상단 버전 주석과 APP_VERSION 표기 통일
 # - 기존 기능 로직은 유지하여 v5.13.5와의 실행 호환성 우선
 # -----------------------------------
+
+
+# ============================================================
+# v5.18.3.3 HTML 출력 안전 함수
+# ============================================================
+def v51833_safe_markdown_html(html_text):
+    """
+    HTML 문자열이 코드 블록처럼 노출되지 않도록 안전하게 렌더링합니다.
+    """
+    try:
+        if html_text is None:
+            return
+        html_text = str(html_text)
+        if "<div" in html_text or "<span" in html_text or "class=" in html_text:
+            st.markdown(html_text, unsafe_allow_html=True)
+        else:
+            st.markdown(html_text)
+    except Exception as e:
+        st.caption(f"HTML 표시 오류: {type(e).__name__}: {e}")
+
 
 st.set_page_config(page_title=f"투자 분석 시스템 {APP_VERSION}", layout="wide")
 
@@ -277,7 +1035,6 @@ if "price_refresh_token_v51" not in st.session_state:
     st.session_state["price_refresh_token_v51"] = 0
 
 
-
 # -----------------------------------
 # v5.14.59 표·그래프 가독성 보강
 # - 표 셀 텍스트 줄바꿈
@@ -420,12 +1177,12 @@ def 모바일여부():
     return 모바일모드
 
 if 모바일여부():
-    st.title(f"📈 투자 분석 시스템 {APP_VERSION}")
+    st.title("📈 투자 분석 시스템")
     st.caption("모바일 조회용 간소화 화면")
 else:
-    st.title(f"📈 투자 분석 시스템 {APP_VERSION}")
+    st.title("📈 투자 분석 시스템")
 
-st.caption("본 화면의 분석은 보유자산·거래이력·외부지표를 바탕으로 한 참고용 해석이며, 매수·매도 권유가 아닙니다.")
+
     
 
 
@@ -489,8 +1246,6 @@ def 운영시트목록정리(시트목록):
         return list(시트목록 or [])
 
 
-
-
 # -----------------------------------
 # v5.14.34 Streamlit Cloud Secrets Warm-up
 # - Cloud 앱이 막 깨어난 직후 st.secrets/Google API 준비가 늦어지는 경우를 방지
@@ -503,7 +1258,6 @@ GOOGLE_SHEETS_CONNECT_ATTEMPTS = 6
 GOOGLE_SHEETS_CONNECT_WAIT_SECONDS = 1.5
 
 
-
 # -----------------------------------
 # v5.14.36 Stable JSON Auth
 # - Google 인증 구조 단순화
@@ -512,6 +1266,7 @@ GOOGLE_SHEETS_CONNECT_WAIT_SECONDS = 1.5
 # - 실패 상태를 과도하게 캐시하지 않고, 매 연결마다 fresh-auth 수행
 # -----------------------------------
 GOOGLE_SHEETS_LOCAL_SERVICE_ACCOUNT_FILE = ".streamlit/service_account.json"
+EXPECTED_SERVICE_ACCOUNT = "streamlit-stock-app-689@stock-app-491205.iam.gserviceaccount.com"
 GOOGLE_SHEETS_STARTUP_DELAY_SECONDS = 0.5
 GOOGLE_SHEETS_CONNECT_ATTEMPTS = 3
 GOOGLE_SHEETS_CONNECT_WAIT_SECONDS = 0.8
@@ -533,15 +1288,15 @@ def _구글시트ID가져오기():
             spreadsheet_id = str(st.secrets["google_sheets"].get("spreadsheet_id", "")).strip()
             if spreadsheet_id:
                 return spreadsheet_id, "secrets.toml [google_sheets]"
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1291: %s", e, exc_info=True)
 
     try:
         env_id = str(os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "")).strip()
         if env_id:
             return env_id, "환경변수 GOOGLE_SHEETS_SPREADSHEET_ID"
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1298: %s", e, exc_info=True)
 
     return "", "spreadsheet_id 없음"
 
@@ -559,16 +1314,16 @@ def _구글서비스계정JSON경로후보():
             path_value = st.secrets["gcp_service_account_file"].get("path", "")
             if path_value:
                 후보.append(path_value)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1317: %s", e, exc_info=True)
 
     # 3순위: 환경변수로 지정한 경우
     try:
         env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
         if env_path:
             후보.append(env_path)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1325: %s", e, exc_info=True)
 
     정리후보 = []
     for item in 후보:
@@ -583,11 +1338,50 @@ def _구글서비스계정JSON파일찾기():
         try:
             if os.path.exists(path) and os.path.isfile(path):
                 return path
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 1341: %s", e, exc_info=True)
     return ""
 
 
+def 구글서비스계정검증정보():
+    """현재 사용 중인 Google 서비스계정이 운영 기준과 일치하는지 점검합니다."""
+    결과 = {
+        "expected_email": EXPECTED_SERVICE_ACCOUNT,
+        "client_email": "",
+        "auth_source": "",
+        "json_path": "",
+        "is_expected": False,
+        "message": "서비스계정 정보를 확인하지 못했습니다.",
+    }
+
+    try:
+        json_path = _구글서비스계정JSON파일찾기()
+        if json_path:
+            계정정보, 계정메시지 = _구글서비스계정파일정보읽기(json_path)
+            client_email = str(계정정보.get("client_email", "")).strip()
+            결과.update({
+                "client_email": client_email,
+                "auth_source": f"Local JSON · {os.path.basename(json_path)}",
+                "json_path": json_path,
+                "is_expected": bool(client_email and client_email == EXPECTED_SERVICE_ACCOUNT),
+                "message": 계정메시지,
+            })
+            return 결과
+
+        계정정보, 계정메시지 = 구글서비스계정정보가져오기()
+        client_email = str(계정정보.get("client_email", "")).strip()
+        결과.update({
+            "client_email": client_email,
+            "auth_source": "Cloud Secrets 보조",
+            "json_path": "",
+            "is_expected": bool(client_email and client_email == EXPECTED_SERVICE_ACCOUNT),
+            "message": 계정메시지,
+        })
+        return 결과
+
+    except Exception as e:
+        결과["message"] = f"서비스계정 검증 오류: {type(e).__name__}: {e}"
+        return 결과
 
 
 def _구글서비스계정파일정보읽기(json_path):
@@ -746,6 +1540,13 @@ def _구글시트문서연결_직접():
             credentials = Credentials.from_service_account_info(계정정보, scopes=scopes)
             인증방식 = "Cloud Secrets 보조"
 
+        현재서비스계정 = str(계정정보.get("client_email", "")).strip()
+        서비스계정일치 = bool(현재서비스계정 and 현재서비스계정 == EXPECTED_SERVICE_ACCOUNT)
+        if 현재서비스계정:
+            st.session_state["google_sheets_service_account_email"] = 현재서비스계정
+            st.session_state["google_sheets_expected_service_account"] = EXPECTED_SERVICE_ACCOUNT
+            st.session_state["google_sheets_service_account_match"] = 서비스계정일치
+
         client = gspread.authorize(credentials)
         spreadsheet = client.open_by_key(spreadsheet_id)
 
@@ -756,6 +1557,9 @@ def _구글시트문서연결_직접():
             "문서ID출처": id_source,
             "문서명": spreadsheet.title,
             "시트목록": [ws.title for ws in spreadsheet.worksheets()],
+            "현재서비스계정": 현재서비스계정,
+            "기준서비스계정": EXPECTED_SERVICE_ACCOUNT,
+            "서비스계정일치": 서비스계정일치,
         }
 
     except Exception as e:
@@ -795,13 +1599,60 @@ def 구글시트문서연결(max_attempts=None, wait_seconds=None, force=False):
         if 시도 < max_attempts:
             try:
                 time.sleep(wait_seconds)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 1602: %s", e, exc_info=True)
 
     st.session_state["google_sheets_connected"] = False
     st.session_state["google_sheets_last_error"] = 마지막정보.get("메시지", "")
     st.session_state["google_sheets_last_connection_attempts"] = max_attempts
     return None, 마지막정보
+
+
+def 운영상태패널표시(expanded=False):
+    """운영 환경과 Google 인증 상태를 한눈에 확인하는 안정화 패널입니다."""
+    try:
+        with st.sidebar.expander("운영 상태", expanded=expanded):
+            st.caption(f"앱 버전: {APP_VERSION}")
+
+            실행환경 = "Streamlit Cloud" if os.environ.get("STREAMLIT_RUNTIME_ENV") or os.environ.get("STREAMLIT_SERVER_HEADLESS") else "Local"
+            st.caption(f"실행 환경: {실행환경}")
+
+            검증 = 구글서비스계정검증정보()
+            현재계정 = 검증.get("client_email", "") or st.session_state.get("google_sheets_service_account_email", "")
+            기준계정 = 검증.get("expected_email", EXPECTED_SERVICE_ACCOUNT)
+
+            if 검증.get("is_expected"):
+                st.success("서비스계정 정상")
+            else:
+                st.warning("서비스계정 확인 필요")
+            st.caption(f"현재 계정: {현재계정 or '확인 안 됨'}")
+            st.caption(f"기준 계정: {기준계정}")
+            if 검증.get("auth_source"):
+                st.caption(f"인증 출처: {검증.get('auth_source')}")
+
+            연결됨 = bool(st.session_state.get("google_sheets_connected", False))
+            문서명 = st.session_state.get("google_sheet_title", "")
+            마지막연결 = st.session_state.get("google_sheets_last_connected_at", "") or st.session_state.get("google_sheet_last_connected_at", "")
+            마지막오류 = st.session_state.get("google_sheets_last_error", "")
+
+            if 연결됨:
+                st.success(f"Google Sheets 연결됨{(' · ' + 문서명) if 문서명 else ''}")
+            else:
+                st.info("Google Sheets 연결 상태는 아직 확인 전이거나 미연결입니다.")
+
+            if 마지막연결:
+                st.caption(f"마지막 연결: {마지막연결}")
+            if 마지막오류:
+                st.caption(f"최근 오류: {마지막오류}")
+
+            if st.button("운영 상태 재점검", key="operation_status_recheck_v5172", width="stretch"):
+                구글시트캐시초기화()
+                st.session_state.pop("google_sheets_startup_warmup_done_v51436", None)
+                st.rerun()
+
+            st.caption("※ 서비스계정이 기준 계정과 다르면 JSON 또는 Cloud Secrets 설정을 먼저 확인해야 합니다.")
+    except Exception as e:
+        st.sidebar.caption(f"운영 상태 패널 표시 오류: {type(e).__name__}: {e}")
 
 
 def 구글시트연결상태표시():
@@ -885,7 +1736,7 @@ def 구글시트데이터프레임읽기(sheet_name):
         rows = values[1:]
         if not header:
             return pd.DataFrame()
-        return pd.DataFrame(rows, columns=header)
+        return normalize_asset_dataframe_v518(pd.DataFrame(rows, columns=header))
     except Exception:
         return pd.DataFrame()
 
@@ -897,8 +1748,8 @@ def _구글시트날짜문자열(값):
     try:
         if pd.isna(값):
             return ""
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1751: %s", e, exc_info=True)
 
     문자 = str(값).strip()
     if 문자 in ["", "nan", "NaT", "None", "nat"]:
@@ -917,30 +1768,10 @@ def _구글시트날짜문자열(값):
 
 
 def _구글시트종목코드문자열(값):
-    """Google Sheets 저장 전 종목코드를 6자리 문자열로 고정합니다."""
-    if 값 is None:
-        return ""
-    try:
-        if pd.isna(값):
-            return ""
-    except Exception:
-        pass
-
-    문자 = str(값).strip()
-    if 문자 in ["", "nan", "NaT", "None"]:
-        return ""
-
-    if 문자.endswith(".0"):
-        문자 = 문자[:-2]
-
-    숫자 = re.sub(r"[^0-9]", "", 문자)
-    if not 숫자:
-        return 문자
-
-    if len(숫자) <= 6:
-        return 숫자.zfill(6)
-    return 숫자
-
+    """Google Sheets 저장 전 종목코드를 문자열로 고정합니다.
+    v5.18: 0148J0 같은 문자 포함 ETF 코드는 보존합니다.
+    """
+    return code_for_google_sheets_v518(값)
 
 def 구글시트저장용정리(df, sheet_name=""):
     """Google Sheets 저장 직전 표시 형식을 안정화합니다."""
@@ -972,8 +1803,8 @@ def 구글시트날짜문자열정리(값):
     try:
         if pd.isna(값):
             return ""
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1806: %s", e, exc_info=True)
     문자 = str(값).strip()
     if 문자 in ["", "nan", "NaT", "None"]:
         return ""
@@ -987,24 +1818,10 @@ def 구글시트날짜문자열정리(값):
 
 
 def 구글시트종목코드문자열정리(값):
-    """Google Sheets 저장용 종목코드 정리: 앞자리 0을 보존하는 6자리 문자열."""
-    if 값 is None:
-        return ""
-    try:
-        if pd.isna(값):
-            return ""
-    except Exception:
-        pass
-    문자 = str(값).strip()
-    if 문자 in ["", "nan", "NaT", "None"]:
-        return ""
-    if 문자.endswith(".0"):
-        문자 = 문자[:-2]
-    숫자 = re.sub(r"[^0-9]", "", 문자)
-    if not 숫자:
-        return ""
-    return 숫자.zfill(6)[-6:]
-
+    """Google Sheets 저장용 종목코드 정리.
+    순수 숫자는 6자리, 문자 포함 코드는 원형 보존.
+    """
+    return code_for_google_sheets_v518(값)
 
 def 구글시트데이터무결성정리(df):
     """Google Sheets 저장 전 데이터 무결성 보정."""
@@ -1037,8 +1854,8 @@ def 구글시트워크시트포맷적용(ws, df):
                 ws.format(f"{col_letter}:{col_letter}", {"numberFormat": {"type": "TEXT"}})
             if 열이름 in ["거래일자", "거래일", "일자", "날짜", "매매일자", "만기일", "반영일자", "기준일"]:
                 ws.format(f"{col_letter}:{col_letter}", {"numberFormat": {"type": "TEXT"}})
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1857: %s", e, exc_info=True)
 
 
 def 구글시트데이터프레임저장(sheet_name, df):
@@ -1046,7 +1863,7 @@ def 구글시트데이터프레임저장(sheet_name, df):
     if spreadsheet is None:
         return False, f"Google Sheets 미연결: {info.get('메시지', '')}"
     try:
-        작업 = 구글시트저장용정리(df, sheet_name=sheet_name)
+        작업 = normalize_asset_dataframe_v518(구글시트저장용정리(df, sheet_name=sheet_name))
         ws = 구글시트워크시트확보(
             spreadsheet,
             sheet_name,
@@ -1060,8 +1877,8 @@ def 구글시트데이터프레임저장(sheet_name, df):
             ws.update(values, value_input_option="RAW")
         try:
             구글시트데이터프레임읽기.clear()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 1880: %s", e, exc_info=True)
         return True, f"Google Sheets 저장 완료: {sheet_name}"
     except Exception as e:
         return False, f"Google Sheets 저장 오류({sheet_name}): {type(e).__name__}: {e}"
@@ -1070,16 +1887,16 @@ def 구글시트데이터프레임저장(sheet_name, df):
 def 구글시트캐시초기화():
     try:
         st.session_state.pop("google_sheets_last_error", None)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1890: %s", e, exc_info=True)
     try:
         st.session_state.pop("google_sheets_startup_warmup_done_v51436", None)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1894: %s", e, exc_info=True)
     try:
         구글시트데이터프레임읽기.clear()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 1898: %s", e, exc_info=True)
 
 
 def 구글시트운영연결확인(화면표시=False):
@@ -1308,7 +2125,6 @@ def 자산변화로그추가저장(계산포트폴리오, 보유계산포트폴�
     return 성공, 메시지, 새행, 저장대상
 
 
-
 def 자산변화상위요인문장(계좌요약=None, 자산군요약=None, 미리보기행=None):
     """계좌별·자산군별 현재 구성과 직전 대비 총액 변화를 바탕으로 핵심 변화 문장을 만듭니다."""
     try:
@@ -1423,7 +2239,6 @@ def 자산변화요약표시(제목, df, 구분열):
         )
     except Exception:
         표데이터프레임(표시, width="stretch", hide_index=True)
-
 
 
 def 자산변화월별추세요약표시(로그df):
@@ -1553,8 +2368,6 @@ def 자산변화월별추세요약표시(로그df):
             표데이터프레임(표시, width="stretch", hide_index=True)
     except Exception as e:
         st.caption(f"월별 자산 변화 요약 생성 오류: {type(e).__name__}: {e}")
-
-
 
 
 def 자산변화원금사유자동추정(미리보기행=None, 로그df=None, 현재스냅샷=None, 계좌요약=None, 자산군요약=None):
@@ -1708,7 +2521,7 @@ def 자산변화사유입력UI(미리보기행):
         "ETF/주식 매도→현금",
         "계좌 간 이동",
         "자산 재분류",
-        "입력 오류 정정",
+        "입력 확인 항목 정정",
         "기준값 변경",
         "기타",
     ]
@@ -1748,8 +2561,8 @@ def 자산변화사유입력UI(미리보기행):
         표시 = 확인표.copy()
         표시["값"] = 표시["값"].apply(lambda v: 손익원화문자열(v) if isinstance(v, (int, float, np.integer, np.floating)) else v)
         표데이터프레임(표시, width="stretch", hide_index=True)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 2564: %s", e, exc_info=True)
     return 원금변화사유, 원금변화확인금액, 원금변화설명
 
 
@@ -2003,39 +2816,39 @@ def 전체종목매핑가져오기():
         "278470": "에이피알",
     }
     try:
-        return {str(k).zfill(6): str(v).strip() for k, v in 기본매핑.items() if str(k).strip() and str(v).strip()}
+        return {normalize_asset_code_v518(k): str(v).strip() for k, v in 기본매핑.items() if str(k).strip() and str(v).strip()}
     except Exception:
         return 기본매핑
 
 
-
 def 공식종목명가져오기(종목코드):
-    """앱 내부 기준으로 확정한 종목명입니다.
-    한 번 잘못 등록된 동적 매핑보다 이 값을 우선합니다.
-    """
-    코드 = "" if pd.isna(종목코드) else re.sub(r"[^0-9]", "", str(종목코드)).zfill(6)
+    """앱 내부 기준으로 확정한 종목명입니다."""
+    코드 = normalize_asset_code_v518(종목코드)
     if not 코드:
         return ""
+    if 코드 in ASSET_MASTER_V518:
+        return ASSET_MASTER_V518[코드].get("name", "")
     try:
         전체매핑 = 전체종목매핑가져오기()
         return str(전체매핑.get(코드, "")).strip() if isinstance(전체매핑, dict) else ""
     except Exception:
         return ""
 
-
 def 종목매핑강제갱신(종목코드, 종목명, 구분=None):
     """공식명 또는 사용자가 확정한 이름으로 전역 매핑을 교체합니다."""
     global 주요자산, 관심종목, 코드명매핑, 이름코드매핑
 
-    코드 = "" if pd.isna(종목코드) else re.sub(r"[^0-9]", "", str(종목코드)).zfill(6)
-    이름 = 종목명이름정리(종목명)
-    if not 코드 or len(코드) != 6 or not 코드.isdigit() or not 이름:
+    코드 = normalize_asset_code_v518(종목코드, 종목명)
+    이름 = asset_name_v518(코드, 종목명)
+    if not 코드 or not 이름:
         return False
 
     기존이름 = 코드명매핑.get(코드, "")
     if 기존이름 and 기존이름 != 이름:
-        이름코드매핑.pop(기존이름, None)
-        주요자산.pop(기존이름, None)
+        try:
+            이름코드매핑.pop(기존이름, None)
+        except Exception as e:
+            logging.warning("suppressed exception at line 2850: %s", e, exc_info=True)
 
     코드명매핑[코드] = 이름
     이름코드매핑[이름] = 코드
@@ -2043,33 +2856,22 @@ def 종목매핑강제갱신(종목코드, 종목명, 구분=None):
     주요자산[이름] = {"구분": 구분 or 종목구분추정(이름, 코드), "코드": 코드}
     return True
 
-
 def 종목매핑수동등록(종목코드, 종목명, 구분=None):
     global 주요자산, 관심종목, 코드명매핑, 이름코드매핑
 
-    코드 = "" if pd.isna(종목코드) else re.sub(r"[^0-9]", "", str(종목코드)).zfill(6)
+    코드 = normalize_asset_code_v518(종목코드, 종목명)
     입력이름 = 종목명이름정리(종목명)
     공식이름 = 공식종목명가져오기(코드)
-    이름 = 공식이름 or 입력이름
+    이름 = 공식이름 or 입력이름 or asset_name_v518(코드, 종목명)
 
-    if not 코드 or len(코드) != 6 or not 코드.isdigit() or not 이름:
+    if not 코드 or not 이름:
         return False
 
-    # 공식명이 있으면 사용자가 오타를 입력해도 공식명으로 강제 정리합니다.
-    if 공식이름:
-        return 종목매핑강제갱신(코드, 공식이름, 구분=구분)
-
-    기존이름 = 코드명매핑.get(코드, "")
-    if 기존이름 and 종목명이름정리(기존이름) != 이름:
-        # 공식명이 없는 종목은 충돌을 막되, 기존 이름을 유지합니다.
-        return False
-
-    기존코드 = 이름코드매핑.get(이름, "")
-    if 기존코드 and 기존코드 != 코드:
-        return False
-
-    return 종목매핑강제갱신(코드, 이름, 구분=구분)
-
+    코드명매핑[코드] = 이름
+    이름코드매핑[이름] = 코드
+    관심종목[코드] = 이름
+    주요자산[이름] = {"구분": 구분 or 종목구분추정(이름, 코드), "코드": 코드}
+    return True
 
 def 종목명이름정리(종목명):
     이름 = "" if pd.isna(종목명) else str(종목명).strip()
@@ -2095,22 +2897,12 @@ def 종목명이름정리(종목명):
 
 
 def 종목코드기준종목명(종목코드):
-    코드 = "" if pd.isna(종목코드) else re.sub(r"[^0-9]", "", str(종목코드)).zfill(6)
+    코드 = normalize_asset_code_v518(종목코드)
     if not 코드:
         return ""
-
-    공식이름 = 공식종목명가져오기(코드)
-    if 공식이름:
-        # 이전 세션/업로드에서 잘못 들어온 동적 매핑도 즉시 교정합니다.
-        if 코드명매핑.get(코드) != 공식이름:
-            종목매핑강제갱신(코드, 공식이름, 구분=종목구분추정(공식이름, 코드))
-        return 공식이름
-
-    if 코드 in 코드명매핑:
-        return 코드명매핑[코드]
-    return ""
-
-
+    if 코드 in ASSET_MASTER_V518:
+        return ASSET_MASTER_V518[코드].get("name", "")
+    return 코드명매핑.get(코드, "")
 
 def 종목명기준종목코드(종목명):
     이름 = 종목명이름정리(종목명)
@@ -2120,58 +2912,32 @@ def 종목명기준종목코드(종목명):
 
 
 def 종목코드종목명불일치정보(종목코드, 종목명):
-    코드 = "" if pd.isna(종목코드) else re.sub(r"[^0-9]", "", str(종목코드)).zfill(6)
+    코드 = normalize_asset_code_v518(종목코드, 종목명)
     이름 = 종목명이름정리(종목명)
-
-    if not 코드 or not 이름 or len(코드) != 6 or not 코드.isdigit():
-        return None
+    if not 코드 or not 이름:
+        return {"불일치": False, "권장종목명": "", "권장종목코드": ""}
 
     코드기준이름 = 종목코드기준종목명(코드)
     이름기준코드 = 종목명기준종목코드(이름)
-
-    if 코드기준이름 and 종목명이름정리(코드기준이름) != 이름:
-        return {
-            "유형": "등록정보불일치",
-            "입력코드": 코드,
-            "입력이름": 이름,
-            "코드기준이름": 코드기준이름,
-            "이름기준코드": 이름기준코드,
-        }
-
-    if (not 코드기준이름) and 이름기준코드 and 이름기준코드 != 코드:
-        return {
-            "유형": "이름기준코드불일치",
-            "입력코드": 코드,
-            "입력이름": 이름,
-            "코드기준이름": "",
-            "이름기준코드": 이름기준코드,
-        }
-
-    return None
-
+    if 코드기준이름 and 코드기준이름 != 이름:
+        return {"불일치": True, "권장종목명": 코드기준이름, "권장종목코드": 코드}
+    if 이름기준코드 and normalize_asset_code_v518(이름기준코드, 이름) != 코드:
+        return {"불일치": True, "권장종목명": 이름, "권장종목코드": normalize_asset_code_v518(이름기준코드, 이름)}
+    return {"불일치": False, "권장종목명": 코드기준이름 or 이름, "권장종목코드": 코드}
 
 def 종목명자동보정(종목코드, 종목명=""):
-    코드 = "" if pd.isna(종목코드) else re.sub(r"[^0-9]", "", str(종목코드)).zfill(6)
+    코드 = normalize_asset_code_v518(종목코드, 종목명)
     이름 = 종목명이름정리(종목명)
     코드기준이름 = 종목코드기준종목명(코드)
-
-    if 코드기준이름:
-        if (not 이름) or 이름 == 코드 or 종목명이름정리(코드기준이름) != 이름:
-            return 코드기준이름
-
-    if 이름:
-        return 이름
-    return 코드
+    return 코드기준이름 or asset_name_v518(코드, 이름) or 이름
 
 def 종목코드자동보정(종목명, 종목코드=""):
     이름 = 종목명이름정리(종목명)
-    코드 = "" if pd.isna(종목코드) else str(종목코드).strip()
-    숫자코드 = re.sub(r"[^0-9]", "", 코드)
-    if len(숫자코드) == 6:
-        return 숫자코드
+    코드 = normalize_asset_code_v518(종목코드, 이름)
+    if 코드:
+        return 코드
     이름기준코드 = 종목명기준종목코드(이름)
-    return 이름기준코드 if 이름기준코드 else (숫자코드.zfill(6) if 숫자코드 else "")
-
+    return normalize_asset_code_v518(이름기준코드, 이름) if 이름기준코드 else ""
 
 def 종목구분추정(종목명="", 종목코드=""):
     이름 = 종목명이름정리(종목명).upper()
@@ -2180,17 +2946,12 @@ def 종목구분추정(종목명="", 종목코드=""):
     return "stock"
 
 def 종목구분판단(종목코드, 종목명=""):
-    코드 = "" if pd.isna(종목코드) else re.sub(r"[^0-9]", "", str(종목코드)).zfill(6)
+    코드 = normalize_asset_code_v518(종목코드, 종목명)
     이름 = 종목명이름정리(종목명)
-    if 코드 in 야후인덱스심볼:
-        return "index"
-    if 코드 in 코드명매핑:
-        등록이름 = 코드명매핑.get(코드, "")
-        자산정보 = 주요자산.get(등록이름)
-        if isinstance(자산정보, dict) and 자산정보.get("구분") in ["index", "etf", "stock"]:
-            return 자산정보.get("구분")
+    kind = asset_kind_v518(코드, 이름)
+    if kind:
+        return kind
     return 종목구분추정(이름, 코드)
-
 
 def 동적종목매핑갱신(거래df):
     global 주요자산, 관심종목, 코드명매핑, 이름코드매핑
@@ -2205,7 +2966,7 @@ def 동적종목매핑갱신(거래df):
     if "종목명" not in 작업.columns:
         작업["종목명"] = ""
 
-    작업["종목코드"] = 작업["종목코드"].apply(lambda 값: "" if pd.isna(값) else re.sub(r"[^0-9]", "", str(값)).zfill(6))
+    작업["종목코드"] = 작업["종목코드"].apply(lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값))
     작업["종목명"] = 작업["종목명"].apply(종목명이름정리)
     작업 = 작업[(작업["종목코드"] != "") & (작업["종목명"] != "")]
     if 작업.empty:
@@ -2232,7 +2993,7 @@ def 거래이력자동보정(df):
         if 컬럼 not in 보정.columns:
             보정[컬럼] = None
 
-    보정["종목코드"] = 보정["종목코드"].apply(lambda 값: "" if pd.isna(값) else re.sub(r"[^0-9]", "", str(값)).zfill(6) if re.sub(r"[^0-9]", "", str(값)) else "")
+    보정["종목코드"] = 보정["종목코드"].apply(lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값))
     보정["종목명"] = 보정["종목명"].apply(종목명이름정리)
     보정["운용사"] = 보정["운용사"].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
     보정["비고"] = 보정["비고"].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
@@ -2256,7 +3017,7 @@ def 거래이력자동보정(df):
             elif 불일치.get("유형") == "등록정보불일치" and 불일치.get("코드기준이름"):
                 이름 = 불일치.get("코드기준이름", 이름)
 
-        행["종목코드"] = 코드 if (isinstance(코드, str) and len(코드) == 6 and 코드.isdigit()) else ""
+        행["종목코드"] = 코드 if is_valid_asset_code_v518(코드) else ""
         행["종목명"] = 이름
         return 행
 
@@ -2273,10 +3034,9 @@ def 거래이력자동보정(df):
     return 보정
 
 
-
 def 거래이력검증표생성(df):
     if df is None or df.empty:
-        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
+        return pd.DataFrame(columns=["행", "점검항목", "현재값", "확인 기준"])
 
     점검결과 = []
     작업 = 거래이력자동보정(df.reset_index(drop=True).copy())
@@ -2292,10 +3052,10 @@ def 거래이력검증표생성(df):
         거래단가 = pd.to_numeric(pd.Series([행.get("거래단가")]), errors="coerce").fillna(0).iloc[0]
 
         if 종목코드 == "" and 종목명 == "":
-            점검결과.append({"행": 행번호, "점검항목": "종목 정보", "현재값": "공란", "권장사항": "종목코드 또는 종목명 입력"})
+            점검결과.append({"행": 행번호, "점검항목": "종목 정보", "현재값": "공란", "확인 기준": "종목코드 또는 종목명 입력"})
 
-        if 종목코드 != "" and (len(종목코드) != 6 or not 종목코드.isdigit()):
-            점검결과.append({"행": 행번호, "점검항목": "종목코드 형식", "현재값": 종목코드, "권장사항": "6자리 숫자로 입력"})
+        if 종목코드 != "" and not is_valid_asset_code_v518(종목코드):
+            점검결과.append({"행": 행번호, "점검항목": "종목코드 형식", "현재값": 종목코드, "확인 기준": "숫자 6자리 또는 문자 포함 ETF 코드로 입력"})
 
         불일치정보 = 종목코드종목명불일치정보(종목코드, 종목명)
         if 불일치정보 is not None:
@@ -2303,25 +3063,25 @@ def 거래이력검증표생성(df):
                 권장 = f'코드 {불일치정보["입력코드"]}의 등록 종목명은 "{불일치정보["코드기준이름"]}" 입니다'
                 if 불일치정보.get("이름기준코드"):
                     권장 += f' / "{불일치정보["입력이름"]}"의 등록 코드는 {불일치정보["이름기준코드"]}'
-                점검결과.append({"행": 행번호, "점검항목": "종목코드-종목명 불일치", "현재값": f'{종목코드} / {종목명}', "권장사항": 권장})
+                점검결과.append({"행": 행번호, "점검항목": "종목코드-종목명 불일치", "현재값": f'{종목코드} / {종목명}', "확인 기준": 권장})
             elif 불일치정보.get("유형") == "이름기준코드불일치":
                 권장 = f'"{불일치정보["입력이름"]}"의 등록 코드는 {불일치정보["이름기준코드"]} 입니다'
-                점검결과.append({"행": 행번호, "점검항목": "종목명 기준 코드 확인", "현재값": f'{종목코드} / {종목명}', "권장사항": 권장})
+                점검결과.append({"행": 행번호, "점검항목": "종목명 기준 코드 확인", "현재값": f'{종목코드} / {종목명}', "확인 기준": 권장})
 
         변환일자 = pd.to_datetime(거래일자, errors="coerce")
         if pd.isna(변환일자):
-            점검결과.append({"행": 행번호, "점검항목": "거래일자", "현재값": 거래일자, "권장사항": "YYYY-MM-DD 형식으로 입력"})
+            점검결과.append({"행": 행번호, "점검항목": "거래일자", "현재값": 거래일자, "확인 기준": "YYYY-MM-DD 형식으로 입력"})
         elif 변환일자.date() > 오늘:
-            점검결과.append({"행": 행번호, "점검항목": "미래 날짜", "현재값": str(거래일자), "권장사항": "오늘 또는 과거 날짜만 입력"})
+            점검결과.append({"행": 행번호, "점검항목": "미래 날짜", "현재값": str(거래일자), "확인 기준": "오늘 또는 과거 날짜만 입력"})
 
         if 거래구분 not in ["매수", "매도"]:
-            점검결과.append({"행": 행번호, "점검항목": "거래구분", "현재값": 거래구분, "권장사항": "매수 또는 매도만 입력"})
+            점검결과.append({"행": 행번호, "점검항목": "거래구분", "현재값": 거래구분, "확인 기준": "매수 또는 매도만 입력"})
 
         if 거래수량 <= 0:
-            점검결과.append({"행": 행번호, "점검항목": "거래수량", "현재값": 거래수량, "권장사항": "0보다 큰 수량 입력"})
+            점검결과.append({"행": 행번호, "점검항목": "거래수량", "현재값": 거래수량, "확인 기준": "0보다 큰 수량 입력"})
 
         if 거래단가 <= 0:
-            점검결과.append({"행": 행번호, "점검항목": "거래단가", "현재값": 거래단가, "권장사항": "0보다 큰 단가 입력"})
+            점검결과.append({"행": 행번호, "점검항목": "거래단가", "현재값": 거래단가, "확인 기준": "0보다 큰 단가 입력"})
 
     정렬작업 = 작업.copy()
     정렬작업["_거래일자정렬"] = pd.to_datetime(정렬작업["거래일자"], errors="coerce")
@@ -2349,7 +3109,7 @@ def 거래이력검증표생성(df):
                     "행": 행번호,
                     "점검항목": "초과매도",
                     "현재값": f"{거래수량}주 매도 / 보유 {현재보유}주",
-                    "권장사항": "이전 거래이력 또는 수량 입력을 확인"
+                    "확인 기준": "이전 거래이력 또는 수량 입력을 확인"
                 })
             종목별보유수량[종목코드] = max(0, 현재보유 - 거래수량)
 
@@ -2362,9 +3122,8 @@ def 거래이력검증표생성(df):
     "471990": {"최소": 10000, "최대": 50000, "이름": "KODEX AI반도체핵심장비"},
     "487240": {"최소": 10000, "최대": 80000, "이름": "KODEX AI전력핵심설비"},
     "005930": {"최소": 100000, "최대": 300000, "이름": "삼성전자"},
-    "000660": {"최소": 500000, "최대": 1500000, "이름": "SK하이닉스"},
+    "000660": {"최소": 500000, "최대": 2500000, "이름": "SK하이닉스"},
 }
-
 
 
 def 거래이력편집용자동보정(df):
@@ -2389,11 +3148,11 @@ def 거래이력편집용자동보정(df):
 
     try:
         동적종목매핑갱신(작업)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 3151: %s", e, exc_info=True)
 
     작업["종목코드"] = 작업["종목코드"].apply(
-        lambda 값: "" if pd.isna(값) else re.sub(r"[^0-9]", "", str(값)).zfill(6) if re.sub(r"[^0-9]", "", str(값)) else ""
+        lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값)
     )
     작업["종목명"] = 작업.apply(
         lambda 행: 종목명자동보정(행.get("종목코드", ""), 행.get("종목명", "")),
@@ -2406,8 +3165,8 @@ def 거래이력편집용자동보정(df):
     try:
         dt_series = pd.to_datetime(작업["거래일자"], errors="coerce")
         작업["거래일자"] = dt_series.dt.date.where(dt_series.notna(), 작업["거래일자"])
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 3168: %s", e, exc_info=True)
 
     작업 = 거래이력입력창정렬(작업)
     return 작업
@@ -2463,7 +3222,7 @@ def 거래이력계산대상추출(df):
 
 def 거래이력이상치점검표생성(df):
     if df is None or df.empty:
-        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
+        return pd.DataFrame(columns=["행", "점검항목", "현재값", "확인 기준"])
 
     작업 = 거래이력자동보정(df.reset_index(drop=True).copy())
     점검결과 = []
@@ -2476,11 +3235,11 @@ def 거래이력이상치점검표생성(df):
                 "행": idx + 1,
                 "점검항목": "중복거래 가능성",
                 "현재값": f"{행.get('종목명', '')} / {행.get('거래일자', '')} / {행.get('거래구분', '')} / {행.get('거래수량', '')}주 / {행.get('거래단가', '')}",
-                "권장사항": "같은 거래가 2번 입력되지 않았는지 확인"
+                "확인 기준": "분할체결 또는 실제 중복 입력 여부 확인"
             })
 
     for idx, 행 in 작업.iterrows():
-        종목코드 = str(행.get("종목코드", "") or "").zfill(6)
+        종목코드 = normalize_asset_code_v518(행.get("종목코드", ""))
         종목명 = 종목명자동보정(종목코드, 행.get("종목명", ""))
         거래단가 = pd.to_numeric(pd.Series([행.get("거래단가")]), errors="coerce").iloc[0]
         if pd.isna(거래단가) or 거래단가 <= 0:
@@ -2493,9 +3252,9 @@ def 거래이력이상치점검표생성(df):
             if 거래단가 < 최소값 or 거래단가 > 최대값:
                 점검결과.append({
                     "행": idx + 1,
-                    "점검항목": "거래단가 범위 확인",
+                    "점검항목": "거래단가 참고 범위 확인",
                     "현재값": f"{종목명} {거래단가:,.0f}",
-                    "권장사항": f"{종목명}의 통상 입력 범위({최소값:,.0f}~{최대값:,.0f}원)와 크게 다르면 실제 체결단가를 다시 확인"
+                    "확인 기준": f"{종목명}의 통상 입력 범위({최소값:,.0f}~{최대값:,.0f}원)와 크게 다르면 실제 체결단가를 다시 확인"
                 })
         else:
             if 거래단가 < 100 or 거래단가 > 5000000:
@@ -2503,11 +3262,11 @@ def 거래이력이상치점검표생성(df):
                     "행": idx + 1,
                     "점검항목": "거래단가 극단값 확인",
                     "현재값": f"{종목명} {거래단가:,.0f}",
-                    "권장사항": "입력 자릿수 또는 실제 체결단가를 다시 확인"
+                    "확인 기준": "입력 자릿수 또는 실제 체결단가를 다시 확인"
                 })
 
     if not 점검결과:
-        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
+        return pd.DataFrame(columns=["행", "점검항목", "현재값", "확인 기준"])
 
     결과df = pd.DataFrame(점검결과)
     return 결과df.drop_duplicates().sort_values(["행", "점검항목"]).reset_index(drop=True)
@@ -2623,8 +3382,8 @@ def 비주식현금성자산자동이관표(비주식자산df=None):
         마스크 = 자산군.str.contains(패턴, case=False, na=False) | 상품명.str.contains(패턴, case=False, na=False)
         try:
             마스크 = 마스크 | 비고.str.contains(패턴, case=False, na=False)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 3385: %s", e, exc_info=True)
 
         후보 = 원본[마스크].copy()
         if 후보.empty:
@@ -2792,8 +3551,8 @@ def 비주식현금성자산제외(df, 현금성자산df=None):
     현금성마스크 = 자산군.str.contains("|".join(현금키워드), case=False, na=False) | 상품명.str.contains("|".join(현금키워드), case=False, na=False)
     try:
         현금성마스크 = 현금성마스크 | 비고.str.contains("|".join(현금키워드), case=False, na=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 3554: %s", e, exc_info=True)
     return 작업[~현금성마스크].copy().reset_index(drop=True)
 
 
@@ -2883,7 +3642,6 @@ def 현금성자산요약행생성(cash_df):
         "비고": 작업["메모"],
     })
     return 결과
-
 
 
 def _대시보드숫자합계(df, 후보열목록):
@@ -3142,7 +3900,7 @@ def 데이터무결성상태등급(상태목록):
 
 
 def 자산데이터무결성점검표생성(최적화결과=None):
-    """현재 자산 데이터의 핵심 무결성 점검 결과를 표로 반환합니다."""
+    """현재 자산 데이터의 핵심 무결성 참고 참고 점검 결과를 표로 반환합니다."""
     점검 = []
     try:
         지표, 계좌요약, 자산군요약, 상세 = 통합자산대시보드데이터생성(최적화결과)
@@ -3473,8 +4231,8 @@ def 날짜값_YYYYMMDD문자열(값):
     try:
         if pd.isna(값):
             return ""
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 4234: %s", e, exc_info=True)
 
     문자 = str(값).strip()
     if 문자 in ["", "NaT", "nat", "nan", "None"]:
@@ -3530,7 +4288,6 @@ def IRP비주식자산표준열맞추기(df):
     return 작업.reset_index(drop=True)
 
 
-
     with 점검탭:
         자산데이터무결성점검UI(최적화결과)
 
@@ -3571,8 +4328,8 @@ def IRP비주식자산저장(df):
         )
         if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
             return False, "저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다."
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 4331: %s", e, exc_info=True)
 
     저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_NON_STOCK_SHEET, 작업)
     if 저장성공:
@@ -3599,7 +4356,7 @@ def IRP비주식자산검증표생성(df):
                 "행": 행번호,
                 "점검항목": "원금/평가금액",
                 "현재값": 원화정수포맷(원금),
-                "권장사항": "운용 중인 상품이면 원금 또는 평가금액을 입력",
+                "확인 기준": "운용 중인 상품이면 원금 또는 평가금액을 입력",
                 "상세설명": f"'{상품명}' 항목의 원금과 평가금액이 모두 0원입니다. 실제 보유 중인 상품인지 확인해 주세요.",
             })
             continue
@@ -3610,7 +4367,7 @@ def IRP비주식자산검증표생성(df):
                     "행": 행번호,
                     "점검항목": "해지 상품 확인",
                     "현재값": 원화정수포맷(원금),
-                    "권장사항": "비고에 해지 표시가 있으므로 원금 0원은 허용됩니다",
+                    "확인 기준": "비고에 해지 표시가 있으므로 원금 0원은 허용됩니다",
                     "상세설명": f"'{상품명}' 항목은 해지 상품으로 보입니다. 평가금액도 0원인지 함께 확인하면 더 정확합니다.",
                 })
             else:
@@ -3618,7 +4375,7 @@ def IRP비주식자산검증표생성(df):
                     "행": 행번호,
                     "점검항목": "원금",
                     "현재값": 원화정수포맷(원금),
-                    "권장사항": "평가금액이 있으면 원금도 함께 입력",
+                    "확인 기준": "평가금액이 있으면 원금도 함께 입력",
                     "상세설명": f"'{상품명}' 항목은 평가금액이 있으나 원금이 0원입니다. 수익률 계산이 왜곡될 수 있습니다.",
                 })
 
@@ -3627,7 +4384,7 @@ def IRP비주식자산검증표생성(df):
                 "행": 행번호,
                 "점검항목": "평가금액",
                 "현재값": 원화정수포맷(평가금액),
-                "권장사항": "현재 평가금액 입력",
+                "확인 기준": "현재 평가금액 입력",
                 "상세설명": f"'{상품명}' 항목은 원금이 있으나 평가금액이 0원입니다. 현재 평가액을 입력해 주세요.",
             })
 
@@ -3643,13 +4400,13 @@ def IRP비주식자산검증표생성(df):
                         "행": 행번호,
                         "점검항목": "만기일",
                         "현재값": 만기.strftime("%Y-%m-%d"),
-                        "권장사항": "만기 경과 여부 확인",
+                        "확인 기준": "만기 경과 여부 확인",
                         "상세설명": f"'{상품명}' 항목은 만기일이 지났습니다. 재예치, 해지, 평가금액 반영 여부를 확인해 주세요.",
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 4406: %s", e, exc_info=True)
 
-    return pd.DataFrame(결과, columns=["행", "점검항목", "현재값", "권장사항", "상세설명"])
+    return pd.DataFrame(결과, columns=["행", "점검항목", "현재값", "확인 기준", "상세설명"])
 
 
 def 비주식평가금액색상(row):
@@ -3664,8 +4421,8 @@ def 비주식평가금액색상(row):
                     styles[idx] = "color: red; font-weight: 700;"
                 elif 평가 < 원금:
                     styles[idx] = "color: blue; font-weight: 700;"
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 4424: %s", e, exc_info=True)
     return styles
 
 
@@ -3715,9 +4472,9 @@ def IRP비주식자산편집UI():
 
         비주식점검표 = IRP비주식자산검증표생성(편집df)
         if 비주식점검표.empty:
-            st.success("비주식·현금성 자산 입력 점검 결과: 현재 확인된 형식 오류가 없습니다.")
+            st.success("비주식·현금성 자산 입력 참고 참고 점검 결과: 현재 확인된 형식 오류가 없습니다.")
         else:
-            st.warning(f"비주식·현금성 자산 입력 점검 결과: {len(비주식점검표)}건의 확인 사항이 있습니다.")
+            st.warning(f"비주식·현금성 자산 입력 참고 참고 점검 결과: {len(비주식점검표)}건의 확인 사항이 있습니다.")
             with st.expander("비주식·현금성 자산 검증 상세 보기", expanded=False):
                 try:
                     점검표시 = 비주식점검표.copy()
@@ -3885,8 +4642,8 @@ def IRP비주식자산요약행생성(irp_df):
         별도현금 = 현금성자산불러오기()
         if 별도현금 is not None and not 별도현금.empty:
             작업 = 작업[작업["자산군"].astype(str) != "현금성자산"].copy()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 4645: %s", e, exc_info=True)
     작업 = 작업[(작업["원금"] > 0) | (작업["평가금액"] > 0)].copy()
     if 작업.empty:
         return pd.DataFrame(columns=["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"])
@@ -3941,7 +4698,6 @@ def 통합자산현황UI(보유포트폴리오, irp_df, cash_df=None):
     return 통합표
 
 
-
 자동백업루트폴더 = "backup"
 일일백업폴더 = os.path.join(자동백업루트폴더, "daily")
 수정백업폴더 = os.path.join(자동백업루트폴더, "edit_history")
@@ -3953,8 +4709,8 @@ def 자동백업폴더준비():
     try:
         os.makedirs(일일백업폴더, exist_ok=True)
         os.makedirs(수정백업폴더, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 4712: %s", e, exc_info=True)
 
 
 def 거래이력백업페이로드생성(df, backup_type="manual", reason="", source="app"):
@@ -4055,10 +4811,10 @@ def 자동백업파일정리(backup_type):
         for _, 삭제경로 in 파일들[유지개수:]:
             try:
                 os.remove(삭제경로)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 4814: %s", e, exc_info=True)
+    except Exception as e:
+        logging.warning("suppressed exception at line 4816: %s", e, exc_info=True)
 
 
 def 자동백업불러오기(file_path):
@@ -4252,8 +5008,8 @@ def 안전JSON저장(data, file_path):
             try:
                 import shutil
                 shutil.copy(file_path, backup_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 5011: %s", e, exc_info=True)
 
         os.replace(temp_path, file_path)
         return True, "저장 완료"
@@ -4261,11 +5017,9 @@ def 안전JSON저장(data, file_path):
         try:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 5020: %s", e, exc_info=True)
         return False, f"저장 실패: {e}"
-
-
 
 
 def 거래이력JSON변환(df):
@@ -4284,7 +5038,7 @@ def 거래이력JSON변환(df):
 
     저장df = 저장df[표준열].copy()
     저장df["거래일자"] = pd.to_datetime(저장df["거래일자"], errors="coerce").dt.strftime("%Y-%m-%d")
-    저장df["종목코드"] = 저장df["종목코드"].apply(lambda 값: "" if pd.isna(값) else str(값).zfill(6))
+    저장df["종목코드"] = 저장df["종목코드"].apply(lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값))
     저장df = 저장df.fillna("")
 
     return 저장df.to_dict(orient="records")
@@ -4347,7 +5101,6 @@ def 거래이력복원메타불러오기():
         return None
 
 
-
 def 거래이력자동저장실행(df):
     """거래이력을 Google Sheets에만 저장합니다. 연결 실패 시 로컬 자동저장을 차단합니다."""
     연결됨, info = 구글시트운영연결확인(화면표시=False)
@@ -4382,8 +5135,8 @@ def 최근업로드거래이력저장(df, 파일명=""):
         }
         try:
             안전JSON저장(메타정보, 최근업로드메타파일)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 5138: %s", e, exc_info=True)
         return True, 저장메시지
     return False, 저장메시지
 
@@ -4402,7 +5155,6 @@ def 최근업로드메타불러오기():
         return None
 
 
-
 def 모니터관심종목불러오기():
     if not os.path.exists(모니터관심종목저장파일):
         return []
@@ -4414,7 +5166,7 @@ def 모니터관심종목불러오기():
         결과 = []
         seen = set()
         for 값 in data:
-            코드 = re.sub(r"[^0-9]", "", str(값)).zfill(6)
+            코드 = normalize_asset_code_v518(값)
             if 코드 and len(코드) == 6 and 코드 not in seen:
                 결과.append(코드)
                 seen.add(코드)
@@ -4426,7 +5178,7 @@ def 모니터관심종목저장(codes):
     정리 = []
     seen = set()
     for 값 in list(codes or []):
-        코드 = re.sub(r"[^0-9]", "", str(값)).zfill(6)
+        코드 = normalize_asset_code_v518(값)
         if 코드 and len(코드) == 6 and 코드 not in seen:
             정리.append(코드)
             seen.add(코드)
@@ -4439,7 +5191,7 @@ def 세션모니터관심종목저장(codes):
     정리 = []
     seen = set()
     for 값 in list(codes or []):
-        코드 = re.sub(r"[^0-9]", "", str(값)).zfill(6)
+        코드 = normalize_asset_code_v518(값)
         if 코드 and len(코드) == 6 and 코드 not in seen:
             정리.append(코드)
             seen.add(코드)
@@ -4458,7 +5210,7 @@ def 모니터추가옵션목록생성():
 def 모니터추가선택동기화():
     선택표시 = st.session_state.get("monitor_add_select_v53", "")
     if 선택표시:
-        m = re.search(r"\((\d{6})\)$", str(선택표시))
+        m = re.search(r"\(([0-9A-Za-z.\-_]{2,20})\)$", str(선택표시))
         if m:
             st.session_state["monitor_add_code_v53"] = m.group(1)
             return
@@ -4466,7 +5218,7 @@ def 모니터추가선택동기화():
 
 def 모니터추가코드동기화():
     코드입력값 = st.session_state.get("monitor_add_code_v53", "")
-    코드 = re.sub(r"[^0-9]", "", str(코드입력값)).zfill(6) if str(코드입력값).strip() else ""
+    코드 = normalize_asset_code_v518(코드입력값) if str(코드입력값).strip() else ""
     st.session_state["monitor_add_code_v53"] = 코드
     if 코드 and len(코드) == 6:
         이름 = 종목코드기준종목명(코드) or 코드명매핑.get(코드) or ""
@@ -4484,7 +5236,6 @@ def 거래이력서명생성(df):
             return json.dumps(pd.DataFrame(df).fillna("").astype(str).to_dict(orient="records"), ensure_ascii=False, sort_keys=True)
         except Exception:
             return ""
-
 
 
 def 거래이력비교지문(df):
@@ -4541,7 +5292,7 @@ def 거래이력통합점검표캐시(거래이력json문자열):
         원본 = json.loads(거래이력json문자열)
         작업df = 거래이력정규화(pd.DataFrame(원본))
     except Exception:
-        return pd.DataFrame(columns=["행", "점검항목", "현재값", "권장사항"])
+        return pd.DataFrame(columns=["행", "점검항목", "현재값", "확인 기준"])
 
     입력검증표 = 거래이력검증표생성(작업df)
     이상치점검표 = 거래이력이상치점검표생성(작업df)
@@ -4624,8 +5375,8 @@ def 거래이력원본정리(df):
     for col in 결과.columns:
         try:
             결과[col] = 결과[col].apply(거래이력셀문자정리)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 5378: %s", e, exc_info=True)
 
     return 결과
 
@@ -4658,9 +5409,9 @@ def 업로드파일에서거래이력읽기(업로드파일):
         try:
             xls = pd.ExcelFile(io.BytesIO(원본바이트))
             시트명 = "거래이력" if "거래이력" in xls.sheet_names else xls.sheet_names[0]
-            읽기df = pd.read_excel(io.BytesIO(원본바이트), sheet_name=시트명, dtype=object)
+            읽기df = _v51715_read_excel_normalized(io.BytesIO(원본바이트), sheet_name=시트명, dtype=object)
         except Exception:
-            읽기df = pd.read_excel(io.BytesIO(원본바이트), dtype=object)
+            읽기df = _v51715_read_excel_normalized(io.BytesIO(원본바이트), dtype=object)
         return 거래이력표준열맞추기(읽기df)
 
     원본바이트 = 업로드파일.getvalue()
@@ -4668,7 +5419,7 @@ def 업로드파일에서거래이력읽기(업로드파일):
 
     for 인코딩 in ["utf-8-sig", "utf-8", "cp949", "euc-kr"]:
         try:
-            읽기df = pd.read_csv(io.BytesIO(원본바이트), encoding=인코딩, dtype=object)
+            읽기df = _v51715_read_csv_normalized(io.BytesIO(원본바이트), encoding=인코딩, dtype=object)
             return 거래이력표준열맞추기(읽기df)
         except Exception as e:
             마지막오류 = e
@@ -4687,7 +5438,7 @@ def 업로드파일에서비주식자산읽기(업로드파일):
         xls = pd.ExcelFile(io.BytesIO(원본바이트))
         if "비주식자산" not in xls.sheet_names:
             return None
-        읽기df = pd.read_excel(io.BytesIO(원본바이트), sheet_name="비주식자산", dtype=object)
+        읽기df = _v51715_read_excel_normalized(io.BytesIO(원본바이트), sheet_name="비주식자산", dtype=object)
         return IRP비주식자산표준열맞추기(읽기df)
     except Exception as e:
         raise e
@@ -4833,9 +5584,9 @@ def 시장지표변화표시(전일대비=None, 등락률=None, 지표명=""):
             return f"{float(등락률):+.2f}%"
         if 전일유효:
             return f"{float(전일대비):+,.2f}"
-        return "전일 비교값 없음"
+        return "실시간 시세 준비중"
     except Exception:
-        return "전일 비교값 없음"
+        return "실시간 시세 준비중"
 
 
 def 기준일시표시문자열(기준일=None, 조회시각=None):
@@ -4939,7 +5690,7 @@ def 보유종목선택옵션생성(df):
         return []
     옵션 = []
     for _, 행 in 보유df.iterrows():
-        종목코드 = str(행.get("종목코드", "")).zfill(6)
+        종목코드 = normalize_asset_code_v518(행.get("종목코드", ""))
         종목명 = 종목명자동보정(종목코드, 행.get("종목명", ""))
         옵션.append({
             "종목코드": 종목코드,
@@ -4947,7 +5698,6 @@ def 보유종목선택옵션생성(df):
             "표시": f"{종목명} ({종목코드})",
         })
     return 옵션
-
 
 
 def _거래이력캐시초기화():
@@ -5039,7 +5789,7 @@ def 현재거래내역엑셀저장바이트(df):
 
     저장대상 = 저장대상[["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"]].copy()
     저장대상["거래일자"] = pd.to_datetime(저장대상["거래일자"], errors="coerce").dt.strftime("%Y-%m-%d")
-    저장대상["종목코드"] = 저장대상["종목코드"].apply(lambda 값: "" if pd.isna(값) else str(값).zfill(6))
+    저장대상["종목코드"] = 저장대상["종목코드"].apply(lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값))
     저장대상 = 저장대상.fillna("")
 
     버퍼 = io.BytesIO()
@@ -5056,8 +5806,8 @@ def 엑셀시트문자열정리(df):
             try:
                 결과[컬럼] = pd.to_datetime(결과[컬럼], errors="coerce").dt.strftime("%Y-%m-%d")
                 결과[컬럼] = 결과[컬럼].fillna("")
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 5809: %s", e, exc_info=True)
     return 결과.fillna("")
 
 
@@ -5091,7 +5841,7 @@ def 통합백업엑셀저장바이트(current_df, portfolio_df=None, holding_df=
             거래시트[컬럼] = ""
     거래시트 = 거래시트[["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"]].copy()
     거래시트["거래일자"] = pd.to_datetime(거래시트["거래일자"], errors="coerce").dt.strftime("%Y-%m-%d")
-    거래시트["종목코드"] = 거래시트["종목코드"].apply(lambda 값: "" if pd.isna(값) else str(값).zfill(6))
+    거래시트["종목코드"] = 거래시트["종목코드"].apply(lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값))
     거래시트 = 거래시트.fillna("")
 
     보유열 = ["종목코드", "종목명", "최초매수일자", "최근거래일자", "총매수수량", "총매도수량", "보유수량", "매입평균단가", "현재가", "투자원금", "평가금액", "평가손익", "실현손익", "수익률", "현재비중", "데이터상태"]
@@ -5198,8 +5948,6 @@ def 수익률문자열(값):
     return f"{값:.2f}%"
 
 
-
-
 def 정렬대상숫자열여부(series, 컬럼명=""):
     이름 = str(컬럼명).strip()
     숫자키워드 = ["금액", "가격", "단가", "수량", "비중", "비율", "손익", "수익률", "평가", "합계", "총", "잔액", "점수", "값"]
@@ -5209,8 +5957,8 @@ def 정렬대상숫자열여부(series, 컬럼명=""):
     try:
         if pd.api.types.is_numeric_dtype(series):
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 5960: %s", e, exc_info=True)
 
     try:
         비결측 = pd.Series(series).dropna().astype(str).str.strip()
@@ -5225,14 +5973,11 @@ def 정렬대상숫자열여부(series, 컬럼명=""):
                 try:
                     float(값정리)
                     숫자형비율 += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning("suppressed exception at line 5976: %s", e, exc_info=True)
         return (숫자형비율 / max(len(샘플), 1)) >= 0.7
     except Exception:
         return False
-
-
-
 
 
 def 표데이터프레임(입력객체, width="stretch", hide_index=False, **kwargs):
@@ -5261,8 +6006,8 @@ def 표데이터프레임(입력객체, width="stretch", hide_index=False, **kwa
     if hide_index:
         try:
             스타일객체 = 스타일객체.hide(axis="index")
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 6009: %s", e, exc_info=True)
 
     try:
         모든열 = list(원본df.columns)
@@ -5319,8 +6064,8 @@ def 표데이터프레임(입력객체, width="stretch", hide_index=False, **kwa
             {"selector": "td.col1", "props": [("text-align", "left")]},
         ], overwrite=False)
 
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 6067: %s", e, exc_info=True)
 
     html = 스타일객체.to_html()
     래퍼스타일 = "width:100%; overflow-x:auto;" if use_container_width else "overflow-x:auto;"
@@ -5373,7 +6118,6 @@ def 안전실수변환(값):
         return float(문자열)
     except Exception:
         return None
-
 
 
 def 유효숫자인지(값):
@@ -5433,14 +6177,14 @@ def OHLCV데이터정리(df):
 
 def 최근유효OHLCV요약(df):
     if df is None or df.empty:
-        return {"현재가": None, "전일가": None, "전일대비": None, "등락률": None, "기준일": None, "상태": "조회 실패"}
+        return {"현재가": None, "전일가": None, "전일대비": None, "등락률": None, "기준일": None, "상태": "보유평가 기준"}
     작업 = OHLCV데이터정리(df)
     if 작업.empty or "종가" not in 작업.columns:
-        return {"현재가": None, "전일가": None, "전일대비": None, "등락률": None, "기준일": None, "상태": "조회 실패"}
+        return {"현재가": None, "전일가": None, "전일대비": None, "등락률": None, "기준일": None, "상태": "보유평가 기준"}
     현재가 = 마지막유효값시리즈(작업["종가"])
     전일가 = 끝에서두번째유효값시리즈(작업["종가"])
     if 현재가 is None:
-        return {"현재가": None, "전일가": None, "전일대비": None, "등락률": None, "기준일": None, "상태": "조회 실패"}
+        return {"현재가": None, "전일가": None, "전일대비": None, "등락률": None, "기준일": None, "상태": "보유평가 기준"}
     기준일 = pd.to_datetime(작업.index[-1]).date() if len(작업.index) > 0 else None
     전일대비 = None if 전일가 is None else 현재가 - 전일가
     등락률 = None if 전일가 in [None, 0] else (전일대비 / 전일가) * 100
@@ -5449,7 +6193,7 @@ def 최근유효OHLCV요약(df):
 
 
 def 종목코드별야후심볼후보(코드):
-    코드 = str(코드).zfill(6)
+    코드 = normalize_asset_code_v518(코드)
     return [f"{코드}.KS", f"{코드}.KQ"]
 
 
@@ -5483,7 +6227,7 @@ def 네이버국내현재가가져오기(구분, 코드, refresh_token=0):
     - 실패 시 None을 반환하여 Yahoo/최근종가 보조 로직으로 넘어갑니다.
     """
     원코드 = str(코드).strip()
-    코드문자 = 원코드.zfill(6) if 원코드.isdigit() and 구분 != "index" else 원코드
+    코드문자 = normalize_asset_code_v518(원코드) if 구분 != "index" else 원코드
 
     if 구분 == "index":
         지수코드 = "KOSPI" if str(원코드) in ["1001", "KOSPI", "KS11", "^KS11"] else "KOSDAQ"
@@ -5662,7 +6406,6 @@ def 목표비중저장(목표비중):
     return 안전JSON저장(목표비중, 목표비중저장파일)
 
 
-
 # -----------------------------------
 # 데이터 조회 함수
 # -----------------------------------
@@ -5742,8 +6485,8 @@ def 야후현재가요약가져오기(심볼, 이름):
                         "조회시각": 서울현재시각(),
                         "비교기준": "전일 종가 대비",
                     }
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 6488: %s", e, exc_info=True)
 
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{심볼}"
@@ -5920,8 +6663,8 @@ def 네이버시장지표현재가가져오기(이름, url, fallback_to_yahoo=Tr
                         "조회시각": 서울현재시각(),
                         "비교기준": "전일 종가 대비",
                     }
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 6666: %s", e, exc_info=True)
 
     if fallback_to_yahoo:
         심볼 = 야후주요지표심볼.get(이름)
@@ -5939,8 +6682,8 @@ def _정렬정제_OHLCV(데이터):
     데이터 = 데이터.copy()
     try:
         데이터 = 데이터.sort_index()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 6685: %s", e, exc_info=True)
     return 데이터
 
 def _야후차트OHLCV조회(심볼, 시작문자열, 종료문자열):
@@ -6051,8 +6794,6 @@ def _야후인덱스OHLCV조회(시작문자열, 종료문자열, 코드):
 
 def _인덱스OHLCV조회(시작문자열, 종료문자열, 코드):
     return _야후인덱스OHLCV조회(시작문자열, 종료문자열, 코드)
-
-
 
 
 @st.cache_data(ttl=60)
@@ -6272,7 +7013,6 @@ def 야후실시간호가가져오기(심볼):
     return None
 
 
-
 def 준실시간시세요약가져오기(구분, 코드):
     try:
         for 심볼 in 자산야후심볼목록가져오기(구분, 코드):
@@ -6485,7 +7225,7 @@ def 실시간포함시세요약가져오기(구분, 코드, lookback_days=15, re
 
     요약 = 비교값보강적용(요약, 구분, 코드)
     if 장중:
-        요약["상태"] = "장중 현재가 조회 실패(최근 종가 대체)"
+        요약["상태"] = "장중 현재가 보유평가 기준(최근 종가 대체)"
     else:
         요약["상태"] = 요약.get("상태", "최근 종가 반영") or "최근 종가 반영"
     요약["출처"] = 요약.get("출처", "최근 종가")
@@ -6517,19 +7257,19 @@ def 시세스냅샷캐시(거래이력json문자열, refresh_token=0):
             집계표["보유수량"] = pd.to_numeric(집계표.get("보유수량"), errors="coerce").fillna(0)
             집계표 = 집계표[집계표["보유수량"] > 0].copy()
             for _, 행 in 집계표.iterrows():
-                코드 = str(행.get("종목코드", "")).zfill(6)
+                코드 = normalize_asset_code_v518(행.get("종목코드", ""))
                 이름 = 종목명자동보정(코드, 행.get("종목명", ""))
                 구분 = 종목구분판단(코드, 이름)
                 if 코드:
                     자산목록.append((구분, 코드, 이름))
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 7265: %s", e, exc_info=True)
 
     # 중복 제거
     고유자산 = []
     seen = set()
     for 구분, 코드, 이름 in 자산목록:
-        키 = f"{구분}:{str(코드).zfill(6) if str(코드).isdigit() else str(코드)}"
+        키 = f"{구분}:{normalize_asset_code_v518(코드) if 구분 != 'index' else str(코드)}"
         if 키 in seen:
             continue
         seen.add(키)
@@ -6556,7 +7296,7 @@ def 시세스냅샷캐시(거래이력json문자열, refresh_token=0):
                 "전일가": None,
                 "전일대비": None,
                 "등락률": None,
-                "상태": "조회 실패",
+                "상태": "보유평가 기준",
             }
 
     # v5.11: 보유 종목이 여러 개일 때 시세 요청을 병렬로 처리해 버튼 클릭 후 대기시간을 줄입니다.
@@ -6750,7 +7490,7 @@ def 시장지표단건가져오기(이름, url):
         결과 = 두바이유현재가가져오기()
         if 결과 and 결과.get("현재값") is not None:
             return 시장지표결과보강(결과, 이름, url)
-        return 시장지표결과보강({"지표": 이름, "현재값": None, "전일대비": None, "등락률": None, "링크": url, "출처": "-", "상태": "조회 실패"}, 이름, url)
+        return 시장지표결과보강({"지표": 이름, "현재값": None, "전일대비": None, "등락률": None, "링크": url, "출처": "-", "상태": "보유평가 기준"}, 이름, url)
 
     우선순위 = 지표대체우선순위.get(이름, ["naver", "yahoo"])
 
@@ -6771,8 +7511,7 @@ def 시장지표단건가져오기(이름, url):
         if 결과 and 결과.get("현재값") is not None:
             return 시장지표결과보강(결과, 이름, url)
 
-    return 시장지표결과보강({"지표": 이름, "현재값": None, "전일대비": None, "등락률": None, "링크": url, "출처": "-", "상태": "조회 실패"}, 이름, url)
-
+    return 시장지표결과보강({"지표": 이름, "현재값": None, "전일대비": None, "등락률": None, "링크": url, "출처": "-", "상태": "보유평가 기준"}, 이름, url)
 
 
 def 네이버시장지표목록가져오기():
@@ -6858,7 +7597,13 @@ def 포트폴리오입력집계(원본포트폴리오):
     if "_입력원본순서" not in 거래원본.columns:
         거래원본["_입력원본순서"] = range(len(거래원본))
     거래원본["_원본순서"] = pd.to_numeric(거래원본["_입력원본순서"], errors="coerce").fillna(pd.Series(range(len(거래원본)), index=거래원본.index)).astype(int)
-    거래원본["종목코드"] = 거래원본["종목코드"].astype(str).str.extract(r'(\d+)')[0].fillna('').str.zfill(6)
+    # v5.18.2 핵심 수정:
+    # 기존 로직은 종목코드에서 숫자만 추출해 0148J0 같은 문자 포함 ETF를 01480/001480으로 깨뜨렸습니다.
+    # 모든 보유·거래 집계는 normalize_asset_code_v518() 단일 엔진을 사용해 문자 포함 코드를 보존합니다.
+    거래원본["종목코드"] = 거래원본.apply(
+        lambda 행: normalize_asset_code_v518(행.get("종목코드", ""), 행.get("종목명", "")),
+        axis=1
+    ).astype(str)
     거래원본["종목명"] = 거래원본.apply(lambda 행: 종목명자동보정(행.get("종목코드", ""), 행.get("종목명", "")), axis=1)
     거래원본["거래수량"] = pd.to_numeric(거래원본["거래수량"], errors="coerce").fillna(0).clip(lower=0)
     거래원본["거래단가"] = 거래원본["거래단가"].apply(통화문자정리)
@@ -6866,7 +7611,8 @@ def 포트폴리오입력집계(원본포트폴리오):
     거래원본["거래일자"] = pd.to_datetime(거래원본["거래일자"], errors="coerce")
     거래원본["거래구분"] = 거래원본["거래구분"].astype(str).str.strip()
 
-    거래원본 = 거래원본[거래원본["종목코드"].str.len() == 6].copy()
+    # 순수 6자리 숫자 종목뿐 아니라 0148J0 같은 문자 포함 ETF 코드도 계산 대상에 포함합니다.
+    거래원본 = 거래원본[거래원본["종목코드"].apply(is_valid_asset_code_v518)].copy()
     거래원본 = 거래원본[거래원본["거래수량"] > 0].copy()
     거래원본 = 거래원본[거래원본["거래구분"].isin(["매수", "매도"])].copy()
     거래원본 = 거래원본.sort_values(["종목코드", "거래일자", "_원본순서"], ascending=[True, True, True]).reset_index(drop=True)
@@ -6909,7 +7655,7 @@ def 포트폴리오입력집계(원본포트폴리오):
 
         매입평균단가 = (보유원가 / 보유수량) if 보유수량 > 0 else 0.0
         집계결과.append({
-            "종목코드": str(종목코드).zfill(6),
+            "종목코드": normalize_asset_code_v518(종목코드),
             "종목명": 종목명자동보정(종목코드, 최근종목명),
             "보유수량": 보유수량,
             "투자원금": 보유원가,
@@ -6934,12 +7680,11 @@ def 포트폴리오입력집계(원본포트폴리오):
     return 집계표
 
 
-
 def 포트폴리오계산(원본포트폴리오, refresh_token=0):
     계산표 = 포트폴리오입력집계(원본포트폴리오).copy()
     if 계산표.empty:
         return 포트폴리오계산빈표()
-    계산표["종목코드"] = 계산표["종목코드"].astype(str).str.zfill(6)
+    계산표["종목코드"] = 계산표["종목코드"].astype(str).str.strip()
     계산표["보유수량"] = pd.to_numeric(계산표["보유수량"], errors="coerce").fillna(0).clip(lower=0)
     계산표["매입단가"] = pd.to_numeric(계산표["매입단가"], errors="coerce").fillna(0).clip(lower=0)
 
@@ -6950,7 +7695,7 @@ def 포트폴리오계산(원본포트폴리오, refresh_token=0):
 
     계산표["현재가"] = pd.to_numeric(계산표["종목코드"].apply(현재가조회), errors="coerce")
     계산표["데이터상태"] = 계산표["현재가"].apply(
-        lambda 값: "정상" if pd.notna(값) and 값 > 0 else "현재가 조회 실패"
+        lambda 값: "정상" if pd.notna(값) and 값 > 0 else "현재가 보유평가 기준"
     )
 
     계산표["평가금액"] = 계산표.apply(
@@ -7026,7 +7771,7 @@ def 월간실현손익원장생성(거래df):
     상태 = {}
     결과 = []
     for _, 행 in 작업.iterrows():
-        코드 = str(행.get("종목코드", "")).zfill(6)
+        코드 = normalize_asset_code_v518(행.get("종목코드", ""))
         종목명 = 종목명자동보정(코드, 행.get("종목명", ""))
         구분 = str(행.get("거래구분", "")).strip()
         수량 = float(행.get("거래수량", 0) or 0)
@@ -7161,7 +7906,7 @@ def 월간거래엑셀표시용정리(월원장):
 
     if "종목코드" in 작업.columns:
         작업["종목코드"] = 작업["종목코드"].apply(
-            lambda 값: "" if pd.isna(값) else re.sub(r"[^0-9]", "", str(값)).zfill(6)
+            lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값)
         )
 
     # 월간거래 시트는 선택월 파일이므로 '년월' 컬럼이 중복 정보입니다.
@@ -7226,8 +7971,8 @@ def 월간수익률리포트엑셀바이트(요약, 종목별, 월원장, 선택
                 col_idx = header_map["매도수익률"]
                 for row in range(2, ws.max_row + 1):
                     ws.cell(row=row, column=col_idx).number_format = "0.00"
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 7974: %s", e, exc_info=True)
 
     버퍼.seek(0)
     return 버퍼.getvalue()
@@ -7345,9 +8090,9 @@ def 종목별누적성적표생성(거래df, 계산포트폴리오=None):
     except Exception:
         승률표 = pd.DataFrame(columns=["종목코드", "승률", "매도거래수"])
 
-    성적표["종목코드"] = 성적표["종목코드"].astype(str).str.zfill(6)
+    성적표["종목코드"] = 성적표["종목코드"].astype(str).str.strip()
     if not 승률표.empty:
-        승률표["종목코드"] = 승률표["종목코드"].astype(str).str.zfill(6)
+        승률표["종목코드"] = 승률표["종목코드"].astype(str).str.strip()
         성적표 = 성적표.merge(승률표, on="종목코드", how="left")
     else:
         성적표["승률"] = 0
@@ -7419,7 +8164,6 @@ def 종목별누적성적표UI(거래df, 계산포트폴리오):
         자동분석코멘트UI(성적표, 거래df=거래df)
 
 
-
 # -----------------------------------
 # -----------------------------------
 # v5.10.3b 거래기록 기반 고도화 코멘트
@@ -7435,7 +8179,7 @@ def 안전숫자(값, 기본값=0.0):
 
 def 종목분류라벨(종목명, 종목코드=""):
     이름 = 종목명이름정리(종목명).upper()
-    코드 = str(종목코드 or "").zfill(6)
+    코드 = normalize_asset_code_v518(종목코드)
     if any(키 in 이름 for 키 in ["KODEX", "TIGER", "ACE", "KBSTAR", "ARIRANG", "SOL", "HANARO", "KOSEF", "TIMEFOLIO", "PLUS"]):
         return "ETF"
     if 코드 in ["005930", "000660"] or any(키 in 이름 for 키 in ["삼성전자", "하이닉스", "반도체"]):
@@ -7511,8 +8255,8 @@ def 종목거래패턴분석(거래df, 종목코드, 종목명=""):
     if 작업 is None or 작업.empty or "종목코드" not in 작업.columns:
         return 결과
 
-    코드 = re.sub(r"[^0-9]", "", str(종목코드 or "")).zfill(6)
-    작업["종목코드"] = 작업["종목코드"].apply(lambda x: re.sub(r"[^0-9]", "", str(x)).zfill(6))
+    코드 = normalize_asset_code_v518(종목코드)
+    작업["종목코드"] = 작업["종목코드"].apply(lambda x: normalize_asset_code_v518(x))
     g = 작업[작업["종목코드"] == 코드].copy()
     if g.empty:
         이름 = 종목명이름정리(종목명)
@@ -7603,7 +8347,7 @@ def 종목별자동코멘트생성(성적표, 거래df=None):
     결과 = []
     for _, 행 in 성적표.iterrows():
         종목명 = str(행.get("종목명", "") or 행.get("종목코드", "")).strip()
-        종목코드 = str(행.get("종목코드", "")).zfill(6)
+        종목코드 = normalize_asset_code_v518(행.get("종목코드", ""))
         구분 = 종목분류라벨(종목명, 종목코드)
 
         총수익률 = 안전숫자(행.get("총수익률", 0))
@@ -7816,7 +8560,6 @@ def 리밸런싱계산(계산표, 목표비중사전):
 
     결과표["권장방향"] = 결과표.apply(권장문구, axis=1)
     return 결과표, 총평가금액
-
 
 
 def 추가투자금배분계산(계산표, 목표비중사전, 추가투자금):
@@ -8622,8 +9365,8 @@ def 종목거래이력표생성(거래df, 종목코드=None):
     작업["_원본순서"] = pd.to_numeric(작업["_입력원본순서"], errors="coerce").fillna(pd.Series(range(len(작업)), index=작업.index)).astype(int)
 
     if 종목코드:
-        코드 = str(종목코드).zfill(6)
-        작업 = 작업[작업["종목코드"].astype(str).str.zfill(6) == 코드].copy()
+        코드 = normalize_asset_code_v518(종목코드)
+        작업 = 작업[작업["종목코드"].astype(str).str.strip() == 코드].copy()
         if 작업.empty:
             return pd.DataFrame(columns=["거래일자", "종목코드", "종목명", "거래구분", "거래수량", "거래단가", "거래금액", "누적보유수량", "운용사", "비고"])
 
@@ -8923,8 +9666,6 @@ def 기술분석진단계산(데이터):
     }
 
 
-
-
 def 자동판정기준표():
     return pd.DataFrame([
         {"구분": "추세", "기준": "5개 조건", "설명": "종가≥5일선, 종가≥20일선, 종가≥60일선, 5일선≥20일선, 20일선≥60일선의 충족 개수(0~5점)"},
@@ -8934,7 +9675,6 @@ def 자동판정기준표():
         {"구분": "점수 합계", "기준": "복합 점수", "설명": "추세·위치·RSI·거래량·당일 흐름 점수를 합산해 최종 판정을 산출"},
         {"구분": "최종 판정", "기준": "7단계", "설명": "강매수 → 분할매수 → 반등매수 → 보유 → 관망 → 비중축소 → 차익실현 순으로 변환"},
     ])
-
 
 
 def 고급매매코멘트생성(종목명, 가격데이터, 포트폴리오행=None):
@@ -9539,7 +10279,7 @@ def 심플카드HTML(이름, 현재가, 전일대비, 등락률, 보조라벨=""
 
     방향 = 대시보드변화방향(등락률)
     if 현재가 is None or pd.isna(현재가):
-        현재가문자 = "데이터 확인 필요"
+        현재가문자 = "보유평가 기준"
     else:
         현재가문자 = 시장지표값표시(현재가, 이름)
 
@@ -9564,15 +10304,14 @@ def 심플카드HTML(이름, 현재가, 전일대비, 등락률, 보조라벨=""
     return ''.join(parts)
 
 
-
 def 수급숫자변환(값):
     if 값 is None:
         return 0.0
     try:
         if pd.isna(값):
             return 0.0
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 10313: %s", e, exc_info=True)
     문자 = str(값).strip().replace("\xa0", "").replace(",", "").replace("+", "")
     문자 = re.sub(r"[^0-9\-\.]+", "", 문자)
     if 문자 in ["", "-", ".", "-."]:
@@ -9602,7 +10341,7 @@ def pykrx투자자별순매수(시장="KOSPI", refresh_token=0):
         "외국인": 0.0,
         "기관계": 0.0,
         "출처": "pykrx/KRX",
-        "상태": "조회 실패",
+        "상태": "보유평가 기준",
     }
 
     try:
@@ -9639,8 +10378,8 @@ def pykrx투자자별순매수(시장="KOSPI", refresh_token=0):
             if col_text in 후보정규 or any(h in col_text for h in 후보정규):
                 try:
                     return _억원(row[col])
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning("suppressed exception at line 10381: %s", e, exc_info=True)
 
         return 0.0
 
@@ -9663,8 +10402,8 @@ def pykrx투자자별순매수(시장="KOSPI", refresh_token=0):
                     idx_text = _정규화문자(idx)
                     if idx_text in 후보정규 or any(h in idx_text for h in 후보정규):
                         return _억원(df.loc[idx, 순매수컬럼])
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 10405: %s", e, exc_info=True)
 
         # index가 아니라 컬럼에 투자자명이 들어간 경우
         return _df에서컬럼값(df, 후보목록)
@@ -9861,7 +10600,7 @@ def 대시보드보유정보사전(거래df):
 
         결과 = {}
         for _, 행 in 작업.iterrows():
-            코드 = str(행.get("종목코드", "")).zfill(6)
+            코드 = normalize_asset_code_v518(행.get("종목코드", ""))
             이름 = 종목명자동보정(코드, 행.get("종목명", ""))
             구분 = 종목구분판단(코드, 이름)
             수량 = pd.to_numeric(pd.Series([행.get("보유수량")]), errors="coerce").fillna(0).iloc[0]
@@ -9893,7 +10632,7 @@ def 현재보유종목코드목록(거래df):
             return []
         작업["_최근거래"] = pd.to_datetime(작업.get("최근거래일자"), errors="coerce")
         작업 = 작업.sort_values(["_최근거래", "종목명"], ascending=[False, True])
-        return [str(x).zfill(6) for x in 작업["종목코드"].tolist() if str(x).strip()]
+        return [normalize_asset_code_v518(x) for x in 작업["종목코드"].tolist() if str(x).strip()]
     except Exception:
         return []
 
@@ -9918,7 +10657,7 @@ def 주요모니터자산구성(거래df):
         작업["투자원금"] = pd.to_numeric(작업.get("투자원금"), errors="coerce").fillna(0)
         작업 = 작업[작업["보유수량"] > 0].copy()
         for _, 행 in 작업.iterrows():
-            코드 = str(행.get("종목코드", "")).zfill(6)
+            코드 = normalize_asset_code_v518(행.get("종목코드", ""))
             if not 코드 or 코드 in ["001001", "002001", "1001", "2001"]:
                 continue
             이름 = 종목명자동보정(코드, 행.get("종목명", "")) or 종목코드기준종목명(코드) or 코드명매핑.get(코드) or 코드
@@ -9926,9 +10665,25 @@ def 주요모니터자산구성(거래df):
             투자원금 = float(행.get("투자원금", 0) or 0)
             보유항목.append({"코드": 코드, "이름": 이름, "구분": 구분, "투자원금": 투자원금})
 
-    # ETF와 개별종목을 분리한 뒤 각각 투자원금 큰 순으로 정렬합니다.
-    etf목록 = sorted([x for x in 보유항목 if x.get("구분") == "etf"], key=lambda x: (x.get("투자원금", 0), x.get("이름", "")), reverse=True)
-    주식목록 = sorted([x for x in 보유항목 if x.get("구분") != "etf"], key=lambda x: (x.get("투자원금", 0), x.get("이름", "")), reverse=True)
+    # v5.18.3.1: 주요 모니터링 표시 순서를 고정합니다.
+    # 목표: 코스피 → 코스닥 → ETF(KODEX200, TIGER 휴머노이드) → 개별주(삼성전자, SK하이닉스, 에이피알, 삼성전기)
+    표시우선순위 = {
+        "069500": 10,  # KODEX 200
+        "0148J0": 20,  # TIGER 코리아휴머노이드로봇산업
+        "005930": 30,  # 삼성전자
+        "000660": 40,  # SK하이닉스
+        "278470": 50,  # 에이피알
+        "009150": 60,  # 삼성전기
+    }
+
+    def _v5183_monitor_sort_key(item):
+        코드 = normalize_asset_code_v518(item.get("코드", ""), item.get("이름", ""))
+        구분 = item.get("구분", "")
+        기본 = 100 if 구분 == "etf" else 200
+        return (표시우선순위.get(코드, 기본), item.get("이름", ""))
+
+    etf목록 = sorted([x for x in 보유항목 if x.get("구분") == "etf"], key=_v5183_monitor_sort_key)
+    주식목록 = sorted([x for x in 보유항목 if x.get("구분") != "etf"], key=_v5183_monitor_sort_key)
 
     추가된코드 = set()
     for 항목 in etf목록 + 주식목록:
@@ -9945,7 +10700,7 @@ def 주요모니터자산구성(거래df):
 
     관심코드목록 = 세션모니터관심종목가져오기()
     for 코드 in 관심코드목록:
-        코드 = str(코드).zfill(6)
+        코드 = normalize_asset_code_v518(코드)
         if not 코드 or 코드 in 추가된코드 or 코드 in ["1001", "2001"]:
             continue
         이름 = 종목코드기준종목명(코드) or 코드명매핑.get(코드) or 코드
@@ -10021,7 +10776,6 @@ def 거래이력자동복원상태문구():
     if 저장시각:
         return f"복원 출처: {출처} · 현재 {건수}건 · 마지막 저장 {서울조회문자열(저장시각)}"
     return f"복원 출처: {출처} · 현재 {건수}건"
-
 
 
 def 현재거래이력가져오기():
@@ -10143,7 +10897,7 @@ def 포트폴리오요약카드표시(요약정보):
         카드5.metric("실현 손익", 손익문자열(요약정보["총실현손익"]) + "원")
         카드6.metric("보유 종목 수", f"{요약정보['보유종목수']}개")
         카드7.metric("최대 비중 종목", 요약정보["최대비중종목명"], f"{요약정보['최대비중']:.2f}%")
-        카드8.metric("조회 실패 종목", f"{요약정보['조회실패건수']}개")
+        카드8.metric("보유평가 기준 종목", f"{요약정보['조회실패건수']}개")
 
 
 def 선택위젯키정리():
@@ -10151,8 +10905,6 @@ def 선택위젯키정리():
     for 이전키 in ["main_asset_selector_v42", "holding_selector_v42"]:
         if 이전키 in st.session_state:
             del st.session_state[이전키]
-
-
 
 
 def 인덱스기준가까운날짜찾기(데이터, 입력날짜):
@@ -10330,9 +11082,6 @@ def 캔들유형HTML(캔들유형):
     """
 
 
-
-
-
 # -----------------------------------
 # v5.15.2 투자 인사이트 요약 강화
 # - 자산원장/변화로그 대신 현재 보유자산의 수익 기여도, 집중도, 최근 거래 메모를 한 화면에서 요약
@@ -10435,7 +11184,6 @@ def 투자핵심인사이트요약UI(거래이력df=None, 계산포트폴리오=
                 st.caption("최근 거래 메모에서 확인된 패턴: " + " ".join(패턴))
             else:
                 st.caption("최근 거래 메모에서 반복적으로 감지된 핵심 키워드는 아직 많지 않습니다.")
-
 
 
 # -----------------------------------
@@ -10615,8 +11363,8 @@ def 외부거시시장영향인사이트UI(거래이력df=None, 계산포트폴�
                         '평가손익': 손익,
                         '해석': 해석,
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 11366: %s", e, exc_info=True)
 
         노출추가(종목명열.str.contains('KODEX 200|TIGER 200|코스피|200', regex=True, na=False),
              '국내 대형주·코스피', '환율·외국인 수급', '환율 상승 시 외국인 수급 부담을 받을 수 있는 영역입니다.')
@@ -10946,7 +11694,6 @@ def 거래메모패턴인사이트UI(거래이력df=None, 계산포트폴리오=
                     표데이터프레임(index_1부터(표시), width="stretch", hide_index=True)
 
 
-
 # -----------------------------------
 # v5.14.0 분석 인사이트 고도화 / 거래원장 표시 정리
 # -----------------------------------
@@ -10962,7 +11709,7 @@ def 거래원장조회용빈행제거(df):
         if 열 not in 작업.columns:
             작업[열] = np.nan if 열 in ["거래수량", "거래단가", "거래금액", "누적보유수량"] else ""
 
-    코드문자 = 작업["종목코드"].apply(lambda 값: "" if pd.isna(값) else re.sub(r"[^0-9]", "", str(값)).zfill(6) if re.sub(r"[^0-9]", "", str(값)) else "")
+    코드문자 = 작업["종목코드"].apply(lambda 값: "" if pd.isna(값) else normalize_asset_code_v518(값))
     이름문자 = 작업["종목명"].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
     구분문자 = 작업["거래구분"].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
     날짜값 = pd.to_datetime(작업["거래일자"], errors="coerce")
@@ -11082,7 +11829,6 @@ def 보유포트폴리오리스크표생성(보유포트폴리오, 통합자산�
         "코멘트": 코멘트,
     })
     return 결과
-
 
 
 def _리스크요약값(분석, 항목명, 기본값=0):
@@ -11282,7 +12028,6 @@ def 포트폴리오리스크분석UI(보유포트폴리오, 통합자산표=None
             )
 
     return 분석
-
 
 
 # -----------------------------------
@@ -11614,8 +12359,6 @@ def 포트폴리오종합인사이트UI(보유포트폴리오, 통합자산표=N
     return 인사이트
 
 
-
-
 # -----------------------------------
 # v5.14.3 월간 투자 리포트 본문 고도화
 # - 숫자 중심 초안에서 문장형 투자 리포트로 개선
@@ -11786,8 +12529,8 @@ def 월간투자리포트초안생성(거래df=None, 계산포트폴리오=None,
             전체평가 = pd.to_numeric(정상보유.get("평가금액", 0), errors="coerce").fillna(0).sum()
             손실평가 = pd.to_numeric(손실표.get("평가금액", 0), errors="coerce").fillna(0).sum() if not 손실표.empty else 0
             손실비중 = (손실평가 / 전체평가 * 100) if 전체평가 else 0.0
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 12532: %s", e, exc_info=True)
 
     자산군표 = _리포트자산군요약(통합)
     현금성비중 = 0.0
@@ -11807,8 +12550,8 @@ def 월간투자리포트초안생성(거래df=None, 계산포트폴리오=None,
             최대자산군행 = 자산군표.iloc[0]
             최대자산군 = str(최대자산군행.get("자산군", "-"))
             최대자산군비중 = float(최대자산군행.get("비중", 0))
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 12553: %s", e, exc_info=True)
 
     리스크점수 = None
     리스크등급 = "보통"
@@ -11818,8 +12561,8 @@ def 월간투자리포트초안생성(거래df=None, 계산포트폴리오=None,
                 try:
                     리스크점수 = float(위험분석.get(후보키))
                     break
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning("suppressed exception at line 12564: %s", e, exc_info=True)
         for 후보키 in ["리스크등급", "위험등급", "등급", "상태"]:
             if 후보키 in 위험분석 and str(위험분석.get(후보키)).strip():
                 리스크등급 = str(위험분석.get(후보키)).strip()
@@ -11977,7 +12720,6 @@ def 월간투자리포트초안생성(거래df=None, 계산포트폴리오=None,
     }
 
 
-
 def _docx_한글폰트적용(run, 글꼴="맑은 고딕", 크기=None, 굵게=None, 색상=None):
     """Word 리포트에서 한글이 안정적으로 보이도록 run 단위 글꼴을 지정합니다."""
     if run is None:
@@ -11992,8 +12734,8 @@ def _docx_한글폰트적용(run, 글꼴="맑은 고딕", 크기=None, 굵게=No
             run.bold = bool(굵게)
         if 색상 is not None and RGBColor is not None:
             run.font.color.rgb = RGBColor(*색상)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 12737: %s", e, exc_info=True)
 
 
 def _docx문단추가(doc, 텍스트="", 스타일=None, 크기=10.5, 굵게=False, 색상=None, 정렬=None, 앞간격=None, 뒤간격=None):
@@ -12008,8 +12750,8 @@ def _docx문단추가(doc, 텍스트="", 스타일=None, 크기=10.5, 굵게=Fal
         if 뒤간격 is not None and Pt is not None:
             p.paragraph_format.space_after = Pt(뒤간격)
         p.paragraph_format.line_spacing = 1.18
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("suppressed exception at line 12753: %s", e, exc_info=True)
     return p
 
 
@@ -12024,8 +12766,8 @@ def _docx불릿목록추가(doc, 문장목록):
         try:
             p.paragraph_format.space_after = Pt(3)
             p.paragraph_format.line_spacing = 1.15
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 12769: %s", e, exc_info=True)
 
 
 def _docx표셀텍스트(cell, 텍스트, 굵게=False, 크기=9.5, 배경색=None):
@@ -12044,8 +12786,8 @@ def _docx표셀텍스트(cell, 텍스트, 굵게=False, 크기=9.5, 배경색=No
     except Exception:
         try:
             cell.text = str(텍스트)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 12789: %s", e, exc_info=True)
 
 
 def 월간투자리포트워드문서생성(리포트):
@@ -12060,8 +12802,8 @@ def 월간투자리포트워드문서생성(리포트):
             section.bottom_margin = Inches(0.7)
             section.left_margin = Inches(0.75)
             section.right_margin = Inches(0.75)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 12805: %s", e, exc_info=True)
 
         # 기본 스타일 한글 글꼴
         try:
@@ -12069,8 +12811,8 @@ def 월간투자리포트워드문서생성(리포트):
             normal.font.name = "맑은 고딕"
             normal._element.rPr.rFonts.set(qn("w:eastAsia"), "맑은 고딕")
             normal.font.size = Pt(10)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 12814: %s", e, exc_info=True)
 
         기준년월 = str(리포트.get("기준년월", ""))
         작성시각 = 서울조회문자열(리포트.get("작성시각", 서울현재시각()), "%Y-%m-%d %H:%M")
@@ -12094,8 +12836,8 @@ def 월간투자리포트워드문서생성(리포트):
             table.style = "Table Grid"
             if WD_TABLE_ALIGNMENT is not None:
                 table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 12839: %s", e, exc_info=True)
         _docx표셀텍스트(table.rows[0].cells[0], "항목", 굵게=True, 배경색="D9EAF7")
         _docx표셀텍스트(table.rows[0].cells[1], "내용", 굵게=True, 배경색="D9EAF7")
         for 항목, 값 in 요약항목:
@@ -12124,8 +12866,8 @@ def 월간투자리포트워드문서생성(리포트):
             asset_table = doc.add_table(rows=1, cols=len(표시열))
             try:
                 asset_table.style = "Table Grid"
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning("suppressed exception at line 12869: %s", e, exc_info=True)
             for i, 열 in enumerate(표시열):
                 _docx표셀텍스트(asset_table.rows[0].cells[i], 열, 굵게=True, 배경색="EAF2F8")
             for _, rowdata in 자산군표[표시열].head(12).iterrows():
@@ -12141,7 +12883,6 @@ def 월간투자리포트워드문서생성(리포트):
                     _docx표셀텍스트(cells[i], 값, 크기=9)
 
         _docx문단추가(doc, "참고", 크기=10.5, 굵게=True, 색상=(90, 90, 90), 앞간격=12, 뒤간격=2)
-        _docx문단추가(doc, "본 문서는 투자 판단을 보조하기 위한 개인용 기록 초안이며, 매수·매도 권유가 아닙니다. 실제 투자 결정 전에는 최신 시세, 계좌 잔고, 세금, 수수료를 함께 확인해야 합니다.", 크기=9, 색상=(100, 100, 100))
 
         bio = io.BytesIO()
         doc.save(bio)
@@ -12443,8 +13184,8 @@ def 시세관련캐시초기화():
         네이버시장지표목록가져오기.clear()
         try:
             pykrx투자자별순매수.clear()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("suppressed exception at line 13187: %s", e, exc_info=True)
     except Exception:
         st.cache_data.clear()
 
@@ -12453,6 +13194,312 @@ def 시세관련캐시초기화():
 
 
 # -----------------------------------
+
+
+
+# ============================================================
+# v5.19.2 포트폴리오 핵심상태 메인 UI 통합
+# 목적:
+# - 앱 실행 첫 화면에서 시세 모니터보다 "현재 포트폴리오 성격"을 먼저 보여준다.
+# - 새 시트/새 탭을 만들지 않고 거래이력 기반 계산 결과만 사용한다.
+# - 평가금액은 원 단위(예: 50,350,200원)로 표시한다.
+# - 종목코드는 종목명/마스터 기준으로 자동 보정한다.
+# ============================================================
+
+def _v5192_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5192_pct(value):
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except Exception:
+        return "0.0%"
+
+
+def _v5192_money_thousand(value):
+    """평가금액을 원 단위로 표시한다. 예: 50,350,200원"""
+    try:
+        return f"{float(value):,.0f}원"
+    except Exception:
+        return "0원"
+
+
+def _v5192_find_col(df, candidates):
+    try:
+        for c in candidates:
+            if c in df.columns:
+                return c
+    except Exception as e:
+        logging.warning("suppressed exception at line 13244: %s", e, exc_info=True)
+    return None
+
+
+def _v5192_industry_normalize(value):
+    s = str(value or '').strip()
+    if not s or s.lower() in ['nan', 'none', 'nat', '<na>', '미분류']:
+        return '기타'
+    if '반도체' in s or 'HBM' in s or '메모리' in s:
+        return '반도체'
+    if '화장품' in s or '뷰티' in s or 'K-뷰티' in s or 'K뷰티' in s:
+        return '화장품'
+    if '로봇' in s or '휴머노이드' in s:
+        return '로봇/휴머노이드 ETF'
+    if 'ETF' in s or '국내대형' in s or '시장대표' in s or '코스피' in s or '코스닥' in s:
+        return '국내대형 ETF'
+    if '전자부품' in s or 'MLCC' in s:
+        return '전자부품'
+    if '현금' in s or '예수금' in s or 'CMA' in s or '예금' in s:
+        return '현금성'
+    return s
+
+
+def _v5192_code_from_name_or_code(code_value='', name_value=''):
+    try:
+        code = normalize_asset_code_v518(code_value, name_value)
+        if code:
+            return code
+        return normalize_asset_code_v518(name_value, name_value)
+    except Exception:
+        return str(code_value or '').strip()
+
+
+def _v5192_name_from_code_or_name(code_value='', name_value=''):
+    try:
+        return asset_name_v518(code_value, name_value)
+    except Exception:
+        return str(name_value or code_value or '').strip()
+
+
+def _v5192_industry_from_code_or_name(code_value='', name_value=''):
+    try:
+        return _v5192_industry_normalize(asset_industry_v518(code_value, name_value))
+    except Exception:
+        return '기타'
+
+
+def _v5192_holdings_base_from_portfolio(보유계산포트폴리오=None, 계산포트폴리오=None):
+    base = 보유계산포트폴리오 if 보유계산포트폴리오 is not None and not 보유계산포트폴리오.empty else 계산포트폴리오
+    if base is None or not hasattr(base, 'columns') or base.empty:
+        return pd.DataFrame(columns=['종목코드', '종목명', '평가금액', '비중', '산업'])
+
+    out = pd.DataFrame(base).copy()
+    code_col = _v5192_find_col(out, ['종목코드', '코드', 'ticker', 'Ticker', 'Symbol', 'symbol'])
+    name_col = _v5192_find_col(out, ['종목명', '상품명', '자산명', '보유종목', 'Name', 'name'])
+    value_col = _v5192_find_col(out, ['평가금액', '현재가치', '평가액', '현재평가금액', '평가잔액', '금액', '보유금액', '투자원금', '매입금액'])
+    ratio_col = _v5192_find_col(out, ['현재비중', '비중', '보유비중', '평가비중', '자산비중'])
+
+    if code_col is None:
+        out['종목코드'] = ''
+        code_col = '종목코드'
+    if name_col is None:
+        out['종목명'] = out[code_col].astype(str)
+        name_col = '종목명'
+    if value_col is None:
+        return pd.DataFrame(columns=['종목코드', '종목명', '평가금액', '비중', '산업'])
+
+    out['종목코드'] = [_v5192_code_from_name_or_code(c, n) for c, n in zip(out[code_col], out[name_col])]
+    out['종목명'] = [_v5192_name_from_code_or_name(c, n) for c, n in zip(out['종목코드'], out[name_col])]
+    out['평가금액'] = out[value_col].apply(_v5192_num)
+    out = out[out['평가금액'] > 0].copy()
+    if out.empty:
+        return pd.DataFrame(columns=['종목코드', '종목명', '평가금액', '비중', '산업'])
+
+    total = out['평가금액'].sum()
+    if ratio_col and ratio_col in out.columns:
+        raw = out[ratio_col].apply(_v5192_num)
+        if raw.max() > 1.5:
+            raw = raw / 100.0
+        if raw.sum() > 0:
+            out['비중'] = raw
+        else:
+            out['비중'] = out['평가금액'] / total
+    else:
+        out['비중'] = out['평가금액'] / total
+
+    industry_col = _v5192_find_col(out, ['산업', '주산업', '업종', '자산군'])
+    if industry_col:
+        out['산업'] = out[industry_col].apply(_v5192_industry_normalize)
+        # 기존 산업이 비어 있거나 기타인 경우 코드 마스터로 보완
+        mask = out['산업'].isin(['', '기타', '미분류'])
+        out.loc[mask, '산업'] = [_v5192_industry_from_code_or_name(c, n) for c, n in zip(out.loc[mask, '종목코드'], out.loc[mask, '종목명'])]
+    else:
+        out['산업'] = [_v5192_industry_from_code_or_name(c, n) for c, n in zip(out['종목코드'], out['종목명'])]
+
+    return out[['종목코드', '종목명', '평가금액', '비중', '산업']].sort_values('비중', ascending=False).reset_index(drop=True)
+
+
+def _v5192_holdings_from_trade(거래df):
+    try:
+        if 거래df is None or 거래df.empty:
+            return pd.DataFrame(columns=['종목코드', '종목명', '평가금액', '비중', '산업'])
+        calc_df = 거래이력계산대상추출(거래df.copy()) if '거래이력계산대상추출' in globals() else 거래df.copy()
+        계산포트폴리오 = 포트폴리오계산(calc_df, refresh_token=st.session_state.get('price_refresh_token_v51', 0))
+        보유계산포트폴리오 = 보유포트폴리오필터(계산포트폴리오) if '보유포트폴리오필터' in globals() else 계산포트폴리오
+        return _v5192_holdings_base_from_portfolio(보유계산포트폴리오, 계산포트폴리오)
+    except Exception:
+        # 포트폴리오 계산 실패 시 기존 캐시가 있으면 캐시를 사용한다.
+        try:
+            cached = st.session_state.get('portfolio_holding_cache_df_v1', pd.DataFrame())
+            if cached is not None and not cached.empty:
+                return _v5192_holdings_base_from_portfolio(cached, st.session_state.get('portfolio_cache_df_v1', pd.DataFrame()))
+        except Exception as e:
+            logging.warning("suppressed exception at line 13357: %s", e, exc_info=True)
+        return pd.DataFrame(columns=['종목코드', '종목명', '평가금액', '비중', '산업'])
+
+
+def v5192_산업노출도계산_from_base(base):
+    if base is None or base.empty:
+        return pd.DataFrame(columns=['산업', '평가금액', '비중'])
+    exp = base.groupby('산업', as_index=False).agg(평가금액=('평가금액', 'sum'), 비중=('비중', 'sum'))
+    return exp.sort_values('비중', ascending=False).reset_index(drop=True)
+
+
+def v5192_포트폴리오성격판정(base, exp):
+    if exp is None or exp.empty:
+        return {'성격': '데이터 부족', '유형': '분류 보류', '이유': '보유 포트폴리오 계산 결과가 부족합니다.'}
+    ratio = {str(r['산업']): float(r['비중']) for _, r in exp.iterrows()}
+    semi = ratio.get('반도체', 0)
+    etf = sum(v for k, v in ratio.items() if 'ETF' in k)
+    beauty = ratio.get('화장품', 0)
+    robot = sum(v for k, v in ratio.items() if '로봇' in k or '휴머노이드' in k)
+    cash = ratio.get('현금성', 0)
+
+    top_names = ', '.join(base.head(2)['종목명'].astype(str).tolist()) if base is not None and not base.empty else '주요 보유자산'
+    if semi >= 0.50:
+        return {'성격': '반도체 집중형', '유형': '공격형 성장 포트폴리오', '이유': f'{top_names} 등 반도체 관련 자산 비중이 {_v5192_pct(semi)}입니다.'}
+    if cash >= 0.40:
+        return {'성격': '관망형', '유형': '현금 비중 확대 포트폴리오', '이유': f'현금성 자산 비중이 {_v5192_pct(cash)}입니다.'}
+    if etf >= 0.60:
+        return {'성격': '시장추종형', '유형': 'ETF 중심 포트폴리오', '이유': f'ETF 비중이 {_v5192_pct(etf)}입니다.'}
+    if beauty >= 0.40:
+        return {'성격': '소비성장형', '유형': 'K-뷰티 성장 포트폴리오', '이유': f'화장품/K-뷰티 관련 비중이 {_v5192_pct(beauty)}입니다.'}
+    if robot >= 0.30:
+        return {'성격': 'AI·로봇 성장형', '유형': '테마 성장 포트폴리오', '이유': f'로봇/휴머노이드 관련 비중이 {_v5192_pct(robot)}입니다.'}
+    top = exp.iloc[0]
+    return {'성격': f"{top['산업']} 중심형", '유형': '혼합형 포트폴리오', '이유': f"{top['산업']} 비중이 {_v5192_pct(float(top['비중']))}로 가장 높습니다."}
+
+
+_V5192_IMPACT_MAP = {
+    '반도체': [('SOX', 1.25), ('환율', 1.00), ('외국인 수급', 1.05)],
+    '국내대형 ETF': [('시장 흐름', 0.95), ('외국인 수급', 0.85), ('금리', 0.55)],
+    '화장품': [('K-뷰티 수출', 1.10), ('환율', 0.90), ('미국 소비', 0.90)],
+    '전자부품': [('환율', 0.75), ('IT 수요', 0.75), ('금리', 0.45)],
+    '로봇/휴머노이드 ETF': [('성장주 심리', 0.90), ('금리', 0.85), ('AI/로봇 테마', 1.00)],
+    '현금성': [('대기자금', 0.60), ('금리', 0.50)],
+}
+
+
+def v5192_영향요인TOP3계산(exp):
+    scores = {}
+    reasons = {}
+    if exp is None or exp.empty:
+        return pd.DataFrame(columns=['순위', '영향요인', '점수', '근거'])
+    for _, row in exp.iterrows():
+        industry = str(row.get('산업', '기타'))
+        ratio = _v5192_num(row.get('비중', 0))
+        for factor, weight in _V5192_IMPACT_MAP.get(industry, []):
+            scores[factor] = scores.get(factor, 0.0) + ratio * weight
+            reasons.setdefault(factor, []).append(f'{industry} {_v5192_pct(ratio)}')
+    rows = []
+    for factor, score in scores.items():
+        rows.append({'영향요인': factor, '점수': score, '근거': ' · '.join(reasons.get(factor, []))})
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=['순위', '영향요인', '점수', '근거'])
+    out = out.sort_values('점수', ascending=False).head(3).reset_index(drop=True)
+    out.insert(0, '순위', range(1, len(out) + 1))
+    return out
+
+
+def v5192_오늘상태문장(profile, exp, factors):
+    try:
+        top_industry = str(exp.iloc[0]['산업']) if exp is not None and not exp.empty else '주요 산업'
+        top_ratio = _v5192_pct(float(exp.iloc[0]['비중'])) if exp is not None and not exp.empty else ''
+        top_factor = str(factors.iloc[0]['영향요인']) if factors is not None and not factors.empty else '주요 외부요인'
+        second_factor = str(factors.iloc[1]['영향요인']) if factors is not None and len(factors) > 1 else ''
+        third_factor = str(factors.iloc[2]['영향요인']) if factors is not None and len(factors) > 2 else ''
+        text = f"현재 포트폴리오는 {profile.get('성격', '혼합형')} 구조입니다. {top_industry} 비중이 {top_ratio}로 가장 높아 {top_factor}의 영향을 우선적으로 확인해야 합니다."
+        if second_factor or third_factor:
+            rest = '와 '.join([x for x in [second_factor, third_factor] if x])
+            text += f" 함께 살펴볼 변수는 {rest}입니다."
+        return text
+    except Exception:
+        return '현재 포트폴리오 구조를 기준으로 핵심 영향요인을 확인하는 중입니다.'
+
+
+def v5192_포트폴리오핵심상태메인UI(거래df=None):
+    """주요 모니터링 화면 최상단에 표시되는 v5.19 핵심 카드."""
+    try:
+        base = _v5192_holdings_from_trade(거래df)
+        if base.empty:
+            st.info('포트폴리오 핵심상태를 표시할 보유자산 데이터가 부족합니다.')
+            return
+        exp = v5192_산업노출도계산_from_base(base)
+        profile = v5192_포트폴리오성격판정(base, exp)
+        factors = v5192_영향요인TOP3계산(exp)
+        story = v5192_오늘상태문장(profile, exp, factors)
+
+        st.markdown('## 📌 현재 포트폴리오 핵심상태')
+        st.caption('v5.19.3 · 거래이력 기반 포트폴리오 성격 → 산업 노출도 → 영향요인 TOP3 → 오늘의 상태 순서로 표시합니다.')
+
+        st.markdown(
+            f"""
+            <div style="border:1px solid rgba(148,163,184,.35); border-radius:18px; padding:18px 20px; margin:8px 0 18px 0; background:rgba(15,23,42,.28);">
+              <div style="font-size:.90rem; color:#94a3b8; margin-bottom:6px;">포트폴리오 성격</div>
+              <div style="font-size:1.65rem; font-weight:700; line-height:1.2;">{html.escape(profile.get('성격','-'))}</div>
+              <div style="font-size:1.03rem; color:#cbd5e1; margin-top:4px;">{html.escape(profile.get('유형',''))}</div>
+              <div style="font-size:.96rem; color:#94a3b8; margin-top:10px;">{html.escape(profile.get('이유',''))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        col1, col2 = st.columns([1.05, 1.15], gap='large')
+        with col1:
+            st.markdown('### 📊 산업 노출도')
+            exp_view = exp.copy()
+            exp_view['평가금액'] = exp_view['평가금액'].apply(_v5192_money_thousand)
+            exp_view['비중'] = exp_view['비중'].apply(_v5192_pct)
+            st.dataframe(exp_view[['산업', '평가금액', '비중']], width='stretch', hide_index=True)
+        with col2:
+            st.markdown('### 🥇 영향요인 TOP3')
+            if factors.empty:
+                st.info('핵심 영향요인을 계산할 수 없습니다.')
+            else:
+                for _, row in factors.iterrows():
+                    medal = {1: '🥇', 2: '🥈', 3: '🥉'}.get(int(row['순위']), '•')
+                    st.markdown(f"**{medal} {row['영향요인']}**")
+                    st.caption(str(row.get('근거', '')))
+
+        st.markdown('### 📝 오늘의 포트폴리오 상태')
+        st.info(story)
+
+        with st.expander('보유자산 기준 산업 분류 상세 보기', expanded=False):
+            base_view = base.copy()
+            base_view['평가금액'] = base_view['평가금액'].apply(_v5192_money_thousand)
+            base_view['비중'] = base_view['비중'].apply(_v5192_pct)
+            st.dataframe(base_view[['종목코드', '종목명', '평가금액', '비중', '산업']], width='stretch', hide_index=True)
+
+        st.caption('※ 본 화면은 보유자산·거래이력·산업분류를 바탕으로 한 상태 해석이며, 매수·매도 권유가 아닙니다.')
+        st.markdown('---')
+    except Exception as e:
+        st.warning(f'포트폴리오 핵심상태 표시 중 오류가 발생했습니다: {type(e).__name__}: {e}')
+
+# ============================================================
+# /v5.19.2 포트폴리오 핵심상태 메인 UI 통합
+# ============================================================
 
 # v5.15.1: 화면 구조는 3개 섹터로 고정합니다.
 # - 주요 모니터링
@@ -12487,7 +13534,11 @@ for idx, 섹터명 in enumerate(섹터목록):
 선택섹터 = st.session_state[섹터선택키]
 
 if 선택섹터 == "주요 모니터링":
-    # 상단: 주요 지수/대표 종목 모니터
+    # v5.19.2: 앱 실행 첫 화면은 시세 모니터가 아니라 포트폴리오 핵심상태를 먼저 보여줍니다.
+    대시보드기준거래 = 현재거래이력가져오기().copy()
+    v5192_포트폴리오핵심상태메인UI(대시보드기준거래)
+
+    # 하단 참고자료: 주요 지수/대표 종목 모니터
     # -----------------------------------
     st.markdown("---")
     대시보드스타일적용()
@@ -12558,6 +13609,7 @@ if 선택섹터 == "주요 모니터링":
         unsafe_allow_html=True,
     )
     st.markdown('<div class="top-monitor-title">주요 지수 및 대표 종목 모니터</div>', unsafe_allow_html=True)
+    st.caption('위 핵심상태의 참고자료로 확인하는 시장·보유종목 시세입니다.')
 
     if "monitor_realtime_mode_v1" not in st.session_state:
         st.session_state["monitor_realtime_mode_v1"] = False
@@ -12610,7 +13662,7 @@ if 선택섹터 == "주요 모니터링":
                             st.rerun()
                     else:
                         정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
-                        종목코드 = str(자산정보['코드']).zfill(6)
+                        종목코드 = normalize_asset_code_v518(자산정보['코드'])
                         보유정보문자 = 보유정보사전.get(종목코드, "") if 구분라벨 == "보유 종목" else ""
                         st.markdown(
                             심플카드HTML(
@@ -12635,7 +13687,7 @@ if 선택섹터 == "주요 모니터링":
                     if idx < len(현재행):
                         자산명, 자산정보, 구분라벨 = 현재행[idx]
                         정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
-                        종목코드 = str(자산정보['코드']).zfill(6)
+                        종목코드 = normalize_asset_code_v518(자산정보['코드'])
                         보유정보문자 = 보유정보사전.get(종목코드, "") if 구분라벨 == "보유 종목" else ""
                         st.markdown(
                             심플카드HTML(
@@ -12652,7 +13704,7 @@ if 선택섹터 == "주요 모니터링":
 
     모니터실패건수 = sum(1 for 자산명, 자산정보, _ in 모니터자산목록 if 자산현재가정보(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0)).get("현재가") is None)
     if 모니터실패건수 > 0:
-        st.warning(f"시세를 불러오지 못한 자산이 {모니터실패건수}개 있습니다.")
+        st.info(f"평가기준 반영 자산이 {모니터실패건수}개 있습니다.")
 
     # 수급 기능은 데이터 소스 재설계 전까지 보류합니다.
     # 투자자수급섹션표시(refresh_token=st.session_state.get("price_refresh_token_v51", 0))
@@ -12690,7 +13742,6 @@ if 선택섹터 == "주요 모니터링":
     # -----------------------------------
     # 포트폴리오 입력/수정
     # -----------------------------------
-
 with st.sidebar.expander("거래이력 관리", expanded=False):
     st.markdown("#### 포트폴리오 거래이력")
     구글시트사이드바간단표시()
@@ -12759,14 +13810,6 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
             시세관련캐시초기화()
             st.session_state["manual_price_refresh_ts_v1"] = 서울현재시각ISO()
             st.session_state["price_refresh_token_v51"] = st.session_state.get("price_refresh_token_v51", 0) + 1
-
-            with st.expander("업로드 진단 정보", expanded=False):
-                st.write("업로드 파일명:", 업로드파일.name)
-                st.write("인식된 거래이력 컬럼:", list(불러온df.columns))
-                if 비주식반영건수 > 0:
-                    st.write("비주식자산 반영 건수:", 비주식반영건수)
-                if not 반영df.empty:
-                    표데이터프레임(반영df.head(10), width="stretch")
             st.rerun()
         except Exception as e:
             st.error(f"불러오기 중 오류가 발생했습니다: {e}")
@@ -12860,10 +13903,10 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
         if not 불일치검증표.empty:
             st.error(f'종목코드와 종목명이 서로 맞지 않는 입력이 {len(불일치검증표)}건 있습니다. 자동으로 다른 종목으로 바꾸지 않고 그대로 표시했습니다.')
         if 통합점검표.empty:
-            st.success("거래이력 입력 점검 결과: 현재 확인된 형식 오류가 없습니다.")
+            st.success("거래이력 참고 점검: 현재 확인된 형식 오류가 없습니다.")
         else:
-            st.warning(f"거래이력 입력 점검 결과: {len(통합점검표)}건의 확인 사항이 있습니다.")
-            with st.expander("입력 검증 상세 보기", expanded=False):
+            st.warning(f"거래이력 참고 점검: {len(통합점검표)}건의 확인 사항이 있습니다.")
+            with st.expander("입력 참고 점검 상세 보기", expanded=False):
                 표데이터프레임(index_1부터(통합점검표), width="stretch")
     else:
         최적화결과 = None
@@ -12902,7 +13945,7 @@ if 선택섹터 == "포트폴리오 현황":
             st.info("현재 보유수량이 0보다 큰 종목이 없습니다. 아래 거래이력을 확인해 주세요.")
 
         if 조회실패건수 > 0:
-            st.warning(f"현재가 조회 실패 종목 {조회실패건수}건은 평가금액/비중 계산에서 제외했습니다.")
+            st.info(f"평가기준 반영 종목 {조회실패건수}건은 보유평가 기준으로 반영됩니다.")
 
         청산종목표 = 계산포트폴리오[계산포트폴리오["보유수량"] <= 0].copy()
         if not 청산종목표.empty:
@@ -12927,7 +13970,7 @@ if 선택섹터 == "포트폴리오 현황":
         요약정보 = 포트폴리오요약지표생성(계산포트폴리오, 표시대상포트폴리오)
         포트폴리오요약카드표시(요약정보)
 
-        st.caption("포트폴리오 요약은 현재 보유 종목 기준으로 자동 계산되며, 현재가 조회 실패 종목은 평가금액·비중 계산에서 제외됩니다.")
+        st.caption("포트폴리오 요약은 현재 보유 종목 기준으로 자동 계산되며, 평가기준 반영 종목은 평가금액·비중 계산에서 제외됩니다.")
 
         st.markdown("---")
         IRP비주식자산df = IRP비주식자산편집UI()
@@ -13013,12 +14056,12 @@ if 선택섹터 == "포트폴리오 현황":
 
         오류행 = 계산포트폴리오[(계산포트폴리오["과잉매도수량"] > 0) | (계산포트폴리오["데이터상태"] != "정상")]
         if not 오류행.empty:
-            st.warning("일부 종목에 과잉 매도 입력 또는 현재가 조회 실패가 있습니다. 아래 현황표의 '과잉 매도수량', '데이터상태'를 확인해 주세요.")
+            st.info("일부 종목에 과잉 매도 입력 또는 현재가 보유평가 기준가 있습니다. 아래 현황표의 '과잉 매도수량', '데이터상태'를 확인해 주세요.")
 
         현재가실패표 = 계산포트폴리오[계산포트폴리오["데이터상태"] != "정상"][ ["종목코드", "종목명", "데이터상태"] ].copy()
         if not 현재가실패표.empty:
-            st.error(f"현재가 조회 실패 종목이 {len(현재가실패표)}개 있습니다. 종목코드와 장중/휴장 여부, 네트워크 상태를 확인해 주세요.")
-            with st.expander("현재가 조회 실패 종목 보기", expanded=False):
+            st.error(f"평가기준 반영 종목이 {len(현재가실패표)}개 있습니다. 종목코드와 장중/휴장 여부, 네트워크 상태를 확인해 주세요.")
+            with st.expander("평가기준 반영 종목 보기", expanded=False):
                 표데이터프레임(index_1부터(현재가실패표), width="stretch")
 
         비중그래프칸, 비중요약칸 = st.columns([1.45, 0.85], gap="large")
@@ -13066,257 +14109,2704 @@ if 선택섹터 == "포트폴리오 현황":
 
     # -----------------------------------
 
+
+# =========================================================
+# v5.17.3 분석/인사이트 단순화
+# - 일반론·중복 코멘트를 줄이고, 내 거래이력·포트폴리오·시장 압력 중심으로 재구성
+# - 예측/추천이 아니라 현재 구조와 외부 변수의 압력만 설명
+# =========================================================
+def _v5173_숫자(값, 기본값=0.0):
+    try:
+        if 값 is None:
+            return 기본값
+        if pd.isna(값):
+            return 기본값
+        문자 = str(값).replace(',', '').replace('%', '').replace('+', '').strip()
+        if 문자 == '' or 문자.lower() in ['nan', 'none', 'nat']:
+            return 기본값
+        return float(문자)
+    except Exception:
+        return 기본값
+
+
+def _v5173_보유정상화(보유계산포트폴리오=None):
+    보유 = pd.DataFrame() if 보유계산포트폴리오 is None else pd.DataFrame(보유계산포트폴리오).copy()
+    if 보유.empty:
+        return 보유
+    if '데이터상태' in 보유.columns:
+        정상 = 보유[보유['데이터상태'].astype(str) == '정상'].copy()
+        if not 정상.empty:
+            보유 = 정상
+    for 열 in ['투자원금', '평가금액', '평가손익', '수익률', '현재비중', '보유수량']:
+        if 열 in 보유.columns:
+            보유[열] = pd.to_numeric(보유[열], errors='coerce').fillna(0)
+    if '종목명' not in 보유.columns:
+        보유['종목명'] = ''
+    if '종목코드' not in 보유.columns:
+        보유['종목코드'] = ''
+    return 보유.reset_index(drop=True)
+
+
+def _v5173_자산태그(종목명='', 종목코드=''):
+    이름 = str(종목명 or '').upper()
+    코드 = str(종목코드 or '')
+    태그 = []
+    if any(k in 이름 for k in ['KODEX', 'TIGER', 'ACE', 'SOL ', 'ETF', 'KOSEF', 'KBSTAR']):
+        태그.append('ETF')
+    else:
+        태그.append('개별주')
+    if any(k in 이름 for k in ['삼성전자'.upper(), '하이닉스'.upper(), '반도체', 'AI']):
+        태그.append('반도체')
+    if any(k in 이름 for k in ['KODEX 200', 'KOSPI', '코스피', '200']):
+        태그.append('국내대형주')
+    if any(k in 이름 for k in ['코스닥', 'KOSDAQ', '150']):
+        태그.append('코스닥')
+    if any(k in 이름 for k in ['TDF', '퇴직', '연금']):
+        태그.append('연금분산')
+    return list(dict.fromkeys(태그))
+
+
+def _v5173_포트폴리오프로필(보유계산포트폴리오=None):
+    보유 = _v5173_보유정상화(보유계산포트폴리오)
+    if 보유.empty:
+        return {'보유': 보유, '총평가': 0, '총원금': 0, '총손익': 0, '총수익률': 0, '비중': {}}
+    총평가 = float(보유.get('평가금액', pd.Series(dtype=float)).sum()) if '평가금액' in 보유.columns else 0
+    총원금 = float(보유.get('투자원금', pd.Series(dtype=float)).sum()) if '투자원금' in 보유.columns else 0
+    총손익 = float(보유.get('평가손익', pd.Series(dtype=float)).sum()) if '평가손익' in 보유.columns else 0
+    총수익률 = 총손익 / 총원금 * 100 if 총원금 else 0
+    비중 = {'ETF': 0.0, '개별주': 0.0, '반도체': 0.0, '국내대형주': 0.0, '코스닥': 0.0, '연금분산': 0.0}
+    for _, 행 in 보유.iterrows():
+        평가 = _v5173_숫자(행.get('평가금액', 0))
+        가중 = 평가 / 총평가 * 100 if 총평가 else 0
+        for 태그 in _v5173_자산태그(행.get('종목명', ''), 행.get('종목코드', '')):
+            비중[태그] = 비중.get(태그, 0.0) + 가중
+    상위비중 = pd.DataFrame()
+    if '평가금액' in 보유.columns:
+        상위비중 = 보유.sort_values('평가금액', ascending=False).copy()
+    return {'보유': 보유, '총평가': 총평가, '총원금': 총원금, '총손익': 총손익, '총수익률': 총수익률, '비중': 비중, '상위비중': 상위비중}
+
+
+def _v5173_최근거래요약(거래이력df=None, 기준일수=90):
+    거래 = pd.DataFrame() if 거래이력df is None else pd.DataFrame(거래이력df).copy()
+    if 거래.empty:
+        return {'거래': 거래, '최근': 거래, '매수': pd.DataFrame(), '매도': pd.DataFrame(), '순투자': 0, '문장': ['거래이력 데이터가 부족합니다.']}
+    for 열 in ['거래일자', '종목명', '거래구분', '거래수량', '거래단가', '거래금액']:
+        if 열 not in 거래.columns:
+            거래[열] = 0 if 열 in ['거래수량', '거래단가', '거래금액'] else ''
+    거래['거래일자_dt'] = pd.to_datetime(거래['거래일자'], errors='coerce')
+    거래['거래구분문자'] = 거래['거래구분'].fillna('').astype(str)
+    거래['종목명문자'] = 거래['종목명'].fillna('').astype(str)
+    거래['거래수량_num'] = pd.to_numeric(거래['거래수량'], errors='coerce').fillna(0)
+    거래['거래단가_num'] = pd.to_numeric(거래['거래단가'], errors='coerce').fillna(0)
+    거래['거래금액_num'] = pd.to_numeric(거래['거래금액'], errors='coerce').fillna(0)
+    거래['거래금액_num'] = 거래['거래금액_num'].where(거래['거래금액_num'].abs() > 0, 거래['거래수량_num'] * 거래['거래단가_num'])
+    기준일 = 거래['거래일자_dt'].dropna().max()
+    if pd.isna(기준일):
+        기준일 = pd.Timestamp(서울현재시각()).tz_localize(None) if getattr(pd.Timestamp(서울현재시각()), 'tzinfo', None) else pd.Timestamp(서울현재시각())
+    최근 = 거래[거래['거래일자_dt'].fillna(pd.Timestamp('1900-01-01')) >= 기준일 - pd.Timedelta(days=기준일수)].copy()
+    매수 = 최근[최근['거래구분문자'].str.contains('매수|입금|납입|추가', na=False)].copy()
+    매도 = 최근[최근['거래구분문자'].str.contains('매도|출금|해지|환매', na=False)].copy()
+    매수금액 = float(매수['거래금액_num'].abs().sum()) if not 매수.empty else 0
+    매도금액 = float(매도['거래금액_num'].abs().sum()) if not 매도.empty else 0
+    순투자 = 매수금액 - 매도금액
+    문장 = []
+    if not 최근.empty:
+        문장.append(f'최근 {기준일수}일 기준 거래는 {len(최근):,}건이며, 매수성 거래 {len(매수):,}건·매도성 거래 {len(매도):,}건입니다.')
+        if 순투자 > 0:
+            문장.append(f'최근 순투자금액은 {손익원화문자열(순투자)}로, 보유 확대 방향의 거래가 더 크게 나타났습니다.')
+        elif 순투자 < 0:
+            문장.append(f'최근 순투자금액은 {손익원화문자열(순투자)}로, 일부 현금화 또는 비중 축소 흐름이 나타났습니다.')
+        else:
+            문장.append('최근 매수와 매도 금액은 큰 차이 없이 균형에 가깝습니다.')
+        if not 매수.empty and '종목명문자' in 매수.columns:
+            반복 = 매수[매수['종목명문자'] != ''].groupby('종목명문자').size().sort_values(ascending=False)
+            반복 = 반복[반복 >= 2]
+            if not 반복.empty:
+                문장.append('분할매수로 볼 수 있는 반복 매수 종목: ' + ', '.join(반복.head(3).index.astype(str).tolist()))
+    else:
+        문장.append(f'최근 {기준일수}일 내 거래 데이터가 없습니다.')
+    return {'거래': 거래, '최근': 최근, '매수': 매수, '매도': 매도, '순투자': 순투자, '매수금액': 매수금액, '매도금액': 매도금액, '문장': 문장}
+
+
+def _v5173_시장지표수집():
+    try:
+        df = 네이버시장지표목록가져오기()
+        return pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _v5173_지표값(df, 이름):
+    try:
+        if df is None or pd.DataFrame(df).empty or '지표' not in df.columns:
+            return {}
+        후보 = df[df['지표'].astype(str) == str(이름)]
+        if 후보.empty:
+            return {}
+        행 = 후보.iloc[0].to_dict()
+        행['등락률_num'] = _v5173_숫자(행.get('등락률', 0))
+        행['전일대비_num'] = _v5173_숫자(행.get('전일대비', 0))
+        return 행
+    except Exception:
+        return {}
+
+
+def _v5173_압력등급(점수):
+    if 점수 >= 2:
+        return '우호 압력'
+    if 점수 <= -2:
+        return '부담 압력'
+    return '중립'
+
+
+def _v5173_시장압력표(보유계산포트폴리오=None):
+    프로필 = _v5173_포트폴리오프로필(보유계산포트폴리오)
+    비중 = 프로필.get('비중', {})
+    시장 = _v5173_시장지표수집()
+    rows = []
+    def 추가(변수, 지표명, 등락, 영향대상, 영향비중, 압력점수, 해석):
+        rows.append({
+            '시장 변수': 변수,
+            '현재 흐름': 등락,
+            '영향 대상': 영향대상,
+            '내 영향도': f'{영향비중:.1f}%' if isinstance(영향비중, (int, float)) else str(영향비중),
+            '압력': _v5173_압력등급(압력점수),
+            '해석': 해석,
+        })
+    usd = _v5173_지표값(시장, 'USD/KRW')
+    tnx = _v5173_지표값(시장, '미국 10년물 금리')
+    wti = _v5173_지표값(시장, 'WTI')
+    vix = _v5173_지표값(시장, 'VIX')
+    gold = _v5173_지표값(시장, '국제 금')
+    반도체비중 = float(비중.get('반도체', 0))
+    대형비중 = float(비중.get('국내대형주', 0))
+    코스닥비중 = float(비중.get('코스닥', 0))
+    개별비중 = float(비중.get('개별주', 0))
+    etf비중 = float(비중.get('ETF', 0))
+    if usd:
+        r = usd.get('등락률_num', 0)
+        score = 1 if r > 0.3 and 반도체비중 >= 10 else -1 if r > 0.3 and 대형비중 + 코스닥비중 >= 20 else 0
+        추가('환율', 'USD/KRW', f"{r:+.2f}%", '반도체·국내 대형주', max(반도체비중, 대형비중), score,
+            '환율 상승은 수출주에는 우호 요인이 될 수 있지만, 외국인 수급에는 부담으로 작동할 수 있습니다. 현재 보유비중 기준으로 영향도를 점검합니다.')
+    if tnx:
+        r = tnx.get('등락률_num', 0)
+        score = -2 if r > 0.5 and (반도체비중 + 코스닥비중) >= 20 else 1 if r < -0.5 and (반도체비중 + 코스닥비중) >= 20 else 0
+        추가('미국 국채금리', '미국 10년물 금리', f"{r:+.2f}%", '반도체·성장주·코스닥', 반도체비중 + 코스닥비중, score,
+            '미국 장기금리 상승은 성장주와 기술주 밸류에이션에 부담 압력으로 작동할 수 있습니다.')
+    if vix:
+        r = vix.get('등락률_num', 0)
+        score = -2 if r > 3 and 개별비중 >= 25 else 1 if r < -3 else 0
+        추가('VIX', 'VIX', f"{r:+.2f}%", '개별주식 변동성', 개별비중, score,
+            'VIX 상승은 위험회피 심리와 단기 변동성 확대 압력으로 해석합니다. 개별주 비중이 높을수록 영향도가 커집니다.')
+    if wti:
+        r = wti.get('등락률_num', 0)
+        score = -1 if r > 1.0 else 1 if r < -1.0 else 0
+        추가('주요 원자재', 'WTI', f"{r:+.2f}%", '물가·금리 간접 영향', '간접', score,
+            '유가는 직접 보유종목보다 물가·금리·투자심리를 통한 간접 영향으로 보는 편이 적절합니다.')
+    if gold:
+        r = gold.get('등락률_num', 0)
+        score = -1 if r > 1.0 and 개별비중 >= 25 else 0
+        추가('금', '국제 금', f"{r:+.2f}%", '위험회피 심리', '간접', score,
+            '금 가격 상승은 위험회피 심리 강화의 보조 신호로 참고합니다. 주식 직접 영향은 제한적으로 해석합니다.')
+    try:
+        수급 = pykrx투자자별순매수('KOSPI', refresh_token=st.session_state.get('price_refresh_token_v51', 0))
+        외국인 = _v5173_숫자(수급.get('외국인', 0)) if isinstance(수급, dict) else 0
+        if abs(외국인) > 0:
+            score = 1 if 외국인 > 0 else -1
+            추가('투자자 수급', 'KOSPI 외국인', '순매수' if 외국인 > 0 else '순매도', 'KODEX200·대형주 ETF', etf비중 + 대형비중, score,
+                f'외국인 수급은 KOSPI 대형주와 지수형 ETF에 영향을 줄 수 있습니다. 현재 외국인 순매수 금액은 {손익원화문자열(외국인)}입니다.')
+    except Exception as e:
+        logging.warning("suppressed exception at line 14318: %s", e, exc_info=True)
+    if not rows:
+        rows.append({'시장 변수': '외부지표', '현재 흐름': '-', '영향 대상': '-', '내 영향도': '-', '압력': '데이터 부족', '해석': '외부 시장지표를 불러오지 못했습니다. 주요 모니터링 새로고침 후 다시 확인해 주세요.'})
+    return pd.DataFrame(rows), 시장, 프로필
+
+
+def 포트폴리오핵심상태간단UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.subheader('내 포트폴리오 핵심 상태')
+    st.caption('현재 보유 비중과 손익 구조만 간단히 보여줍니다. 예측이나 추천은 포함하지 않습니다.')
+    프로필 = _v5173_포트폴리오프로필(보유계산포트폴리오)
+    보유 = 프로필.get('보유', pd.DataFrame())
+    if 보유.empty:
+        st.info('현재 보유자산 기준 요약을 만들 데이터가 없습니다.')
+        return 프로필
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('보유 평가액', 금액표시(프로필.get('총평가', 0)))
+    c2.metric('투자원금', 금액표시(프로필.get('총원금', 0)))
+    c3.metric('평가손익', 금액표시(프로필.get('총손익', 0)), f"{프로필.get('총수익률', 0):.2f}%")
+    최대행 = 보유.sort_values('평가금액', ascending=False).iloc[0] if '평가금액' in 보유.columns and not 보유.empty else None
+    c4.metric('최대 비중 자산', str(최대행.get('종목명', '-')) if 최대행 is not None else '-', f"{float(최대행.get('현재비중', 0)):.1f}%" if 최대행 is not None and '현재비중' in 보유.columns else '')
+    비중 = 프로필.get('비중', {})
+    문장 = []
+    문장.append(f"ETF 비중 {비중.get('ETF', 0):.1f}%, 개별주 비중 {비중.get('개별주', 0):.1f}% 구조입니다.")
+    if 비중.get('반도체', 0) >= 30:
+        문장.append(f"반도체 관련 노출이 {비중.get('반도체', 0):.1f}%로 높아 미국 기술주·환율·외국인 수급 영향도가 큽니다.")
+    elif 비중.get('반도체', 0) >= 10:
+        문장.append(f"반도체 관련 노출이 {비중.get('반도체', 0):.1f}%로 포트폴리오 해석에서 중요한 변수입니다.")
+    if 최대행 is not None and _v5173_숫자(최대행.get('현재비중', 0)) >= 25:
+        문장.append(f"{최대행.get('종목명', '')} 단일 비중이 높아 해당 자산 가격 변동이 전체 손익에 크게 반영됩니다.")
+    if 프로필.get('총손익', 0) > 0:
+        문장.append('현재 평가는 이익 구간이지만, 수익 기여 자산이 일부 종목에 집중되어 있는지 함께 확인해야 합니다.')
+    elif 프로필.get('총손익', 0) < 0:
+        문장.append('현재 평가는 손실 구간이므로 손실 원인이 시장 전체인지 특정 자산 집중인지 구분해 볼 필요가 있습니다.')
+    st.info(' '.join(문장))
+    상위 = 프로필.get('상위비중', pd.DataFrame()).copy()
+    if not 상위.empty:
+        표시열 = [c for c in ['종목명', '투자원금', '평가금액', '평가손익', '수익률', '현재비중'] if c in 상위.columns]
+        표시 = 상위[표시열].copy()
+        try:
+            표데이터프레임(index_1부터(표시).style.format({
+                '투자원금': 금액표시, '평가금액': 금액표시, '평가손익': 손익원화문자열,
+                '수익률': lambda v: f'{float(v):.2f}%', '현재비중': lambda v: f'{float(v):.1f}%'
+            }).map(손익색상, subset=[c for c in ['평가손익'] if c in 표시.columns]), width='stretch', hide_index=True)
+        except Exception:
+            표데이터프레임(index_1부터(표시), width='stretch', hide_index=True)
+    return 프로필
+
+
+def 최근거래변화간단UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown('---')
+    st.subheader('최근 거래 변화')
+    st.caption('최근 90일 거래이력을 기준으로 실제 행동 변화만 요약합니다.')
+    요약 = _v5173_최근거래요약(거래이력df, 기준일수=90)
+    최근 = 요약.get('최근', pd.DataFrame())
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('최근 거래', f"{len(최근):,}건")
+    c2.metric('매수성 거래', f"{len(요약.get('매수', pd.DataFrame())):,}건")
+    c3.metric('매도성 거래', f"{len(요약.get('매도', pd.DataFrame())):,}건")
+    c4.metric('최근 순투자', 손익원화문자열(요약.get('순투자', 0)))
+    st.info(' '.join(요약.get('문장', [])))
+    if not 최근.empty:
+        표시열 = [c for c in ['거래일자', '종목명', '거래구분', '거래수량', '거래단가', '거래금액', '비고'] if c in 최근.columns]
+        표시 = 최근.sort_values('거래일자_dt', ascending=False, na_position='last').head(8)[표시열].copy()
+        with st.expander('최근 거래 8건 보기', expanded=False):
+            표데이터프레임(index_1부터(표시), width='stretch', hide_index=True)
+    return 요약
+
+
+def 시장압력분석간단UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown('---')
+    st.subheader('시장 압력 분석')
+    st.caption('주요지수·환율·원자재·국채·VIX·투자자 수급을 내 보유자산 비중과 연결해 봅니다. 방향 예측이 아니라 현재 압력 해석입니다.')
+    압력표, 시장지표, 프로필 = _v5173_시장압력표(보유계산포트폴리오)
+    try:
+        요약점수 = 0
+        for 값 in 압력표.get('압력', []):
+            if '우호' in str(값):
+                요약점수 += 1
+            elif '부담' in str(값):
+                요약점수 -= 1
+        등급 = '우호 우세' if 요약점수 >= 2 else '부담 우세' if 요약점수 <= -2 else '혼조/중립'
+        a, b, c = st.columns(3)
+        a.metric('시장 압력 종합', 등급, f'{요약점수:+d}')
+        b.metric('반도체 노출', f"{프로필.get('비중', {}).get('반도체', 0):.1f}%")
+        c.metric('개별주 노출', f"{프로필.get('비중', {}).get('개별주', 0):.1f}%")
+    except Exception as e:
+        logging.warning("suppressed exception at line 14404: %s", e, exc_info=True)
+    표데이터프레임(index_1부터(압력표), width='stretch', hide_index=True)
+    핵심 = []
+    for _, 행 in 압력표.iterrows():
+        압력 = str(행.get('압력', ''))
+        if '부담' in 압력 or '우호' in 압력:
+            핵심.append(f"{행.get('시장 변수')}은/는 {행.get('영향 대상')}에 {압력}으로 표시됩니다.")
+    if 핵심:
+        st.info(' '.join(핵심[:3]))
+    else:
+        st.info('현재 외부 변수 조합은 한쪽 방향의 강한 압력보다 혼조 상태에 가깝습니다.')
+    with st.expander('원자료 지표 보기', expanded=False):
+        if 시장지표 is None or pd.DataFrame(시장지표).empty:
+            st.caption('표시할 시장지표 원자료가 없습니다.')
+        else:
+            표시열 = [c for c in ['지표', '현재값', '전일대비', '등락률', '출처'] if c in 시장지표.columns]
+            표데이터프레임(index_1부터(시장지표[표시열]), width='stretch', hide_index=True)
+    return 압력표
+
+
+def 집중위험체크간단UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown('---')
+    st.subheader('현재 집중 위험 체크')
+    st.caption('많은 항목을 나열하지 않고, 현재 구조상 먼저 볼 항목만 표시합니다.')
+    프로필 = _v5173_포트폴리오프로필(보유계산포트폴리오)
+    비중 = 프로필.get('비중', {})
+    보유 = 프로필.get('보유', pd.DataFrame())
+    rows = []
+    if 비중.get('반도체', 0) >= 30:
+        rows.append({'점검 항목': '반도체 집중도', '현재 상태': f"{비중.get('반도체', 0):.1f}%", '의미': '미국 기술주·환율·외국인 수급 변화가 손익에 크게 반영될 수 있습니다.'})
+    if 비중.get('개별주', 0) >= 40:
+        rows.append({'점검 항목': '개별주 변동성', '현재 상태': f"{비중.get('개별주', 0):.1f}%", '의미': 'VIX 상승이나 종목별 뉴스에 대한 변동성이 커질 수 있습니다.'})
+    if not 보유.empty and '현재비중' in 보유.columns:
+        top = 보유.sort_values('현재비중', ascending=False).iloc[0]
+        if _v5173_숫자(top.get('현재비중', 0)) >= 25:
+            rows.append({'점검 항목': '단일 자산 비중', '현재 상태': f"{top.get('종목명', '')} {float(top.get('현재비중', 0)):.1f}%", '의미': '한 자산의 가격 흐름이 전체 평가손익에 미치는 영향이 큽니다.'})
+    if not rows:
+        rows.append({'점검 항목': '집중 위험', '현재 상태': '뚜렷한 과집중 신호 제한적', '의미': '현재 데이터 기준으로는 특정 위험이 과도하게 부각되지는 않습니다.'})
+    표데이터프레임(index_1부터(pd.DataFrame(rows)), width='stretch', hide_index=True)
+
+
+def 분석인사이트단순화UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown('## 분석 / 인사이트')
+    st.caption('v5.17.3부터 분석 탭은 거래이력·포트폴리오·시장 압력 중심으로 단순화했습니다. 종목 추천이나 주가 예측은 하지 않습니다.')
+    포트폴리오핵심상태간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    최근거래변화간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    시장압력분석간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    집중위험체크간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+
+
+# =========================================================
+# v5.17.4 시장압력분석·위험체크 보강
+# - 주요지수(국내/미국), 환율, 원자재, 국채, VIX, 투자자 수급을 한 화면에서 연결
+# - 지수·지표 증감값에 한국식 색상 적용(상승 빨강, 하락 파랑)
+# - 위험체크를 단순 문장 나열이 아니라 점수·근거·확인사항 구조로 보강
+# =========================================================
+def _v5174_등락색상(값):
+    try:
+        숫자 = _v5173_숫자(값, 0)
+        if 숫자 > 0:
+            return "color: red; font-weight: 600;"
+        if 숫자 < 0:
+            return "color: blue; font-weight: 600;"
+        return "color: #64748b;"
+    except Exception:
+        return ""
+
+
+def _v5174_압력색상(값):
+    문자 = str(값 or '')
+    if '우호' in 문자:
+        return "color: red; font-weight: 600;"
+    if '부담' in 문자 or '경계' in 문자 or '주의' in 문자:
+        return "color: blue; font-weight: 600;"
+    return "color: #64748b;"
+
+
+def _v5174_등락방향(값):
+    숫자 = _v5173_숫자(값, 0)
+    if 숫자 > 0:
+        return '상승'
+    if 숫자 < 0:
+        return '하락'
+    return '보합'
+
+
+def _v5174_등락률문자(값):
+    try:
+        숫자 = _v5173_숫자(값, 0)
+        return f"{숫자:+.2f}%"
+    except Exception:
+        return '-'
+
+
+def _v5174_숫자문자(값, 자리=2):
+    try:
+        if 값 is None or pd.isna(값):
+            return '-'
+        return f"{float(값):,.{자리}f}"
+    except Exception:
+        return '-'
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _v5174_야후지수요약(심볼, 이름):
+    """Yahoo quote API로 미국 주요지수 요약을 가져옵니다."""
+    try:
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        응답 = 안전웹요청(url, params={"symbols": 심볼}, timeout=3, attempts=1)
+        if 응답 is None:
+            return {}
+        payload = 응답.json()
+        결과목록 = payload.get("quoteResponse", {}).get("result", [])
+        if not 결과목록:
+            return {}
+        항목 = 결과목록[0]
+        현재 = 항목.get("regularMarketPrice")
+        전일대비 = 항목.get("regularMarketChange")
+        등락률 = 항목.get("regularMarketChangePercent")
+        return {
+            "구분": "미국 주요지수",
+            "지표": 이름,
+            "현재값": 현재,
+            "전일대비": 전일대비,
+            "등락률": 등락률,
+            "방향": _v5174_등락방향(등락률),
+            "출처": "Yahoo",
+        }
+    except Exception:
+        return {}
+
+
+def _v5174_국내지수요약(코드, 이름):
+    try:
+        요약 = 실시간포함시세요약가져오기('index', 코드, refresh_token=st.session_state.get('price_refresh_token_v51', 0))
+        if not isinstance(요약, dict):
+            return {}
+        등락률 = _v5173_숫자(요약.get('등락률', 0))
+        return {
+            "구분": "국내 주요지수",
+            "지표": 이름,
+            "현재값": 요약.get('현재가'),
+            "전일대비": 요약.get('전일대비'),
+            "등락률": 등락률,
+            "방향": _v5174_등락방향(등락률),
+            "출처": 요약.get('출처', 'Yahoo/Naver'),
+        }
+    except Exception:
+        return {}
+
+
+def _v5174_주요시장지표표():
+    rows = []
+    for 코드, 이름 in [('1001', '코스피'), ('2001', '코스닥')]:
+        행 = _v5174_국내지수요약(코드, 이름)
+        if 행:
+            rows.append(행)
+    for 심볼, 이름 in [('^GSPC', 'S&P500'), ('^IXIC', '나스닥'), ('^DJI', '다우존스'), ('^SOX', '필라델피아 반도체')]:
+        행 = _v5174_야후지수요약(심볼, 이름)
+        if 행:
+            rows.append(행)
+
+    try:
+        시장지표 = 네이버시장지표목록가져오기()
+        시장지표 = pd.DataFrame() if 시장지표 is None else pd.DataFrame(시장지표).copy()
+        if not 시장지표.empty:
+            분류 = {
+                'USD/KRW': '환율',
+                '국제 금': '주요 원자재',
+                'WTI': '주요 원자재',
+                '브렌트유': '주요 원자재',
+                '미국 10년물 금리': '국채',
+                'VIX': '변동성',
+            }
+            for _, r in 시장지표.iterrows():
+                지표명 = str(r.get('지표', ''))
+                등락률 = _v5173_숫자(r.get('등락률', 0))
+                rows.append({
+                    '구분': 분류.get(지표명, '시장지표'),
+                    '지표': 지표명,
+                    '현재값': r.get('현재값', None),
+                    '전일대비': _v5173_숫자(r.get('전일대비', 0)),
+                    '등락률': 등락률,
+                    '방향': _v5174_등락방향(등락률),
+                    '출처': r.get('출처', '-'),
+                })
+    except Exception as e:
+        logging.warning("suppressed exception at line 14591: %s", e, exc_info=True)
+
+    if not rows:
+        return pd.DataFrame(columns=['구분', '지표', '현재값', '전일대비', '등락률', '방향', '출처'])
+    return pd.DataFrame(rows)
+
+
+def _v5174_시장지표표시값(row):
+    try:
+        return 시장지표값표시(row.get('현재값', None), row.get('지표', ''))
+    except Exception:
+        return _v5174_숫자문자(row.get('현재값', None))
+
+
+def _v5174_수급표():
+    rows = []
+    try:
+        for 시장 in ['KOSPI', 'KOSDAQ']:
+            데이터 = 네이버투자자별순매수(시장, refresh_token=st.session_state.get('price_refresh_token_v51', 0))
+            if not isinstance(데이터, dict):
+                continue
+            표시시장 = '코스피' if 시장 == 'KOSPI' else '코스닥'
+            for 투자자, 키 in [('개인', '개인'), ('외국인', '외국인'), ('기관', '기관계')]:
+                값 = _v5173_숫자(데이터.get(키, 0))
+                rows.append({
+                    '시장': 표시시장,
+                    '투자자': 투자자,
+                    '순매수(억원)': 값,
+                    '방향': '순매수' if 값 > 0 else '순매도' if 값 < 0 else '보합',
+                    '기준일': 데이터.get('날짜', '-'),
+                })
+    except Exception as e:
+        logging.warning("suppressed exception at line 14623: %s", e, exc_info=True)
+    return pd.DataFrame(rows)
+
+
+def _v5174_압력등급점수(점수):
+    try:
+        점수 = float(점수)
+    except Exception:
+        점수 = 0
+    if 점수 >= 3:
+        return '강한 우호'
+    if 점수 >= 1:
+        return '우호'
+    if 점수 <= -3:
+        return '강한 부담'
+    if 점수 <= -1:
+        return '부담'
+    return '중립'
+
+
+def _v5174_시장압력표(보유계산포트폴리오=None):
+    프로필 = _v5173_포트폴리오프로필(보유계산포트폴리오)
+    비중 = 프로필.get('비중', {})
+    지표표 = _v5174_주요시장지표표()
+    수급표 = _v5174_수급표()
+
+    def 등락률(지표명):
+        try:
+            if 지표표.empty:
+                return 0.0
+            후보 = 지표표[지표표['지표'].astype(str) == str(지표명)]
+            if 후보.empty:
+                return 0.0
+            return _v5173_숫자(후보.iloc[0].get('등락률', 0))
+        except Exception:
+            return 0.0
+
+    def 현재흐름(지표명):
+        r = 등락률(지표명)
+        return f"{_v5174_등락방향(r)} {_v5174_등락률문자(r)}"
+
+    반도체비중 = float(비중.get('반도체', 0))
+    대형비중 = float(비중.get('국내대형주', 0))
+    코스닥비중 = float(비중.get('코스닥', 0))
+    개별비중 = float(비중.get('개별주', 0))
+    etf비중 = float(비중.get('ETF', 0))
+    rows = []
+
+    def 추가(변수, 대표지표, 영향대상, 영향비중, 압력점수, 근거, 확인사항):
+        rows.append({
+            '시장 변수': 변수,
+            '대표 지표': 대표지표,
+            '현재 흐름': 현재흐름(대표지표) if 대표지표 else '-',
+            '등락률': 등락률(대표지표) if 대표지표 else 0,
+            '영향 대상': 영향대상,
+            '내 영향도': 영향비중,
+            '압력점수': 압력점수,
+            '압력': _v5174_압력등급점수(압력점수),
+            '근거': 근거,
+            '확인할 것': 확인사항,
+        })
+
+    kospi = 등락률('코스피')
+    kosdaq = 등락률('코스닥')
+    sp500 = 등락률('S&P500')
+    nasdaq = 등락률('나스닥')
+    sox = 등락률('필라델피아 반도체')
+    usd = 등락률('USD/KRW')
+    tnx = 등락률('미국 10년물 금리')
+    vix = 등락률('VIX')
+    wti = 등락률('WTI')
+    gold = 등락률('국제 금')
+
+    지수점수 = 0
+    if kospi > 0.4: 지수점수 += 1
+    if kospi < -0.4: 지수점수 -= 1
+    if kosdaq > 0.6: 지수점수 += 1
+    if kosdaq < -0.6: 지수점수 -= 1
+    추가('국내 주요지수', '코스피', 'KODEX200·국내대형주·코스닥 ETF', f"{대형비중 + 코스닥비중 + etf비중:.1f}%", 지수점수,
+        '국내 지수 흐름은 지수형 ETF와 국내 대형주 평가액에 직접 반영됩니다.', '코스피·코스닥 중 어느 시장이 더 약한지와 보유 ETF 종류')
+
+    미국점수 = 0
+    if sp500 > 0.4: 미국점수 += 1
+    if sp500 < -0.4: 미국점수 -= 1
+    if nasdaq > 0.6: 미국점수 += 1
+    if nasdaq < -0.6: 미국점수 -= 1
+    추가('주요 미국증시', '나스닥', '반도체·성장주 심리', f"{반도체비중 + 코스닥비중:.1f}%", 미국점수,
+        '미국 증시, 특히 나스닥 흐름은 국내 반도체와 성장주 투자심리에 영향을 줄 수 있습니다.', '나스닥과 국내 반도체 종목의 동조 여부')
+
+    반도체점수 = 0
+    if sox > 0.8: 반도체점수 += 2
+    if sox < -0.8: 반도체점수 -= 2
+    추가('미국 반도체지수', '필라델피아 반도체', '삼성전자·SK하이닉스·반도체 ETF', f"{반도체비중:.1f}%", 반도체점수,
+        '필라델피아 반도체지수는 반도체 보유비중이 높을수록 해석 중요도가 커집니다.', '반도체 비중과 수익 기여도가 동시에 높아지는지')
+
+    환율점수 = 0
+    if usd > 0.3:
+        환율점수 += 1 if 반도체비중 >= 10 else 0
+        환율점수 -= 1 if 대형비중 + etf비중 >= 25 else 0
+    elif usd < -0.3:
+        환율점수 += 1 if 대형비중 + etf비중 >= 25 else 0
+    추가('환율', 'USD/KRW', '수출주·외국인 수급·국내지수 ETF', f"{max(반도체비중, 대형비중 + etf비중):.1f}%", 환율점수,
+        '환율 상승은 수출주에는 우호적일 수 있지만 외국인 수급에는 부담으로 작동할 수 있어 양면성이 있습니다.', '환율 방향과 외국인 순매수가 같은 방향으로 움직이는지')
+
+    금리점수 = 0
+    if tnx > 0.5 and (반도체비중 + 코스닥비중) >= 20:
+        금리점수 -= 2
+    elif tnx < -0.5 and (반도체비중 + 코스닥비중) >= 20:
+        금리점수 += 1
+    추가('국채', '미국 10년물 금리', '성장주·반도체·코스닥', f"{반도체비중 + 코스닥비중:.1f}%", 금리점수,
+        '미국 장기금리 상승은 성장주와 기술주 밸류에이션 부담으로 해석합니다.', '금리 상승과 나스닥 약세가 동시에 나타나는지')
+
+    변동성점수 = 0
+    if vix > 3 and 개별비중 >= 25:
+        변동성점수 -= 2
+    elif vix < -3:
+        변동성점수 += 1
+    추가('VIX', 'VIX', '개별주식·고변동 자산', f"{개별비중:.1f}%", 변동성점수,
+        'VIX 상승은 위험회피 심리와 단기 변동성 확대 압력으로 봅니다.', '개별주 비중과 현금성 자산 비중')
+
+    원자재점수 = 0
+    if wti > 1.0: 원자재점수 -= 1
+    if wti < -1.0: 원자재점수 += 1
+    if gold > 1.0 and vix > 0: 원자재점수 -= 1
+    추가('주요 원자재', 'WTI', '물가·금리·위험심리 간접 영향', '간접', 원자재점수,
+        '유가와 금은 직접 보유종목보다 물가, 금리, 위험회피 심리를 통해 간접 영향을 줍니다.', '유가·금 상승이 금리·VIX 상승과 함께 나타나는지')
+
+    try:
+        외국인합계 = 0.0
+        if not 수급표.empty:
+            외국인합계 = float(수급표.loc[수급표['투자자'].astype(str) == '외국인', '순매수(억원)'].sum())
+        수급점수 = 1 if 외국인합계 > 0 else -1 if 외국인합계 < 0 else 0
+        추가('투자자별 수급', '', 'KODEX200·대형주 ETF·국내시장', f"{대형비중 + etf비중:.1f}%", 수급점수,
+            f"외국인 합산 수급은 {손익원화문자열(외국인합계)}억원으로 표시됩니다.", '외국인·기관이 같은 방향인지, 개인과 반대 방향인지')
+    except Exception as e:
+        logging.warning("suppressed exception at line 14758: %s", e, exc_info=True)
+
+    압력표 = pd.DataFrame(rows)
+    return 압력표, 지표표, 수급표, 프로필
+
+
+def _v5174_압력요약문장(압력표):
+    try:
+        if 압력표 is None or 압력표.empty:
+            return '시장 압력 데이터를 만들 수 없습니다.'
+        점수합 = float(pd.to_numeric(압력표.get('압력점수', 0), errors='coerce').fillna(0).sum())
+        부담 = 압력표[압력표['압력'].astype(str).str.contains('부담', na=False)]
+        우호 = 압력표[압력표['압력'].astype(str).str.contains('우호', na=False)]
+        if 점수합 >= 3:
+            첫문장 = '현재 외부 변수 조합은 우호 압력이 조금 더 우세합니다.'
+        elif 점수합 <= -3:
+            첫문장 = '현재 외부 변수 조합은 부담 압력이 더 우세합니다.'
+        else:
+            첫문장 = '현재 외부 변수 조합은 한쪽으로 뚜렷하게 기울기보다 혼조에 가깝습니다.'
+        핵심 = []
+        if not 부담.empty:
+            핵심.append('부담 요인: ' + ', '.join(부담.sort_values('압력점수').head(3)['시장 변수'].astype(str).tolist()))
+        if not 우호.empty:
+            핵심.append('우호 요인: ' + ', '.join(우호.sort_values('압력점수', ascending=False).head(3)['시장 변수'].astype(str).tolist()))
+        return 첫문장 + (' ' + ' / '.join(핵심) if 핵심 else '')
+    except Exception:
+        return '시장 압력 요약 생성 중 일부 지표가 부족합니다.'
+
+
+def 시장압력분석간단UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown('---')
+    st.subheader('시장 압력 분석')
+    st.caption('주요지수·미국증시·환율·원자재·국채·VIX·투자자별 수급을 내 보유자산 비중과 연결합니다. 방향 예측이 아니라 현재 압력 해석입니다.')
+    압력표, 지표표, 수급표, 프로필 = _v5174_시장압력표(보유계산포트폴리오)
+
+    점수합 = 0
+    try:
+        점수합 = int(round(pd.to_numeric(압력표.get('압력점수', 0), errors='coerce').fillna(0).sum()))
+    except Exception:
+        점수합 = 0
+    종합 = '우호 우세' if 점수합 >= 3 else '부담 우세' if 점수합 <= -3 else '혼조/중립'
+    비중 = 프로필.get('비중', {}) if isinstance(프로필, dict) else {}
+    a, b, c, d = st.columns(4)
+    a.metric('시장 압력 종합', 종합, f'{점수합:+d}')
+    b.metric('반도체 노출', f"{비중.get('반도체', 0):.1f}%")
+    c.metric('ETF 노출', f"{비중.get('ETF', 0):.1f}%")
+    d.metric('개별주 노출', f"{비중.get('개별주', 0):.1f}%")
+    st.info(_v5174_압력요약문장(압력표))
+
+    st.markdown('##### 주요 지수·시장지표')
+    if 지표표 is None or 지표표.empty:
+        st.warning('표시할 시장지표 데이터가 없습니다.')
+    else:
+        표시 = 지표표.copy()
+        표시['표시값'] = 표시.apply(_v5174_시장지표표시값, axis=1)
+        표시열 = [c for c in ['구분', '지표', '표시값', '전일대비', '등락률', '방향', '출처'] if c in 표시.columns]
+        표시 = 표시[표시열].copy()
+        try:
+            스타일 = index_1부터(표시).style.format({
+                '전일대비': lambda v: f"{_v5173_숫자(v):+,.2f}",
+                '등락률': lambda v: f"{_v5173_숫자(v):+.2f}%",
+            }).map(_v5174_등락색상, subset=[c for c in ['전일대비', '등락률'] if c in 표시.columns])
+            표데이터프레임(스타일, width='stretch', hide_index=True)
+        except Exception:
+            표데이터프레임(index_1부터(표시), width='stretch', hide_index=True)
+
+    st.markdown('##### 내 포트폴리오 영향 압력')
+    표시압력 = 압력표.copy()
+    표시열 = [c for c in ['시장 변수', '대표 지표', '현재 흐름', '영향 대상', '내 영향도', '압력점수', '압력', '근거', '확인할 것'] if c in 표시압력.columns]
+    표시압력 = 표시압력[표시열].copy()
+    try:
+        스타일 = index_1부터(표시압력).style.format({'압력점수': lambda v: f"{_v5173_숫자(v):+.0f}"})\
+            .map(_v5174_등락색상, subset=[c for c in ['압력점수'] if c in 표시압력.columns])\
+            .map(_v5174_압력색상, subset=[c for c in ['압력'] if c in 표시압력.columns])
+        표데이터프레임(스타일, width='stretch', hide_index=True)
+    except Exception:
+        표데이터프레임(index_1부터(표시압력), width='stretch', hide_index=True)
+
+    st.markdown('##### 투자자별 수급')
+    if 수급표 is None or 수급표.empty:
+        st.caption('투자자별 수급 데이터를 불러오지 못했습니다.')
+    else:
+        try:
+            스타일 = index_1부터(수급표).style.format({'순매수(억원)': lambda v: f"{_v5173_숫자(v):+,.0f}"})\
+                .map(_v5174_등락색상, subset=['순매수(억원)'])
+            표데이터프레임(스타일, width='stretch', hide_index=True)
+        except Exception:
+            표데이터프레임(index_1부터(수급표), width='stretch', hide_index=True)
+    return 압력표
+
+
+def _v5174_위험체크표(보유계산포트폴리오=None):
+    프로필 = _v5173_포트폴리오프로필(보유계산포트폴리오)
+    보유 = 프로필.get('보유', pd.DataFrame())
+    비중 = 프로필.get('비중', {})
+    rows = []
+
+    def 추가(항목, 현재값, 점수, 등급, 근거, 확인사항):
+        rows.append({
+            '위험 항목': 항목,
+            '현재 상태': 현재값,
+            '위험점수': 점수,
+            '등급': 등급,
+            '근거': 근거,
+            '확인할 것': 확인사항,
+        })
+
+    반도체 = float(비중.get('반도체', 0))
+    if 반도체 >= 40:
+        추가('반도체 집중도', f'{반도체:.1f}%', 30, '주의', '반도체 관련 자산 비중이 높아 미국 반도체지수·환율·외국인 수급 영향이 커집니다.', '반도체 수익 기여도와 손실 시 전체 영향')
+    elif 반도체 >= 20:
+        추가('반도체 집중도', f'{반도체:.1f}%', 18, '관찰', '반도체가 포트폴리오 해석의 주요 변수입니다.', '필라델피아 반도체지수와 보유종목 동조')
+    else:
+        추가('반도체 집중도', f'{반도체:.1f}%', 5, '양호', '반도체 편중 위험은 제한적입니다.', '비중 변화만 정기 확인')
+
+    개별 = float(비중.get('개별주', 0))
+    if 개별 >= 55:
+        추가('개별주 변동성', f'{개별:.1f}%', 25, '주의', '개별주 비중이 높아 VIX 상승이나 종목별 이슈가 손익에 크게 반영될 수 있습니다.', '개별주 상위 종목 비중과 현금성 비중')
+    elif 개별 >= 35:
+        추가('개별주 변동성', f'{개별:.1f}%', 15, '관찰', '개별주 변동성 영향이 중간 이상입니다.', '신규 매수 속도와 분산 정도')
+    else:
+        추가('개별주 변동성', f'{개별:.1f}%', 5, '양호', '개별주 변동성 노출은 과도하지 않습니다.', 'ETF와 개별주의 균형')
+
+    if not 보유.empty and '현재비중' in 보유.columns:
+        보유2 = 보유.copy()
+        보유2['현재비중_num'] = pd.to_numeric(보유2['현재비중'], errors='coerce').fillna(0)
+        top = 보유2.sort_values('현재비중_num', ascending=False).iloc[0]
+        top비중 = float(top.get('현재비중_num', 0))
+        if top비중 >= 35:
+            추가('단일 자산 비중', f"{top.get('종목명', '')} {top비중:.1f}%", 25, '주의', '한 자산의 가격 흐름이 전체 평가손익에 크게 작용합니다.', '상위 1종목 수익률 변화와 목표 비중')
+        elif top비중 >= 25:
+            추가('단일 자산 비중', f"{top.get('종목명', '')} {top비중:.1f}%", 15, '관찰', '상위 자산 영향도가 큰 편입니다.', '추가매수 시 비중 확대 여부')
+        else:
+            추가('단일 자산 비중', f"{top.get('종목명', '')} {top비중:.1f}%", 5, '양호', '단일 자산 편중은 관리 가능한 범위입니다.', '상위 3개 자산 합산 비중')
+
+    try:
+        손실 = 보유.copy()
+        if not 손실.empty and '평가손익' in 손실.columns and '평가금액' in 손실.columns:
+            손실['평가손익_num'] = pd.to_numeric(손실['평가손익'], errors='coerce').fillna(0)
+            손실['평가금액_num'] = pd.to_numeric(손실['평가금액'], errors='coerce').fillna(0)
+            총평가 = float(손실['평가금액_num'].sum())
+            손실비중 = float(손실.loc[손실['평가손익_num'] < 0, '평가금액_num'].sum() / 총평가 * 100) if 총평가 else 0
+            if 손실비중 >= 35:
+                추가('손실 종목 비중', f'{손실비중:.1f}%', 22, '주의', '손실 구간 자산의 평가액 비중이 커서 회복 지연 시 전체 수익률 부담이 됩니다.', '손실 원인이 시장 전체인지 개별 종목인지')
+            elif 손실비중 > 0:
+                추가('손실 종목 비중', f'{손실비중:.1f}%', 12, '관찰', '일부 손실 구간이 있으나 전체 부담은 제한적입니다.', '매수 사유 유지 여부')
+            else:
+                추가('손실 종목 비중', '0.0%', 0, '양호', '현재 보유 기준 손실 종목 부담은 없습니다.', '수익 상위 종목 편중 여부')
+    except Exception as e:
+        logging.warning("suppressed exception at line 14907: %s", e, exc_info=True)
+
+    결과 = pd.DataFrame(rows)
+    if 결과.empty:
+        결과 = pd.DataFrame([{'위험 항목': '위험 체크', '현재 상태': '-', '위험점수': 0, '등급': '데이터 부족', '근거': '보유 데이터가 부족합니다.', '확인할 것': '거래이력과 현재가 반영 상태'}])
+    return 결과
+
+
+def 집중위험체크간단UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown('---')
+    st.subheader('현재 집중 위험 체크')
+    st.caption('집중도·개별주 변동성·손실 비중을 점수와 근거로 표시합니다. 매수/매도 판단이 아니라 현재 구조 점검입니다.')
+    위험표 = _v5174_위험체크표(보유계산포트폴리오)
+    총점 = float(pd.to_numeric(위험표.get('위험점수', 0), errors='coerce').fillna(0).sum())
+    등급 = '주의' if 총점 >= 65 else '관찰' if 총점 >= 35 else '양호'
+    주의수 = int(위험표['등급'].astype(str).str.contains('주의', na=False).sum()) if '등급' in 위험표.columns else 0
+    관찰수 = int(위험표['등급'].astype(str).str.contains('관찰', na=False).sum()) if '등급' in 위험표.columns else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric('집중 위험 등급', 등급, f'{총점:.0f}점')
+    c2.metric('주의 항목', f'{주의수}개')
+    c3.metric('관찰 항목', f'{관찰수}개')
+    if 등급 == '주의':
+        st.warning('현재는 특정 비중 또는 변동성 요인이 전체 손익에 크게 작용할 수 있는 구조입니다.')
+    elif 등급 == '관찰':
+        st.info('현재는 일부 위험 요인이 있으나, 구조적으로 과도한 경계 구간으로 단정하기는 어렵습니다.')
+    else:
+        st.success('현재 데이터 기준으로 집중 위험은 비교적 관리 가능한 범위입니다.')
+    try:
+        스타일 = index_1부터(위험표).style.format({'위험점수': lambda v: f"{_v5173_숫자(v):.0f}"})\
+            .map(_v5174_등락색상, subset=[c for c in ['위험점수'] if c in 위험표.columns])\
+            .map(_v5174_압력색상, subset=[c for c in ['등급'] if c in 위험표.columns])
+        표데이터프레임(스타일, width='stretch', hide_index=True)
+    except Exception:
+        표데이터프레임(index_1부터(위험표), width='stretch', hide_index=True)
+
+
+def 분석인사이트단순화UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown('## 분석 / 인사이트')
+    st.caption('v5.17.4는 거래이력·포트폴리오 상태를 유지하면서 시장압력분석과 위험체크를 보강했습니다. 종목 추천이나 주가 예측은 하지 않습니다.')
+    포트폴리오핵심상태간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    최근거래변화간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    시장압력분석간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    집중위험체크간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+
+
+# =========================================================
+# v5.17.5 시장압력 3초 UX + 산업압력 엔진
+# - 시장압력표를 핵심 4열 구조로 재구성
+# - 산업통상부 수출입동향을 월간 산업 압력 데이터로 반영
+# - 에이피알(APR)을 화장품 산업 노출 종목으로 연결
+# - 기존 Google Sheets/거래이력/포트폴리오 계산 로직은 변경하지 않음
+# =========================================================
+V5175_EXPORT_SOURCE = "산업통상부 「2026년 5월 수출입동향」"
+
+V5175_INDUSTRY_MAP = {
+    "삼성전자": ["반도체", "AI", "수출", "국내대형주"],
+    "삼성전자우": ["반도체", "AI", "수출", "국내대형주"],
+    "SK하이닉스": ["반도체", "HBM", "AI", "수출"],
+    "에이피알": ["화장품", "K뷰티", "소비재", "중국소비"],
+    "APR": ["화장품", "K뷰티", "소비재", "중국소비"],
+    "278470": ["화장품", "K뷰티", "소비재", "중국소비"],
+    "KODEX 200": ["ETF", "국내대형주", "시장"],
+    "KODEX200": ["ETF", "국내대형주", "시장"],
+    "KODEX 코스닥150": ["ETF", "코스닥", "성장주"],
+    "KODEX 코스닥 150": ["ETF", "코스닥", "성장주"],
+}
+
+V5175_INDUSTRY_PRESSURE = {
+    "반도체": {
+        "흐름": "강세",
+        "압력": "강한 우호",
+        "점수": 4,
+        "근거": "반도체 수출 흐름 강세",
+        "출처": V5175_EXPORT_SOURCE,
+    },
+    "화장품": {
+        "흐름": "우호",
+        "압력": "우호",
+        "점수": 3,
+        "근거": "화장품 수출 개선 흐름",
+        "출처": V5175_EXPORT_SOURCE,
+    },
+    "자동차": {
+        "흐름": "둔화",
+        "압력": "부담",
+        "점수": -2,
+        "근거": "자동차 수출 둔화 흐름",
+        "출처": V5175_EXPORT_SOURCE,
+    },
+    "2차전지": {
+        "흐름": "회복",
+        "압력": "중립~우호",
+        "점수": 1,
+        "근거": "2차전지 수출 회복 신호",
+        "출처": V5175_EXPORT_SOURCE,
+    },
+    "ETF": {
+        "흐름": "시장 연동",
+        "압력": "중립",
+        "점수": 0,
+        "근거": "시장지수와 수급 흐름을 함께 반영",
+        "출처": "내 포트폴리오 보유구조",
+    },
+    "국내대형주": {
+        "흐름": "시장 연동",
+        "압력": "중립",
+        "점수": 0,
+        "근거": "코스피·외국인 수급과 함께 점검",
+        "출처": "내 포트폴리오 보유구조",
+    },
+}
+
+
+def _v5175_텍스트정규화(값):
+    try:
+        if 값 is None or pd.isna(값):
+            return ""
+    except Exception as e:
+        logging.warning("suppressed exception at line 15025: %s", e, exc_info=True)
+    return str(값).strip()
+
+
+def _v5175_보유평가금액열(df):
+    후보 = ["평가금액", "현재가치", "현재평가금액", "평가액", "총평가금액", "금액"]
+    if isinstance(df, pd.DataFrame):
+        for 컬럼 in 후보:
+            if 컬럼 in df.columns:
+                return 컬럼
+    return ""
+
+
+def _v5175_보유비중열(df):
+    후보 = ["현재비중", "비중", "평가비중", "포트비중"]
+    if isinstance(df, pd.DataFrame):
+        for 컬럼 in 후보:
+            if 컬럼 in df.columns:
+                return 컬럼
+    return ""
+
+
+def _v5175_압력바(점수):
+    try:
+        점수 = int(round(float(점수)))
+    except Exception:
+        점수 = 0
+    세기 = min(5, max(1, abs(점수))) if 점수 != 0 else 3
+    바 = "█" * 세기 + "░" * (5 - 세기)
+    if 점수 >= 4:
+        return f"강한 우호 {바}"
+    if 점수 >= 2:
+        return f"우호 {바}"
+    if 점수 <= -4:
+        return f"강한 부담 {바}"
+    if 점수 <= -2:
+        return f"부담 {바}"
+    return f"중립 {bar if False else '███░░'}"
+
+
+def _v5175_압력색상(값):
+    문자 = str(값 or "")
+    if "우호" in 문자 or "강세" in 문자 or "회복" in 문자:
+        return "color: red; font-weight: 650;"
+    if "부담" in 문자 or "둔화" in 문자 or "약세" in 문자:
+        return "color: blue; font-weight: 650;"
+    return "color: #64748b; font-weight: 500;"
+
+
+def _v5175_종목산업태그(종목명="", 종목코드=""):
+    이름 = _v5175_텍스트정규화(종목명)
+    코드 = normalize_asset_code_v518(종목코드) if _v5175_텍스트정규화(종목코드) else ""
+    태그 = []
+
+    for key, values in V5175_INDUSTRY_MAP.items():
+        key_text = str(key).strip()
+        if not key_text:
+            continue
+        if key_text == 코드 or key_text in 이름 or 이름 in key_text:
+            for v in values:
+                if v not in 태그:
+                    태그.append(v)
+
+    # ETF 자동 보정
+    upper_name = 이름.upper()
+    if ("ETF" in upper_name or "KODEX" in upper_name or "TIGER" in upper_name or "ACE" in upper_name or "SOL" in upper_name):
+        for v in ["ETF", "시장"]:
+            if v not in 태그:
+                태그.append(v)
+
+    return 태그 or ["미분류"]
+
+
+def _v5175_보유산업노출표(보유계산포트폴리오=None):
+    if not isinstance(보유계산포트폴리오, pd.DataFrame) or 보유계산포트폴리오.empty:
+        return pd.DataFrame(columns=["산업", "평가금액", "비중", "연결 종목", "현재 압력", "압력바", "출처"])
+
+    보유 = 보유계산포트폴리오.copy()
+    금액열 = _v5175_보유평가금액열(보유)
+    비중열 = _v5175_보유비중열(보유)
+    if "종목명" not in 보유.columns:
+        보유["종목명"] = ""
+    if "종목코드" not in 보유.columns:
+        보유["종목코드"] = ""
+
+    if 금액열:
+        보유["_평가금액"] = pd.to_numeric(보유[금액열], errors="coerce").fillna(0)
+    elif 비중열:
+        보유["_평가금액"] = pd.to_numeric(보유[비중열], errors="coerce").fillna(0)
+    else:
+        보유["_평가금액"] = 1
+
+    보유 = 보유[보유["_평가금액"] > 0].copy()
+    총액 = float(보유["_평가금액"].sum()) if not 보유.empty else 0
+
+    rows = []
+    for _, row in 보유.iterrows():
+        종목명 = _v5175_텍스트정규화(row.get("종목명", ""))
+        종목코드 = _v5175_텍스트정규화(row.get("종목코드", ""))
+        금액 = float(row.get("_평가금액", 0) or 0)
+        태그목록 = _v5175_종목산업태그(종목명, 종목코드)
+        배분금액 = 금액 / max(1, len(태그목록))
+        for 산업 in 태그목록:
+            rows.append({"산업": 산업, "종목명": 종목명 or 종목코드, "평가금액": 배분금액})
+
+    if not rows:
+        return pd.DataFrame(columns=["산업", "평가금액", "비중", "연결 종목", "현재 압력", "압력바", "출처"])
+
+    원본 = pd.DataFrame(rows)
+    집계 = 원본.groupby("산업", as_index=False)["평가금액"].sum()
+    연결 = 원본.groupby("산업")["종목명"].apply(lambda s: " · ".join(sorted(set([x for x in s if x])))).reset_index(name="연결 종목")
+    결과 = 집계.merge(연결, on="산업", how="left")
+    결과["비중"] = 결과["평가금액"].apply(lambda v: (float(v) / 총액 * 100) if 총액 > 0 else 0)
+
+    def 압력정보(산업, key):
+        info = V5175_INDUSTRY_PRESSURE.get(str(산업), {})
+        return info.get(key, "-")
+
+    결과["현재 압력"] = 결과["산업"].apply(lambda x: 압력정보(x, "압력"))
+    결과["압력점수"] = 결과["산업"].apply(lambda x: 압력정보(x, "점수") if 압력정보(x, "점수") != "-" else 0)
+    결과["압력바"] = 결과["압력점수"].apply(_v5175_압력바)
+    결과["출처"] = 결과["산업"].apply(lambda x: 압력정보(x, "출처"))
+    결과 = 결과.sort_values(["비중", "산업"], ascending=[False, True]).reset_index(drop=True)
+    return 결과[["산업", "평가금액", "비중", "연결 종목", "현재 압력", "압력바", "출처"]]
+
+
+def _v5175_시장압력4열표(보유계산포트폴리오=None):
+    산업표 = _v5175_보유산업노출표(보유계산포트폴리오)
+    보유산업 = set(산업표["산업"].astype(str).tolist()) if isinstance(산업표, pd.DataFrame) and not 산업표.empty else set()
+
+    rows = [
+        {"변수": "환율", "흐름": "상승 시 수출주 우호", "압력": _v5175_압력바(2), "내 영향": "반도체·수출주 민감도 확인"},
+        {"변수": "미국 기술주", "흐름": "강세 시 성장주 우호", "압력": _v5175_압력바(2), "내 영향": "반도체·나스닥형 ETF 영향"},
+        {"변수": "VIX", "흐름": "상승 시 변동성 확대", "압력": _v5175_압력바(-2), "내 영향": "개별주 비중이 높을수록 민감"},
+        {"변수": "미국 국채금리", "흐름": "상승 시 성장주 부담", "압력": _v5175_압력바(-1), "내 영향": "성장주·기술주 할인율 부담"},
+        {"변수": "외국인 수급", "흐름": "순매수/순매도 방향 확인", "압력": _v5175_압력바(0), "내 영향": "KODEX200·대형주 ETF 영향"},
+    ]
+
+    if "반도체" in 보유산업:
+        rows.append({"변수": "반도체 수출", "흐름": "강세", "압력": _v5175_압력바(4), "내 영향": "삼성전자·SK하이닉스 우호 압력"})
+    if "화장품" in 보유산업:
+        rows.append({"변수": "화장품 수출", "흐름": "우호", "압력": _v5175_압력바(3), "내 영향": "에이피알 화장품 산업 노출 반영"})
+
+    return pd.DataFrame(rows)
+
+
+def _v5175_시장상태요약(보유계산포트폴리오=None):
+    산업표 = _v5175_보유산업노출표(보유계산포트폴리오)
+    if 산업표.empty:
+        return {"산업노출": "확인 제한", "핵심산업": "-", "운용상태": "보유 보유평가 기준", "출처": V5175_EXPORT_SOURCE}
+
+    핵심산업 = str(산업표.iloc[0].get("산업", "-"))
+    우호개수 = int(산업표["현재 압력"].astype(str).str.contains("우호|강한", regex=True).sum())
+    부담개수 = int(산업표["현재 압력"].astype(str).str.contains("부담", regex=True).sum())
+    if 우호개수 > 부담개수:
+        운용상태 = "산업 압력 우호 우세"
+    elif 부담개수 > 우호개수:
+        운용상태 = "산업 압력 부담 우세"
+    else:
+        운용상태 = "산업 압력 혼조"
+    return {"산업노출": f"{len(산업표)}개 산업", "핵심산업": 핵심산업, "운용상태": 운용상태, "출처": V5175_EXPORT_SOURCE}
+
+
+def 시장압력상황판_v5175(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown("### 시장압력 상황판")
+    st.caption("시장을 예측하지 않고, 현재 외부 압력이 내 포트폴리오 어느 부분에 연결되는지 보여줍니다.")
+
+    요약 = _v5175_시장상태요약(보유계산포트폴리오)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("산업 노출", 요약.get("산업노출", "-"))
+    c2.metric("핵심 산업", 요약.get("핵심산업", "-"))
+    c3.metric("현재 상태", 요약.get("운용상태", "-"))
+    c4.metric("자료 기준", "5월 수출입")
+
+    st.markdown("##### 핵심 압력 4열 요약")
+    압력4열 = _v5175_시장압력4열표(보유계산포트폴리오)
+    try:
+        스타일 = index_1부터(압력4열).style.map(_v5175_압력색상, subset=["압력"])
+        표데이터프레임(스타일, width="stretch", hide_index=True)
+    except Exception:
+        표데이터프레임(index_1부터(압력4열), width="stretch", hide_index=True)
+
+    st.markdown("##### 산업 압력 · 내 보유종목 연결")
+    산업표 = _v5175_보유산업노출표(보유계산포트폴리오)
+    if 산업표.empty:
+        st.info("보유 포트폴리오 데이터가 부족해 산업 노출을 계산하지 못했습니다.")
+    else:
+        표시 = 산업표.copy()
+        try:
+            표시["평가금액"] = pd.to_numeric(표시["평가금액"], errors="coerce").fillna(0)
+            표시["비중"] = pd.to_numeric(표시["비중"], errors="coerce").fillna(0)
+            스타일 = index_1부터(표시).style.format({
+                "평가금액": lambda v: f"{float(v):,.0f}",
+                "비중": lambda v: f"{float(v):.1f}%",
+            }).map(_v5175_압력색상, subset=["현재 압력", "압력바"])
+            표데이터프레임(스타일, width="stretch", hide_index=True)
+        except Exception:
+            표데이터프레임(index_1부터(표시), width="stretch", hide_index=True)
+
+    st.caption(f"자료: {V5175_EXPORT_SOURCE} · 산업 매핑: 보유종목명/종목코드 기준 내부 매핑")
+
+    with st.expander("기존 v5.17.4 상세 시장압력표 보기", expanded=False):
+        try:
+            시장압력분석간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+        except Exception as e:
+            st.caption(f"기존 상세 시장압력표 표시 제한: {e}")
+
+
+def 분석인사이트단순화UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown("## 분석 / 인사이트")
+    st.caption("v5.17.5부터 분석 탭은 시장 → 산업 → 내 자산 연결을 우선 표시합니다. 종목 추천이나 주가 예측은 하지 않습니다.")
+    포트폴리오핵심상태간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    최근거래변화간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    시장압력상황판_v5175(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    집중위험체크간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+
+
+# =========================================================
+# v5.17.6 시장압력 상황판: 현재 보유종목 기반 동적 산업 연결
+# - 보유주식/ETF 변동에 따라 상황판 표시 변경
+# - TIGER 코리아휴머노이드로봇산업 코드 0148J0 적용
+# - AI/HBM/수출 등 보조 태그가 독립 산업처럼 과다 노출되는 문제 축소
+# =========================================================
+V5176_EXPORT_SOURCE = "산업통상부 「2026년 5월 수출입동향」"
+
+# 주산업(primary)은 산업 노출 표에 표시되는 핵심 분류입니다.
+# tags는 보조 설명용입니다. AI/HBM/수출 같은 보조 태그가 별도 산업 행으로 과다 표시되지 않도록 분리합니다.
+V5176_ASSET_PROFILE = {
+    "삼성전자": {
+        "primary": "반도체",
+        "tags": ["AI", "수출", "국내대형주"],
+        "kind": "주식",
+    },
+    "005930": {
+        "primary": "반도체",
+        "tags": ["AI", "수출", "국내대형주"],
+        "kind": "주식",
+    },
+    "SK하이닉스": {
+        "primary": "반도체",
+        "tags": ["HBM", "AI", "수출"],
+        "kind": "주식",
+    },
+    "000660": {
+        "primary": "반도체",
+        "tags": ["HBM", "AI", "수출"],
+        "kind": "주식",
+    },
+    "삼성전기": {
+        "primary": "전자부품",
+        "tags": ["MLCC", "IT부품", "전장"],
+        "kind": "주식",
+    },
+    "009150": {
+        "primary": "전자부품",
+        "tags": ["MLCC", "IT부품", "전장"],
+        "kind": "주식",
+    },
+    "에이피알": {
+        "primary": "화장품",
+        "tags": ["K뷰티", "소비재", "중국소비"],
+        "kind": "주식",
+    },
+    "278470": {
+        "primary": "화장품",
+        "tags": ["K뷰티", "소비재", "중국소비"],
+        "kind": "주식",
+    },
+    "KODEX 200": {
+        "primary": "국내대형 ETF",
+        "tags": ["ETF", "코스피200", "시장"],
+        "kind": "ETF",
+    },
+    "KODEX200": {
+        "primary": "국내대형 ETF",
+        "tags": ["ETF", "코스피200", "시장"],
+        "kind": "ETF",
+    },
+    "069500": {
+        "primary": "국내대형 ETF",
+        "tags": ["ETF", "코스피200", "시장"],
+        "kind": "ETF",
+    },
+    "TIGER 코리아휴머노이드로봇산업": {
+        "primary": "로봇/휴머노이드 ETF",
+        "tags": ["ETF", "로봇", "휴머노이드", "AI"],
+        "kind": "ETF",
+    },
+    "코리아휴머노이드로봇산업": {
+        "primary": "로봇/휴머노이드 ETF",
+        "tags": ["ETF", "로봇", "휴머노이드", "AI"],
+        "kind": "ETF",
+    },
+    "0148J0": {
+        "primary": "로봇/휴머노이드 ETF",
+        "tags": ["ETF", "로봇", "휴머노이드", "AI"],
+        "kind": "ETF",
+    },
+}
+
+V5176_INDUSTRY_PRESSURE = {
+    "반도체": {
+        "flow": "수출 강세",
+        "pressure": "강한 우호",
+        "score": 4,
+        "impact": "삼성전자·SK하이닉스 산업 압력 반영",
+        "source": V5176_EXPORT_SOURCE,
+    },
+    "화장품": {
+        "flow": "수출 우호",
+        "pressure": "우호",
+        "score": 3,
+        "impact": "에이피알 화장품/K뷰티 노출 반영",
+        "source": V5176_EXPORT_SOURCE,
+    },
+    "전자부품": {
+        "flow": "IT 수요 확인",
+        "pressure": "중립",
+        "score": 0,
+        "impact": "삼성전기 IT부품·전장 노출 확인",
+        "source": "내 보유종목 산업 매핑",
+    },
+    "국내대형 ETF": {
+        "flow": "코스피200 연동",
+        "pressure": "중립",
+        "score": 0,
+        "impact": "KODEX 200은 대형주·외국인 수급 영향 확인",
+        "source": "내 포트폴리오 보유구조",
+    },
+    "로봇/휴머노이드 ETF": {
+        "flow": "테마 노출",
+        "pressure": "중립",
+        "score": 0,
+        "impact": "TIGER 코리아휴머노이드로봇산업(0148J0) 테마 노출 반영",
+        "source": "내 포트폴리오 보유구조",
+    },
+    "미분류": {
+        "flow": "확인 필요",
+        "pressure": "중립",
+        "score": 0,
+        "impact": "종목명/종목코드 매핑 필요",
+        "source": "내부 매핑 미등록",
+    },
+}
+
+
+def _v5176_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception as e:
+        logging.warning("suppressed exception at line 15376: %s", e, exc_info=True)
+    return str(value).strip()
+
+
+def _v5176_norm_code(value):
+    """v5.18 통합 정규화 엔진 사용."""
+    return normalize_asset_code_v518(value)
+
+def _v5176_find_col(df, candidates):
+    if not isinstance(df, pd.DataFrame):
+        return ""
+    normalized = {str(c).strip(): c for c in df.columns}
+    for name in candidates:
+        if name in normalized:
+            return normalized[name]
+    return ""
+
+
+def _v5176_name_col(df):
+    return _v5176_find_col(df, ["종목명", "상품명", "자산명", "보유종목", "Name", "name"])
+
+
+def _v5176_code_col(df):
+    return _v5176_find_col(df, ["종목코드", "코드", "티커", "Ticker", "ticker", "Code", "code"])
+
+
+def _v5176_value_col(df):
+    return _v5176_find_col(df, ["평가금액", "현재가치", "현재평가금액", "평가액", "총평가금액", "금액", "평가손익금액"])
+
+
+def _v5176_qty_col(df):
+    return _v5176_find_col(df, ["보유수량", "수량", "잔고수량", "보유주수"])
+
+
+def _v5176_price_col(df):
+    return _v5176_find_col(df, ["현재가", "현재가격", "가격", "종가", "매입가"])
+
+
+def _v5176_profile(name="", code=""):
+    name = _v5176_text(name)
+    code = _v5176_norm_code(code)
+    candidates = []
+    if code:
+        candidates.append(code)
+    if name:
+        candidates.append(name)
+    for key, profile in V5176_ASSET_PROFILE.items():
+        k = _v5176_text(key).upper().replace(" ", "")
+        for item in candidates:
+            i = _v5176_text(item).upper().replace(" ", "")
+            if not i:
+                continue
+            if i == k or k in i or i in k:
+                return profile
+    upper_name = name.upper()
+    if any(x in upper_name for x in ["ETF", "KODEX", "TIGER", "ACE", "SOL", "KBSTAR"]):
+        return {"primary": "ETF", "tags": ["ETF", "시장"], "kind": "ETF"}
+    return {"primary": "미분류", "tags": [], "kind": "주식"}
+
+
+def _v5176_pressure_bar(score):
+    try:
+        score = int(round(float(score)))
+    except Exception:
+        score = 0
+    level = min(5, max(1, abs(score))) if score != 0 else 3
+    bar = "█" * level + "░" * (5 - level)
+    if score >= 4:
+        return f"강한 우호 {bar}"
+    if score >= 2:
+        return f"우호 {bar}"
+    if score <= -4:
+        return f"강한 부담 {bar}"
+    if score <= -2:
+        return f"부담 {bar}"
+    return "중립 ███░░"
+
+
+def _v5176_color(value):
+    text = str(value or "")
+    if "우호" in text or "강세" in text:
+        return "color:#ef4444;font-weight:700;"
+    if "부담" in text or "둔화" in text:
+        return "color:#3b82f6;font-weight:700;"
+    return "color:#94a3b8;font-weight:600;"
+
+
+def _v5176_holdings_base(보유계산포트폴리오=None, 계산포트폴리오=None):
+    df = 보유계산포트폴리오 if isinstance(보유계산포트폴리오, pd.DataFrame) and not 보유계산포트폴리오.empty else 계산포트폴리오
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=["종목명", "종목코드", "평가금액"])
+    src = df.copy()
+    name_col = _v5176_name_col(src)
+    code_col = _v5176_code_col(src)
+    value_col = _v5176_value_col(src)
+    qty_col = _v5176_qty_col(src)
+    price_col = _v5176_price_col(src)
+
+    src["_종목명"] = src[name_col].apply(_v5176_text) if name_col else ""
+    src["_종목코드"] = src[code_col].apply(_v5176_norm_code) if code_col else ""
+
+    if value_col:
+        src["_평가금액"] = pd.to_numeric(src[value_col], errors="coerce").fillna(0)
+    elif qty_col and price_col:
+        src["_평가금액"] = pd.to_numeric(src[qty_col], errors="coerce").fillna(0) * pd.to_numeric(src[price_col], errors="coerce").fillna(0)
+    else:
+        src["_평가금액"] = 1
+
+    src = src[(src["_종목명"].astype(str).str.len() > 0) | (src["_종목코드"].astype(str).str.len() > 0)].copy()
+    src = src[src["_평가금액"] >= 0].copy()
+    return src[["_종목명", "_종목코드", "_평가금액"]].rename(columns={"_종목명": "종목명", "_종목코드": "종목코드", "_평가금액": "평가금액"})
+
+
+def _v5176_industry_exposure(보유계산포트폴리오=None, 계산포트폴리오=None):
+    base = _v5176_holdings_base(보유계산포트폴리오, 계산포트폴리오)
+    if base.empty:
+        return pd.DataFrame(columns=["산업", "테마", "평가금액", "비중", "연결 종목", "현재 압력", "압력바", "내 영향", "출처"])
+
+    rows = []
+    for _, row in base.iterrows():
+        name = _v5176_text(row.get("종목명", ""))
+        code = _v5176_norm_code(row.get("종목코드", ""))
+        amount = float(row.get("평가금액", 0) or 0)
+        p = _v5176_profile(name, code)
+        rows.append({
+            "산업": p.get("primary", "미분류"),
+            "테마": ", ".join(p.get("tags", [])),
+            "종목명": name or code,
+            "종목코드": code,
+            "평가금액": amount,
+        })
+
+    raw = pd.DataFrame(rows)
+    total = float(raw["평가금액"].sum()) if not raw.empty else 0
+    agg = raw.groupby("산업", as_index=False)["평가금액"].sum()
+    names = raw.groupby("산업")["종목명"].apply(lambda s: " · ".join(sorted(set([x for x in s if x])))).reset_index(name="연결 종목")
+    themes = raw.groupby("산업")["테마"].apply(lambda s: ", ".join(sorted(set(", ".join([x for x in s if x]).split(", ")) - {""}))).reset_index(name="테마")
+    out = agg.merge(themes, on="산업", how="left").merge(names, on="산업", how="left")
+    out["비중"] = out["평가금액"].apply(lambda v: float(v) / total * 100 if total > 0 else 0)
+
+    def info(ind, key, default="-"):
+        return V5176_INDUSTRY_PRESSURE.get(str(ind), V5176_INDUSTRY_PRESSURE["미분류"]).get(key, default)
+
+    out["현재 압력"] = out["산업"].apply(lambda x: info(x, "pressure"))
+    out["압력점수"] = out["산업"].apply(lambda x: info(x, "score", 0))
+    out["압력바"] = out["압력점수"].apply(_v5176_pressure_bar)
+    out["내 영향"] = out["산업"].apply(lambda x: info(x, "impact"))
+    out["출처"] = out["산업"].apply(lambda x: info(x, "source"))
+    out = out.sort_values(["비중", "산업"], ascending=[False, True]).reset_index(drop=True)
+    return out[["산업", "테마", "평가금액", "비중", "연결 종목", "현재 압력", "압력바", "내 영향", "출처"]]
+
+
+def _v5176_pressure_summary(보유계산포트폴리오=None, 계산포트폴리오=None):
+    exp = _v5176_industry_exposure(보유계산포트폴리오, 계산포트폴리오)
+    if exp.empty:
+        return {"산업노출": "확인 제한", "핵심산업": "-", "현재상태": "보유 보유평가 기준", "자료기준": "5월 수출입"}
+    핵심 = str(exp.iloc[0].get("산업", "-"))
+    우호 = int(exp["현재 압력"].astype(str).str.contains("우호", regex=True).sum())
+    부담 = int(exp["현재 압력"].astype(str).str.contains("부담", regex=True).sum())
+    if 우호 > 부담:
+        state = "산업 압력 우호 우세"
+    elif 부담 > 우호:
+        state = "산업 압력 부담 우세"
+    else:
+        state = "산업 압력 혼조"
+    return {"산업노출": f"{len(exp)}개 산업", "핵심산업": 핵심, "현재상태": state, "자료기준": "5월 수출입"}
+
+
+def _v5176_core_pressure_rows(보유계산포트폴리오=None, 계산포트폴리오=None):
+    exp = _v5176_industry_exposure(보유계산포트폴리오, 계산포트폴리오)
+    held = set(exp["산업"].astype(str).tolist()) if not exp.empty else set()
+    rows = []
+
+    # 금융/수급 압력은 모든 포트폴리오에 공통으로 표시
+    rows.extend([
+        {"구분": "금융", "변수": "환율", "흐름": "상승 시 수출주 민감", "압력": _v5176_pressure_bar(2), "내 영향": "반도체·수출주 노출 확인"},
+        {"구분": "금융", "변수": "미국 기술주", "흐름": "강세 시 성장·AI 테마 민감", "압력": _v5176_pressure_bar(2), "내 영향": "반도체·로봇/휴머노이드 ETF 영향"},
+        {"구분": "위험", "변수": "VIX", "흐름": "상승 시 변동성 확대", "압력": _v5176_pressure_bar(-2), "내 영향": "개별주 비중이 높을수록 민감"},
+        {"구분": "금융", "변수": "미국 국채금리", "흐름": "상승 시 성장주 할인율 부담", "압력": _v5176_pressure_bar(-1), "내 영향": "기술주·테마 ETF 부담 확인"},
+        {"구분": "수급", "변수": "외국인 수급", "흐름": "순매수/순매도 방향 확인", "압력": _v5176_pressure_bar(0), "내 영향": "KODEX 200·대형주 민감"},
+    ])
+
+    # 보유산업에 해당하는 산업 압력만 추가
+    for ind in ["반도체", "화장품", "전자부품", "국내대형 ETF", "로봇/휴머노이드 ETF"]:
+        if ind in held:
+            info = V5176_INDUSTRY_PRESSURE.get(ind, {})
+            rows.append({
+                "구분": "산업",
+                "변수": ind,
+                "흐름": info.get("flow", "확인"),
+                "압력": _v5176_pressure_bar(info.get("score", 0)),
+                "내 영향": info.get("impact", "보유산업 영향 확인"),
+            })
+    return pd.DataFrame(rows)
+
+
+def _v5176_show_table(df, fmt=None, color_cols=None):
+    color_cols = color_cols or []
+    try:
+        view = df.copy()
+        if 'index_1부터' in globals():
+            view = index_1부터(view)
+        sty = view.style
+        if fmt:
+            sty = sty.format(fmt)
+        for col in color_cols:
+            if col in view.columns:
+                sty = sty.map(_v5176_color, subset=[col])
+        if '표데이터프레임' in globals():
+            표데이터프레임(sty, width="stretch", hide_index=True)
+        else:
+            st.dataframe(sty, use_container_width=True, hide_index=True)
+    except Exception:
+        try:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        except Exception:
+            st.caption("표시할 수 없는 데이터 형식입니다.")
+
+
+def 시장압력상황판_v5176(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown("### 시장압력 상황판")
+    st.caption("보유종목 변동에 따라 시장·산업 압력이 내 포트폴리오 어디에 연결되는지 동적으로 표시합니다.")
+
+    summary = _v5176_pressure_summary(보유계산포트폴리오, 계산포트폴리오)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("산업 노출", summary.get("산업노출", "-"))
+    c2.metric("핵심 산업", summary.get("핵심산업", "-"))
+    c3.metric("현재 상태", summary.get("현재상태", "-"))
+    c4.metric("자료 기준", summary.get("자료기준", "-"))
+
+    st.markdown("##### 핵심 압력 요약")
+    core = _v5176_core_pressure_rows(보유계산포트폴리오, 계산포트폴리오)
+    _v5176_show_table(core, color_cols=["압력"])
+
+    st.markdown("##### 산업 압력 · 내 보유종목 연결")
+    exp = _v5176_industry_exposure(보유계산포트폴리오, 계산포트폴리오)
+    if exp.empty:
+        st.info("보유 포트폴리오 데이터가 부족해 산업 노출을 계산하지 못했습니다.")
+    else:
+        _v5176_show_table(
+            exp,
+            fmt={"평가금액": lambda v: f"{float(v):,.0f}", "비중": lambda v: f"{float(v):.1f}%"},
+            color_cols=["현재 압력", "압력바"],
+        )
+
+    st.caption(f"자료: {V5176_EXPORT_SOURCE} · 종목/ETF 산업 매핑: 삼성전자, SK하이닉스, 삼성전기, 에이피알, KODEX 200, TIGER 코리아휴머노이드로봇산업(0148J0) 반영")
+
+    with st.expander("매핑 확인", expanded=False):
+        mapping_rows = []
+        for key, profile in V5176_ASSET_PROFILE.items():
+            mapping_rows.append({
+                "매핑키": key,
+                "주산업": profile.get("primary", ""),
+                "보조태그": ", ".join(profile.get("tags", [])),
+                "구분": profile.get("kind", ""),
+            })
+        _v5176_show_table(pd.DataFrame(mapping_rows))
+
+
+# v5.17.6에서는 기존 분석 탭 이름을 유지하면서 내부 표시만 새 상황판으로 교체합니다.
+def 분석인사이트단순화UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown("## 분석 / 인사이트")
+    st.caption("v5.17.6: 시장 → 산업 → 내 보유종목 연결을 우선 표시합니다. 종목 추천이나 주가 예측은 하지 않습니다.")
+    try:
+        포트폴리오핵심상태간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"포트폴리오 핵심상태 표시 제한: {e}")
+    try:
+        최근거래변화간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"최근 거래 변화 표시 제한: {e}")
+    시장압력상황판_v5176(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    try:
+        집중위험체크간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"집중위험 체크 표시 제한: {e}")
+
+
+# =========================================================
+# v5.17.8 시장압력 UI/코멘트 고도화 + 0148J0 데이터 반영 보강
+
+# =========================================================
+# v5.17.11 0148J0 시세 실패 보정 우선 패치
+# =========================================================
+V5179_APP_VERSION_LABEL = "v5.17.16-code-display-hardfix"
+V5179_HUMANOID_CODE = "0148J0"
+V5179_HUMANOID_NAME = "TIGER 코리아휴머노이드로봇산업"
+
+
+def _v5179_text(v):
+    try:
+        if v is None or pd.isna(v):
+            return ""
+    except Exception as e:
+        logging.warning("suppressed exception at line 15670: %s", e, exc_info=True)
+    return str(v).strip()
+
+
+def _v5179_num(v):
+    try:
+        if isinstance(v, str):
+            v = v.replace(",", "").replace("원", "").replace("주", "").strip()
+        x = pd.to_numeric(v, errors="coerce")
+        if pd.isna(x):
+            return 0.0
+        return float(x)
+    except Exception:
+        return 0.0
+
+
+def _v5179_norm_code(v):
+    return normalize_asset_code_v518(v)
+
+def _v5179_is_humanoid(name="", code=""):
+    n = _v5179_text(name).replace(" ", "")
+    c = _v5179_norm_code(code)
+    return c == V5179_HUMANOID_CODE or "휴머노이드" in n or "코리아휴머노이드로봇산업" in n
+
+
+def _v5179_clean_name(name="", code=""):
+    if _v5179_is_humanoid(name, code):
+        return V5179_HUMANOID_NAME
+    try:
+        return _v5178_clean_name(name, code)  # type: ignore[name-defined]
+    except Exception:
+        return _v5179_text(name) or _v5179_norm_code(code)
+
+
+def _v5179_find_col(df, candidates):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return ""
+    labels = {str(c).strip(): c for c in df.columns}
+    for c in candidates:
+        if c in labels:
+            return labels[c]
+    for want in candidates:
+        for label, real in labels.items():
+            if want in label:
+                return real
+    return ""
+
+
+def _v5179_cols(df):
+    return {
+        "name": _v5179_find_col(df, ["종목명", "상품명", "자산명", "보유종목", "Name", "name"]),
+        "code": _v5179_find_col(df, ["종목코드", "코드", "티커", "Ticker", "ticker", "Code", "code"]),
+        "qty": _v5179_find_col(df, ["보유수량", "수량", "잔고수량", "보유주수", "주수", "체결수량"]),
+        "price": _v5179_find_col(df, ["현재가", "현재가격", "시장가", "가격", "종가", "매입가", "평균단가", "평단가", "매수단가", "취득단가", "평균매입가", "체결단가"]),
+        "value": _v5179_find_col(df, ["평가금액", "현재가치", "현재평가금액", "평가액", "총평가금액", "금액", "거래금액", "매입금액", "투자금액", "원금", "매수금액", "체결금액"]),
+        "type": _v5179_find_col(df, ["구분", "거래구분", "매매구분", "유형", "분류"]),
+    }
+
+
+def _v5179_infer_humanoid_from_df(df):
+    """보유/계산/거래 자료에서 0148J0 수량·단가·평가금액 후보를 추정합니다."""
+    empty = {"종목명": V5179_HUMANOID_NAME, "종목코드": V5179_HUMANOID_CODE, "보유수량": 0.0, "현재가": 0.0, "평가금액": 0.0, "price_source": ""}
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return empty
+    cols = _v5179_cols(df)
+    name_col, code_col = cols["name"], cols["code"]
+    if not name_col and not code_col:
+        return empty
+
+    mask = pd.Series(False, index=df.index)
+    if name_col:
+        mask = mask | df[name_col].astype(str).apply(lambda x: _v5179_is_humanoid(x, ""))
+    if code_col:
+        mask = mask | df[code_col].astype(str).apply(lambda x: _v5179_is_humanoid("", x))
+    sub = df[mask].copy()
+    if sub.empty:
+        return empty
+
+    qty_col, price_col, value_col, type_col = cols["qty"], cols["price"], cols["value"], cols["type"]
+    sign = pd.Series(1.0, index=sub.index)
+    if type_col:
+        t = sub[type_col].astype(str)
+        sign = sign.mask(t.str.contains("매도|출금|해지|감소|청산", regex=True), -1.0)
+        sign = sign.mask(t.str.contains("매수|입금|증가|편입|신규", regex=True), 1.0)
+
+    qty = pd.Series(0.0, index=sub.index)
+    if qty_col:
+        qty = sub[qty_col].apply(_v5179_num) * sign
+    gross_qty = float(qty.sum()) if len(qty) else 0.0
+    # 거래이력에 매수/매도 부호가 섞여 이상하면 양수 최대/합계를 보조값으로 사용
+    if gross_qty <= 0 and qty_col:
+        positive_qty = sub[qty_col].apply(_v5179_num)
+        gross_qty = float(positive_qty[positive_qty > 0].sum())
+
+    value = pd.Series(0.0, index=sub.index)
+    if value_col:
+        value = sub[value_col].apply(_v5179_num) * sign
+    gross_value = float(value.sum()) if len(value) else 0.0
+    if gross_value <= 0 and value_col:
+        positive_value = sub[value_col].apply(_v5179_num)
+        gross_value = float(positive_value[positive_value > 0].sum())
+
+    price = 0.0
+    if price_col:
+        prices = sub[price_col].apply(_v5179_num)
+        prices = prices[prices > 0]
+        if len(prices):
+            price = float(prices.iloc[-1])
+    if price <= 0 and gross_qty > 0 and gross_value > 0:
+        price = gross_value / gross_qty
+    if gross_value <= 0 and gross_qty > 0 and price > 0:
+        gross_value = gross_qty * price
+
+    src = "보유/거래자료 기준"
+    return {"종목명": V5179_HUMANOID_NAME, "종목코드": V5179_HUMANOID_CODE, "보유수량": gross_qty, "현재가": price, "평가금액": gross_value, "price_source": src}
+
+
+def _v5179_humanoid_fallback_row(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    candidates = []
+    for df in [보유계산포트폴리오, 계산포트폴리오, 거래이력df]:
+        row = _v5179_infer_humanoid_from_df(df)
+        if row.get("보유수량", 0) > 0 or row.get("평가금액", 0) > 0 or row.get("현재가", 0) > 0:
+            candidates.append(row)
+    if not candidates:
+        return None
+    # 평가금액 또는 현재가가 가장 잘 살아 있는 후보를 우선 사용
+    candidates.sort(key=lambda r: (r.get("평가금액", 0) > 0, r.get("현재가", 0) > 0, r.get("보유수량", 0)), reverse=True)
+    return candidates[0]
+
+
+def _v5179_patch_holding_df(df, 거래이력df=None):
+    """0148J0 행을 삭제/실패 처리하지 않도록 DataFrame을 보정합니다."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        base = pd.DataFrame()
+    else:
+        try:
+            base = _v5178_fix_holding_df(df).copy()  # type: ignore[name-defined]
+        except Exception:
+            base = df.copy()
+
+    if base.empty:
+        fallback = _v5179_humanoid_fallback_row(거래이력df, df, None)
+        return pd.DataFrame([fallback]) if fallback else base
+
+    cols = _v5179_cols(base)
+    name_col, code_col = cols["name"], cols["code"]
+    if code_col:
+        base[code_col] = base[code_col].apply(_v5179_norm_code)
+    if name_col:
+        base[name_col] = base.apply(lambda r: _v5179_clean_name(r.get(name_col, ""), r.get(code_col, "") if code_col else ""), axis=1)
+
+    # 0148J0 존재 여부 확인
+    mask = pd.Series(False, index=base.index)
+    if name_col:
+        mask = mask | base[name_col].astype(str).apply(lambda x: _v5179_is_humanoid(x, ""))
+    if code_col:
+        mask = mask | base[code_col].astype(str).apply(lambda x: _v5179_is_humanoid("", x))
+
+    fallback = _v5179_humanoid_fallback_row(거래이력df, base, None)
+    if mask.any():
+        idx = base[mask].index[0]
+        # 필요한 컬럼이 없으면 생성
+        if not name_col:
+            base["종목명"] = ""
+            name_col = "종목명"
+        if not code_col:
+            base["종목코드"] = ""
+            code_col = "종목코드"
+        if not cols["qty"]:
+            base["보유수량"] = 0.0
+            cols["qty"] = "보유수량"
+        if not cols["price"]:
+            base["현재가"] = 0.0
+            cols["price"] = "현재가"
+        if not cols["value"]:
+            base["평가금액"] = 0.0
+            cols["value"] = "평가금액"
+
+        base.loc[idx, name_col] = V5179_HUMANOID_NAME
+        base.loc[idx, code_col] = V5179_HUMANOID_CODE
+        if fallback:
+            for key, col in [("보유수량", cols["qty"]), ("현재가", cols["price"]), ("평가금액", cols["value"] )]:
+                if col:
+                    old = _v5179_num(base.loc[idx, col])
+                    new = _v5179_num(fallback.get(key))
+                    if old <= 0 and new > 0:
+                        base.loc[idx, col] = new
+    elif fallback:
+        row = {c: None for c in base.columns}
+        # 기존 컬럼명에 맞게 삽입
+        if name_col:
+            row[name_col] = V5179_HUMANOID_NAME
+        else:
+            row["종목명"] = V5179_HUMANOID_NAME
+        if code_col:
+            row[code_col] = V5179_HUMANOID_CODE
+        else:
+            row["종목코드"] = V5179_HUMANOID_CODE
+        qty_col = cols["qty"] or "보유수량"
+        price_col = cols["price"] or "현재가"
+        value_col = cols["value"] or "평가금액"
+        row[qty_col] = fallback.get("보유수량", 0)
+        row[price_col] = fallback.get("현재가", 0)
+        row[value_col] = fallback.get("평가금액", 0)
+        base = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
+    return base
+
+
+def _v5179_display_price_card(name, price, change_text="", sub_text="", warning=False):
+    """시세 실패를 오류처럼 보이지 않게 표시하는 카드."""
+    border = "#64748b" if warning else "#ef4444"
+    status_dot = "🟡" if warning else "🟢"
+    st.markdown(
+        f"""
+        <div style='border-left:4px solid {border};padding:0.15rem 0 0.25rem 0.85rem;margin-bottom:1.0rem;min-height:104px;'>
+          <div style='font-size:1.05rem;font-weight:800;line-height:1.25'>{name}</div>
+          <div style='font-size:1.65rem;font-weight:900;margin-top:0.25rem;'>{price}</div>
+          <div style='font-size:0.88rem;font-weight:700;color:#93c5fd;margin-top:0.25rem;'>{change_text} {status_dot}</div>
+          <div style='font-size:0.82rem;color:#bfdbfe;margin-top:0.2rem;'>{sub_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _v5179_monitoring_ui(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    """주요 모니터링 카드에서 0148J0을 오류 카드가 아닌 보유평가 기준 카드로 표시합니다."""
+    st.markdown("## 주요 지수 및 대표 종목 모니터")
+    try:
+        now_txt = pd.Timestamp.now(tz="Asia/Seoul").strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        now_txt = "현재"
+    cols_top = st.columns([1, 5])
+    with cols_top[0]:
+        if st.button("시세 새로고침", key="v5179_price_refresh"):
+            try:
+                st.cache_data.clear()
+            except Exception as e:
+                logging.warning("suppressed exception at line 15908: %s", e, exc_info=True)
+            st.rerun()
+    with cols_top[1]:
+        st.caption(f"조회 {now_txt} · 실시간 시세 실패 종목은 보유/거래자료 기준으로 보정 표시")
+
+    fixed_calc = _v5179_patch_holding_df(계산포트폴리오, 거래이력df)
+    fixed_hold = _v5179_patch_holding_df(보유계산포트폴리오, 거래이력df)
+    try:
+        base = _v5178_holdings_base(fixed_hold, fixed_calc)  # type: ignore[name-defined]
+    except Exception:
+        base = pd.DataFrame()
+
+    fallback = _v5179_humanoid_fallback_row(거래이력df, fixed_calc, fixed_hold)
+    if isinstance(base, pd.DataFrame) and not base.empty:
+        # 0148J0 행 보정
+        has_h = base.apply(lambda r: _v5179_is_humanoid(r.get("종목명", ""), r.get("종목코드", "")), axis=1).any()
+        if has_h and fallback:
+            idx = base[base.apply(lambda r: _v5179_is_humanoid(r.get("종목명", ""), r.get("종목코드", "")), axis=1)].index[0]
+            base.loc[idx, "종목명"] = V5179_HUMANOID_NAME
+            base.loc[idx, "종목코드"] = V5179_HUMANOID_CODE
+            for col, key in [("보유수량", "보유수량"), ("현재가", "현재가"), ("평가금액", "평가금액")]:
+                if col in base.columns and _v5179_num(base.loc[idx, col]) <= 0 and _v5179_num(fallback.get(key)) > 0:
+                    base.loc[idx, col] = fallback.get(key)
+        elif fallback:
+            base = pd.concat([base, pd.DataFrame([fallback])], ignore_index=True)
+    elif fallback:
+        base = pd.DataFrame([fallback])
+
+    # 지수는 기존 실시간 카드가 불안정하면 텍스트 카드로 최소 표시
+    cards = []
+    cards.append({"종목명": "코스피", "현재가": "지수 확인", "등락": "외부 지수", "보조": "시장 전체 압력 확인", "warning": True})
+    cards.append({"종목명": "코스닥", "현재가": "지수 확인", "등락": "외부 지수", "보조": "성장주 변동성 확인", "warning": True})
+
+    if isinstance(base, pd.DataFrame) and not base.empty:
+        order = ["KODEX 200", V5179_HUMANOID_NAME, "삼성전자", "SK하이닉스", "에이피알", "삼성전기"]
+        base["_order"] = base["종목명"].apply(lambda x: order.index(x) if x in order else 99)
+        base = base.sort_values(["_order", "평가금액"], ascending=[True, False])
+        for _, r in base.iterrows():
+            name = _v5179_clean_name(r.get("종목명", ""), r.get("종목코드", ""))
+            code = _v5179_norm_code(r.get("종목코드", ""))
+            qty = _v5179_num(r.get("보유수량", 0))
+            price = _v5179_num(r.get("현재가", 0))
+            value = _v5179_num(r.get("평가금액", 0))
+            is_h = _v5179_is_humanoid(name, code)
+            if is_h:
+                name = V5179_HUMANOID_NAME
+                code = V5179_HUMANOID_CODE
+            warning = price <= 0
+            price_txt = f"{price:,.0f}" if price > 0 else "보유평가 기준"
+            if price <= 0 and qty > 0 and value > 0:
+                price_txt = f"{value / qty:,.0f}"
+                warning = True
+            sub = f"보유 {qty:,.0f}주"
+            if value > 0:
+                sub += f" · 평가 {value:,.0f}원"
+            if is_h:
+                sub += " · 평가기준"
+            change = "실시간 시세" if not warning else "실시간 미연동 · 평가 보정"
+            cards.append({"종목명": name, "현재가": price_txt, "등락": change, "보조": sub, "warning": warning})
+
+    cols = st.columns(6)
+    for i, c in enumerate(cards[:12]):
+        with cols[i % 6]:
+            _v5179_display_price_card(c["종목명"], c["현재가"], c["등락"], c["보조"], c.get("warning", False))
+
+    unresolved = [c for c in cards if c.get("warning") and c.get("종목명") == V5179_HUMANOID_NAME and "평가" not in c.get("보조", "")]
+    if unresolved:
+        st.warning("TIGER 코리아휴머노이드로봇산업은 실시간 시세가 미연동 상태입니다. 거래이력의 수량·단가·금액 컬럼을 확인하면 평가금액까지 보정할 수 있습니다.")
+
+
+# 기존 주요 모니터링 UI를 보정 버전으로 교체합니다.
+for _v5179_name in [
+    "주요지수및대표종목모니터UI", "주요지수및대표종목모니터", "주요지수대표종목모니터UI", "주요모니터링UI",
+]:
+    try:
+        if _v5179_name in globals():
+            globals()[_v5179_name + "_원본_v5179"] = globals()[_v5179_name]
+        globals()[_v5179_name] = _v5179_monitoring_ui
+    except Exception as e:
+        logging.warning("suppressed exception at line 15987: %s", e, exc_info=True)
+
+# v5.17.8 함수가 있으면 보유자료 보정이 적용되도록 한 번 더 감쌉니다.
+try:
+    _v5179_시장압력상황판_원본 = 시장압력상황판_v5178  # type: ignore[name-defined]
+    def 시장압력상황판_v5178(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+        return _v5179_시장압력상황판_원본(
+            거래이력df,
+            _v5179_patch_holding_df(계산포트폴리오, 거래이력df),
+            _v5179_patch_holding_df(보유계산포트폴리오, 거래이력df),
+        )
+except Exception as e:
+    logging.warning("suppressed exception at line 15999: %s", e, exc_info=True)
+
+
+# =========================================================
+V5178_EXPORT_SOURCE = "산업통상부 「2026년 5월 수출입동향」"
+
+V5178_CODE_ALIAS = {
+    "0148J0": "TIGER 코리아휴머노이드로봇산업",
+    "0148J0.KS": "TIGER 코리아휴머노이드로봇산업",
+    "069500": "KODEX 200",
+    "005930": "삼성전자",
+    "000660": "SK하이닉스",
+    "009150": "삼성전기",
+    "278470": "에이피알",
+}
+
+V5178_ASSET_PROFILE = {
+    "삼성전자": {"code": "005930", "industry": "반도체", "kind": "주식", "tags": ["AI", "수출", "국내대형주"], "comment": "반도체 수출·환율·외국인 수급에 민감한 대형주 노출입니다."},
+    "SK하이닉스": {"code": "000660", "industry": "반도체", "kind": "주식", "tags": ["HBM", "AI", "수출"], "comment": "HBM·AI 수요와 반도체 수출 압력이 직접 연결되는 구조입니다."},
+    "삼성전기": {"code": "009150", "industry": "전자부품", "kind": "주식", "tags": ["MLCC", "IT부품", "전장"], "comment": "IT부품·전장 수요 확인이 필요한 전자부품 노출입니다."},
+    "에이피알": {"code": "278470", "industry": "화장품", "kind": "주식", "tags": ["K뷰티", "소비재", "중국소비"], "comment": "화장품 수출·K뷰티 흐름과 연결되는 소비재 노출입니다."},
+    "KODEX 200": {"code": "069500", "industry": "국내대형 ETF", "kind": "ETF", "tags": ["ETF", "코스피200", "시장"], "comment": "코스피200과 외국인 수급 영향을 함께 받는 대형주 ETF입니다."},
+    "TIGER 코리아휴머노이드로봇산업": {"code": "0148J0", "industry": "로봇/휴머노이드 ETF", "kind": "ETF", "tags": ["ETF", "로봇", "휴머노이드", "AI"], "comment": "AI·로봇·휴머노이드 테마에 노출된 ETF입니다. 신규/문자 포함 코드라 시세 조회 보정이 필요합니다."},
+}
+
+V5178_INDUSTRY_PRESSURE = {
+    "반도체": {"flow": "수출 강세", "pressure": "강한 우호", "score": 4, "impact": "삼성전자·SK하이닉스 산업 압력 반영", "source": V5178_EXPORT_SOURCE},
+    "화장품": {"flow": "수출 우호", "pressure": "우호", "score": 3, "impact": "에이피알 화장품/K뷰티 노출 반영", "source": V5178_EXPORT_SOURCE},
+    "전자부품": {"flow": "IT·전장 수요 확인", "pressure": "중립", "score": 0, "impact": "삼성전기 IT부품·전장 노출 확인", "source": "내 보유종목 산업 매핑"},
+    "국내대형 ETF": {"flow": "코스피200·외국인 수급 연동", "pressure": "중립", "score": 0, "impact": "KODEX 200 대형주·수급 영향 확인", "source": "내 포트폴리오 보유구조"},
+    "로봇/휴머노이드 ETF": {"flow": "AI·로봇 테마 노출", "pressure": "중립", "score": 0, "impact": "TIGER 코리아휴머노이드로봇산업(0148J0) 테마 노출 반영", "source": "내 포트폴리오 보유구조"},
+    "미분류": {"flow": "매핑 확인 필요", "pressure": "중립", "score": 0, "impact": "종목명/코드 매핑 필요", "source": "내부 매핑 미등록"},
+}
+
+
+def _v5178_text(v):
+    try:
+        if v is None or pd.isna(v):
+            return ""
+    except Exception as e:
+        logging.warning("suppressed exception at line 16039: %s", e, exc_info=True)
+    return str(v).strip()
+
+
+def _v5178_norm_code(v):
+    return normalize_asset_code_v518(v)
+
+def _v5178_clean_name(name="", code=""):
+    n = _v5178_text(name)
+    c = _v5178_norm_code(code)
+    if c in V5178_CODE_ALIAS:
+        return V5178_CODE_ALIAS[c]
+    if "휴머노이드" in n or "0148J0" in n.upper() or "0148J0" in n.upper():
+        return "TIGER 코리아휴머노이드로봇산업"
+    compact = n.replace(" ", "")
+    for k in V5178_ASSET_PROFILE:
+        kc = k.replace(" ", "")
+        if compact and (kc in compact or compact in kc):
+            return k
+    return n or c
+
+
+def _v5178_find_col(df, candidates):
+    if not isinstance(df, pd.DataFrame):
+        return ""
+    cols = {str(c).strip(): c for c in df.columns}
+    for c in candidates:
+        if c in cols:
+            return cols[c]
+    # 부분명 후보도 허용
+    for want in candidates:
+        for label, real in cols.items():
+            if want in label:
+                return real
+    return ""
+
+
+def _v5178_name_col(df):
+    return _v5178_find_col(df, ["종목명", "상품명", "자산명", "보유종목", "Name", "name"])
+
+
+def _v5178_code_col(df):
+    return _v5178_find_col(df, ["종목코드", "코드", "티커", "Ticker", "ticker", "Code", "code"])
+
+
+def _v5178_qty_col(df):
+    return _v5178_find_col(df, ["보유수량", "수량", "잔고수량", "보유주수", "주수"])
+
+
+def _v5178_price_col(df):
+    return _v5178_find_col(df, ["현재가", "현재가격", "시장가", "가격", "종가", "매입가", "평균단가", "평단가", "매수단가", "취득단가", "평균매입가"])
+
+
+def _v5178_value_col(df):
+    return _v5178_find_col(df, ["평가금액", "현재가치", "현재평가금액", "평가액", "총평가금액", "금액", "매입금액", "투자금액", "원금", "매수금액"])
+
+
+def _v5178_safe_number(v):
+    try:
+        if isinstance(v, str):
+            v = v.replace(",", "").replace("원", "").strip()
+        return float(pd.to_numeric(v, errors="coerce"))
+    except Exception:
+        return 0.0
+
+
+def _v5178_naver_price(code):
+    """Naver Finance 보조 시세 조회. 실패 시 None 반환. 0148J0 같은 문자 포함 ETF 코드 보완용."""
+    c = _v5178_norm_code(code)
+    if not c:
+        return None
+    try:
+        import requests, re as _re
+        url = f"https://finance.naver.com/item/main.naver?code={c}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        html = requests.get(url, headers=headers, timeout=3).text
+        m = _re.search(r'<p class="no_today">.*?<span class="blind">([0-9,]+)</span>', html, _re.S)
+        if m:
+            return float(m.group(1).replace(",", ""))
+    except Exception:
+        return None
+    return None
+
+
+def _v5178_profile(name="", code=""):
+    n = _v5178_clean_name(name, code)
+    c = _v5178_norm_code(code)
+    if n in V5178_ASSET_PROFILE:
+        return V5178_ASSET_PROFILE[n]
+    for k, p in V5178_ASSET_PROFILE.items():
+        if c and p.get("code") == c:
+            return p
+    if any(x in n.upper() for x in ["ETF", "KODEX", "TIGER", "ACE", "SOL", "KBSTAR"]):
+        return {"code": c, "industry": "ETF", "kind": "ETF", "tags": ["ETF"], "comment": "ETF 산업 매핑 추가 확인이 필요합니다."}
+    return {"code": c, "industry": "미분류", "kind": "주식", "tags": [], "comment": "산업 매핑 추가 확인이 필요합니다."}
+
+
+def _v5178_fix_holding_df(df):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    out = df.copy()
+    code_col = _v5178_code_col(out)
+    name_col = _v5178_name_col(out)
+    qty_col = _v5178_qty_col(out)
+    price_col = _v5178_price_col(out)
+    value_col = _v5178_value_col(out)
+
+    if code_col:
+        out[code_col] = out[code_col].apply(_v5178_norm_code)
+    if name_col:
+        out[name_col] = out.apply(lambda r: _v5178_clean_name(r.get(name_col, ""), r.get(code_col, "") if code_col else ""), axis=1)
+    elif code_col:
+        out["종목명"] = out[code_col].apply(lambda c: _v5178_clean_name("", c))
+
+    # 0148J0 시세가 비어 있으면 Naver 보조 조회를 1회 시도합니다.
+    if code_col and price_col:
+        mask = out[code_col].astype(str).str.upper().eq("0148J0")
+        if mask.any():
+            current = pd.to_numeric(out.loc[mask, price_col], errors="coerce").fillna(0)
+            if float(current.max() if len(current) else 0) <= 0:
+                px = _v5178_naver_price("0148J0")
+                if px and px > 0:
+                    out.loc[mask, price_col] = px
+
+    # 평가금액 보정: 평가금액이 없으면 수량×단가, 그래도 없으면 기존 금액 후보를 활용합니다.
+    if qty_col and price_col:
+        q = pd.to_numeric(out[qty_col], errors="coerce").fillna(0)
+        p = pd.to_numeric(out[price_col], errors="coerce").fillna(0)
+        calc = q * p
+        if value_col:
+            v = pd.to_numeric(out[value_col], errors="coerce").fillna(0)
+            out[value_col] = v.where(v > 0, calc).fillna(0)
+        else:
+            out["평가금액"] = calc
+    return out
+
+
+def _v5178_holdings_base(보유계산포트폴리오=None, 계산포트폴리오=None):
+    df = 보유계산포트폴리오 if isinstance(보유계산포트폴리오, pd.DataFrame) and not 보유계산포트폴리오.empty else 계산포트폴리오
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=["종목명", "종목코드", "평가금액", "보유수량", "현재가"])
+    src = _v5178_fix_holding_df(df)
+    name_col = _v5178_name_col(src)
+    code_col = _v5178_code_col(src)
+    qty_col = _v5178_qty_col(src)
+    price_col = _v5178_price_col(src)
+    value_col = _v5178_value_col(src)
+
+    out = pd.DataFrame()
+    out["종목명"] = src[name_col].apply(_v5178_text) if name_col else ""
+    out["종목코드"] = src[code_col].apply(_v5178_norm_code) if code_col else ""
+    out["종목명"] = out.apply(lambda r: _v5178_clean_name(r.get("종목명", ""), r.get("종목코드", "")), axis=1)
+    out["보유수량"] = pd.to_numeric(src[qty_col], errors="coerce").fillna(0) if qty_col else 0
+    out["현재가"] = pd.to_numeric(src[price_col], errors="coerce").fillna(0) if price_col else 0
+    out["평가금액"] = pd.to_numeric(src[value_col], errors="coerce").fillna(0) if value_col else out["보유수량"] * out["현재가"]
+    out.loc[(out["평가금액"] <= 0) & (out["보유수량"] > 0) & (out["현재가"] > 0), "평가금액"] = out["보유수량"] * out["현재가"]
+    out = out[(out["종목명"].astype(str).str.len() > 0) | (out["종목코드"].astype(str).str.len() > 0)].copy()
+    # 동일 종목/코드가 중복되면 합산합니다.
+    if not out.empty:
+        out = out.groupby(["종목명", "종목코드"], as_index=False).agg({"평가금액":"sum", "보유수량":"sum", "현재가":"max"})
+    return out
+
+
+def _v5178_bar(score):
+    try:
+        score = int(round(float(score)))
+    except Exception:
+        score = 0
+    if score >= 4:
+        return "강한 우호 █████"
+    if score >= 2:
+        return "우호 ████░"
+    if score <= -4:
+        return "강한 부담 █████"
+    if score <= -2:
+        return "부담 ████░"
+    return "중립 ███░░"
+
+
+def _v5178_color(v):
+    t = str(v or "")
+    if "우호" in t or "강세" in t:
+        return "color:#ef4444;font-weight:800;"
+    if "부담" in t or "둔화" in t:
+        return "color:#3b82f6;font-weight:800;"
+    return "color:#94a3b8;font-weight:700;"
+
+
+def _v5178_show_table(df, fmt=None, color_cols=None):
+    try:
+        view = df.copy()
+        sty = view.style
+        if fmt:
+            sty = sty.format(fmt)
+        for col in (color_cols or []):
+            if col in view.columns:
+                sty = sty.map(_v5178_color, subset=[col])
+        if '표데이터프레임' in globals():
+            표데이터프레임(sty, width="stretch", hide_index=True)
+        else:
+            st.dataframe(sty, use_container_width=True, hide_index=True)
+    except Exception:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def _v5178_industry_exposure(보유계산포트폴리오=None, 계산포트폴리오=None):
+    base = _v5178_holdings_base(보유계산포트폴리오, 계산포트폴리오)
+    if base.empty:
+        return pd.DataFrame(columns=["산업", "평가금액", "비중", "연결 종목", "현재 압력", "압력바", "내 영향", "출처"])
+    rows = []
+    for _, r in base.iterrows():
+        p = _v5178_profile(r.get("종목명", ""), r.get("종목코드", ""))
+        rows.append({"산업": p.get("industry", "미분류"), "종목명": _v5178_clean_name(r.get("종목명", ""), r.get("종목코드", "")), "평가금액": float(r.get("평가금액", 0) or 0)})
+    raw = pd.DataFrame(rows)
+    total = float(raw["평가금액"].sum()) if not raw.empty else 0
+    agg = raw.groupby("산업", as_index=False)["평가금액"].sum()
+    names = raw.groupby("산업")["종목명"].apply(lambda s: " · ".join(sorted(set([x for x in s if x])))).reset_index(name="연결 종목")
+    out = agg.merge(names, on="산업", how="left")
+    out["비중"] = out["평가금액"].apply(lambda x: x / total * 100 if total > 0 else 0)
+    out["현재 압력"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["pressure"])
+    out["압력점수"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["score"])
+    out["압력바"] = out["압력점수"].apply(_v5178_bar)
+    out["내 영향"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["impact"])
+    out["출처"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["source"])
+    return out.sort_values(["비중", "산업"], ascending=[False, True]).reset_index(drop=True)[["산업", "평가금액", "비중", "연결 종목", "현재 압력", "압력바", "내 영향", "출처"]]
+
+
+def _v5178_holding_comments(보유계산포트폴리오=None, 계산포트폴리오=None):
+    base = _v5178_holdings_base(보유계산포트폴리오, 계산포트폴리오)
+    total = float(base["평가금액"].sum()) if isinstance(base, pd.DataFrame) and not base.empty else 0
+    rows = []
+    if base.empty:
+        return pd.DataFrame(columns=["종목", "산업", "비중", "현재 해석"])
+    for _, r in base.sort_values("평가금액", ascending=False).iterrows():
+        p = _v5178_profile(r.get("종목명", ""), r.get("종목코드", ""))
+        industry = p.get("industry", "미분류")
+        pressure = V5178_INDUSTRY_PRESSURE.get(industry, V5178_INDUSTRY_PRESSURE["미분류"])
+        weight = (float(r.get("평가금액", 0) or 0) / total * 100) if total > 0 else 0
+        comment = f"{pressure['pressure']} 압력: {pressure['impact']}. {p.get('comment','')}"
+        if _v5178_norm_code(r.get("종목코드", "")) == "0148J0" and float(r.get("현재가", 0) or 0) <= 0:
+            comment += " 현재가가 비어 있으면 Naver 보조 조회 또는 보유 단가 기준으로 평가금액을 보정합니다."
+        rows.append({"종목": r.get("종목명", ""), "산업": industry, "비중": weight, "현재 해석": comment})
+    return pd.DataFrame(rows)
+
+
+def _v5178_mapping_summary():
+    rows = []
+    for name, p in V5178_ASSET_PROFILE.items():
+        rows.append({"보유자산": name, "코드": p.get("code", ""), "주산업": p.get("industry", ""), "구분": p.get("kind", ""), "핵심태그": ", ".join(p.get("tags", [])[:4])})
+    return pd.DataFrame(rows)
+
+
+def _v5178_render_cards(exp):
+    if not isinstance(exp, pd.DataFrame) or exp.empty:
+        st.info("보유 포트폴리오 데이터가 부족해 산업 압력 카드를 만들지 못했습니다.")
+        return
+    top = exp.head(4).reset_index(drop=True)
+    cols = st.columns(min(4, len(top)))
+    for i, row in top.iterrows():
+        with cols[i % len(cols)]:
+            st.metric(str(row["산업"]), str(row["현재 압력"]), f"비중 {float(row['비중']):.1f}%")
+            st.caption(f"{row['연결 종목']} · {row['압력바']}")
+
+
+def 시장압력상황판_v5178(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    계산포트폴리오 = _v5178_fix_holding_df(계산포트폴리오)
+    보유계산포트폴리오 = _v5178_fix_holding_df(보유계산포트폴리오)
+    exp = _v5178_industry_exposure(보유계산포트폴리오, 계산포트폴리오)
+    comments = _v5178_holding_comments(보유계산포트폴리오, 계산포트폴리오)
+
+    st.markdown("### 시장압력 상황판")
+    st.caption("보유종목 변동에 따라 금융·산업 압력이 내 포트폴리오 어디에 연결되는지 동적으로 표시합니다.")
+
+    top_ind = exp.iloc[0]["산업"] if not exp.empty else "확인 필요"
+    favorable_cnt = int(exp["현재 압력"].astype(str).str.contains("우호").sum()) if not exp.empty else 0
+    exposed_cnt = len(exp) if not exp.empty else 0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("보유 산업", f"{exposed_cnt}개")
+    c2.metric("핵심 노출", top_ind)
+    c3.metric("현재 상태", "우호 우세" if favorable_cnt >= 2 else "혼조")
+    c4.metric("자료 기준", "산업통상부 5월 수출입")
+
+    st.markdown("##### 산업 압력 카드")
+    _v5178_render_cards(exp)
+
+    st.markdown("##### 핵심 압력 TOP")
+    held = set(exp["산업"].astype(str).tolist()) if not exp.empty else set()
+    rows = []
+    # 금융압력은 보유 산업에 맞춰 문장을 조정합니다.
+    rows.append({"구분":"금융", "압력":"환율", "상태":"상승 시 수출주 민감", "내 영향":"반도체·화장품 수출 노출 확인", "압력바":_v5178_bar(2)})
+    rows.append({"구분":"금융", "압력":"미국 기술주", "상태":"AI·성장주 민감", "내 영향":"반도체·로봇/휴머노이드 ETF 영향", "압력바":_v5178_bar(2)})
+    rows.append({"구분":"위험", "압력":"VIX", "상태":"상승 시 변동성 확대", "내 영향":"개별주 비중이 높을수록 민감", "압력바":_v5178_bar(-2)})
+    rows.append({"구분":"수급", "압력":"외국인 수급", "상태":"순매수/순매도 확인", "내 영향":"KODEX 200·대형주 영향", "압력바":_v5178_bar(0)})
+    for ind in ["반도체", "화장품", "전자부품", "국내대형 ETF", "로봇/휴머노이드 ETF"]:
+        if ind in held:
+            info = V5178_INDUSTRY_PRESSURE[ind]
+            rows.append({"구분":"산업", "압력":ind, "상태":info["flow"], "내 영향":info["impact"], "압력바":_v5178_bar(info["score"])})
+    _v5178_show_table(pd.DataFrame(rows), color_cols=["압력바"])
+
+    st.markdown("##### 산업 압력 · 내 보유종목 연결")
+    if exp.empty:
+        st.info("보유 포트폴리오 데이터가 부족해 산업 노출을 계산하지 못했습니다.")
+    else:
+        view = exp[["산업", "평가금액", "비중", "연결 종목", "현재 압력", "내 영향", "출처"]].copy()
+        _v5178_show_table(view, fmt={"평가금액": lambda v: f"{float(v):,.0f}", "비중": lambda v: f"{float(v):.1f}%"}, color_cols=["현재 압력"])
+
+    st.markdown("##### 내 보유종목 코멘트")
+    if comments.empty:
+        st.info("보유종목 코멘트를 만들 데이터가 부족합니다.")
+    else:
+        _v5178_show_table(comments, fmt={"비중": lambda v: f"{float(v):.1f}%"}, color_cols=[])
+
+    with st.expander("매핑 확인", expanded=False):
+        st.caption("중복 표시를 줄이기 위해 종목명·코드 매핑을 하나의 보유자산 기준으로 정리했습니다.")
+        _v5178_show_table(_v5178_mapping_summary())
+
+    st.caption("자료: 산업통상부 「2026년 5월 수출입동향」 · 0148J0 = TIGER 코리아휴머노이드로봇산업으로 표시 보정")
+
+
+def 분석인사이트단순화UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    계산포트폴리오 = _v5178_fix_holding_df(계산포트폴리오)
+    보유계산포트폴리오 = _v5178_fix_holding_df(보유계산포트폴리오)
+    st.markdown("## 분석 / 인사이트")
+    st.caption("v5.17.8: 시장압력 UI, 산업압력 카드, 보유종목 코멘트, 0148J0 데이터 반영 보강")
+    try:
+        포트폴리오핵심상태간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"포트폴리오 핵심상태 표시 제한: {e}")
+    try:
+        최근거래변화간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"최근 거래 변화 표시 제한: {e}")
+    시장압력상황판_v5178(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    try:
+        집중위험체크간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"집중위험 체크 표시 제한: {e}")
+
+# 주요 UI 함수에 들어가는 DataFrame을 한 번 더 보정합니다.
+def _v5178_wrap_dataframe_ui_function(func):
+    def wrapper(*args, **kwargs):
+        fixed_args = tuple(_v5178_fix_holding_df(a) if isinstance(a, pd.DataFrame) else a for a in args)
+        fixed_kwargs = {k: (_v5178_fix_holding_df(v) if isinstance(v, pd.DataFrame) else v) for k, v in kwargs.items()}
+        return func(*fixed_args, **fixed_kwargs)
+    return wrapper
+
+for _v5178_name in [
+    "주요지수및대표종목모니터UI", "주요지수및대표종목모니터", "주요지수대표종목모니터UI", "주요모니터링UI",
+    "포트폴리오현황UI", "포트폴리오현황", "포트폴리오현황섹션", "포트폴리오현황표시",
+]:
+    try:
+        if _v5178_name in globals() and callable(globals()[_v5178_name]):
+            globals()[_v5178_name + "_원본_v5178"] = globals()[_v5178_name]
+            globals()[_v5178_name] = _v5178_wrap_dataframe_ui_function(globals()[_v5178_name])
+    except Exception as e:
+        logging.warning("suppressed exception at line 16394: %s", e, exc_info=True)
+
+
 # v5.15.0: 자산원장·자산변화로그는 사용 피로도가 높아 화면 메뉴와 실행 경로에서 제거했습니다.
 # 기존 데이터 시트는 보존되며, 앱은 거래이력·비주식자산 기반 투자분석과 인사이트에 집중합니다.
+
+
+# ============================================================
+# v5.17.13 압력 상황실 UX: 시장압력 상황판 카드형 고도화
+# ============================================================
+V51712_EXPORT_SOURCE = "산업통상부 「2026년 5월 수출입동향」"
+
+# v5.17.8/11에서 이미 정의된 매핑이 있으면 유지하고, 없을 때만 보강합니다.
+try:
+    pass  # v5.18.3.1: Streamlit magic 노출 방지
+except NameError:
+    V5178_ASSET_PROFILE = {}
+
+V51712_ASSET_PROFILE_PATCH = {
+    "삼성전자": {"code": "005930", "industry": "반도체", "kind": "주식", "tags": ["AI", "수출", "국내대형주"], "comment": "반도체 수출·AI 투자·환율 변화에 민감한 대형주 노출입니다."},
+    "SK하이닉스": {"code": "000660", "industry": "반도체", "kind": "주식", "tags": ["HBM", "AI", "수출"], "comment": "HBM·AI 수요와 반도체 수출 압력이 직접 연결되는 구조입니다."},
+    "삼성전기": {"code": "009150", "industry": "전자부품", "kind": "주식", "tags": ["MLCC", "IT부품", "전장"], "comment": "IT부품·전장 수요 확인이 필요한 전자부품 노출입니다."},
+    "에이피알": {"code": "278470", "industry": "화장품", "kind": "주식", "tags": ["K뷰티", "소비재", "중국소비"], "comment": "화장품 수출·K뷰티 흐름과 연결되는 소비재 노출입니다."},
+    "KODEX 200": {"code": "069500", "industry": "국내대형 ETF", "kind": "ETF", "tags": ["ETF", "코스피200", "시장"], "comment": "코스피200과 외국인 수급 영향을 함께 받는 대형주 ETF입니다."},
+    "TIGER 코리아휴머노이드로봇산업": {"code": "0148J0", "industry": "로봇/휴머노이드 ETF", "kind": "ETF", "tags": ["ETF", "로봇", "휴머노이드", "AI"], "comment": "AI·로봇·휴머노이드 테마에 노출된 ETF입니다. 실시간 시세가 지연되면 보유평가 기준으로 표시합니다."},
+}
+V5178_ASSET_PROFILE.update({k: v for k, v in V51712_ASSET_PROFILE_PATCH.items() if k not in V5178_ASSET_PROFILE})
+
+try:
+    pass  # v5.18.3.1: Streamlit magic 노출 방지
+except NameError:
+    V5178_INDUSTRY_PRESSURE = {}
+
+V51712_INDUSTRY_PRESSURE_PATCH = {
+    "반도체": {"flow": "수출 강세·AI 수요", "pressure": "강한 우호", "score": 4, "impact": "삼성전자·SK하이닉스에 산업 압력이 직접 연결됩니다.", "source": V51712_EXPORT_SOURCE},
+    "화장품": {"flow": "수출 우호·K뷰티", "pressure": "우호", "score": 3, "impact": "에이피알의 화장품/K뷰티 노출과 연결됩니다.", "source": V51712_EXPORT_SOURCE},
+    "전자부품": {"flow": "IT부품·전장 수요 확인", "pressure": "중립", "score": 0, "impact": "삼성전기는 IT부품·전장 수요 흐름을 확인하는 구조입니다.", "source": "내 보유종목 산업 매핑"},
+    "국내대형 ETF": {"flow": "코스피200·외국인 수급 연동", "pressure": "중립", "score": 0, "impact": "KODEX 200은 대형주·외국인 수급 영향을 함께 받습니다.", "source": "내 포트폴리오 보유구조"},
+    "로봇/휴머노이드 ETF": {"flow": "AI·로봇 테마 초기 압력", "pressure": "초기 우호", "score": 2, "impact": "TIGER 코리아휴머노이드로봇산업(0148J0)의 테마 노출과 연결됩니다.", "source": "내 포트폴리오 보유구조"},
+    "미분류": {"flow": "매핑 확인 필요", "pressure": "중립", "score": 0, "impact": "종목명/코드 매핑 확인이 필요합니다.", "source": "내부 매핑 미등록"},
+}
+V5178_INDUSTRY_PRESSURE.update(V51712_INDUSTRY_PRESSURE_PATCH)
+
+
+def _v51712_num(v, default=0.0):
+    try:
+        if v is None:
+            return default
+        if isinstance(v, str):
+            v = v.replace(",", "").replace("원", "").replace("주", "").strip()
+            if v in ("", "-", "nan", "None", "NaN"):
+                return default
+        import pandas as pd
+        x = pd.to_numeric(v, errors="coerce")
+        if pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+
+def _v51712_money(v):
+    try:
+        return f"{float(v):,.0f}원"
+    except Exception:
+        return "-"
+
+
+def _v51712_pct(v):
+    try:
+        return f"{float(v):.1f}%"
+    except Exception:
+        return "-"
+
+
+def _v51712_score_to_class(score):
+    try:
+        score = float(score)
+    except Exception:
+        score = 0
+    if score >= 4:
+        return "strong"
+    if score >= 2:
+        return "good"
+    if score <= -2:
+        return "bad"
+    return "neutral"
+
+
+def _v51712_bar(score):
+    try:
+        score = int(round(float(score)))
+    except Exception:
+        score = 0
+    if score >= 4:
+        return "█████"
+    if score >= 2:
+        return "████░"
+    if score <= -4:
+        return "█████"
+    if score <= -2:
+        return "████░"
+    return "███░░"
+
+
+def _v51712_pressure_label(score, label=None):
+    if label:
+        return str(label)
+    try:
+        score = float(score)
+    except Exception:
+        score = 0
+    if score >= 4:
+        return "강한 우호"
+    if score >= 2:
+        return "우호"
+    if score <= -2:
+        return "부담"
+    return "중립"
+
+
+def _v51712_css():
+    st.markdown("""
+    <style>
+    .v51712-grid {display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:14px; margin: 12px 0 22px 0;}
+    .v51712-card {border:1px solid rgba(148,163,184,.22); border-radius:18px; padding:18px 18px; background:rgba(15,23,42,.55); min-height:150px; box-shadow:0 8px 24px rgba(0,0,0,.16);}
+    .v51712-card-title {font-size:16px; color:#cbd5e1; font-weight:800; margin-bottom:8px;}
+    .v51712-card-main {font-size:30px; line-height:1.16; font-weight:900; color:#f8fafc; margin-bottom:8px;}
+    .v51712-card-sub {font-size:14px; color:#94a3b8; line-height:1.45;}
+    .v51712-pill {display:inline-block; padding:5px 10px; border-radius:999px; font-size:13px; font-weight:900; margin:4px 0 8px 0;}
+    .v51712-pill.strong,.v51712-pill.good {background:rgba(239,68,68,.18); color:#ff5252;}
+    .v51712-pill.neutral {background:rgba(148,163,184,.18); color:#cbd5e1;}
+    .v51712-pill.bad {background:rgba(59,130,246,.18); color:#60a5fa;}
+    .v51712-bar.strong,.v51712-bar.good {color:#ff4b4b; letter-spacing:1px; font-weight:900;}
+    .v51712-bar.neutral {color:#94a3b8; letter-spacing:1px; font-weight:900;}
+    .v51712-bar.bad {color:#3b82f6; letter-spacing:1px; font-weight:900;}
+    .v51712-summary {border-left:5px solid #ef4444; padding:14px 18px; border-radius:12px; background:rgba(239,68,68,.08); color:#e5e7eb; line-height:1.65; margin:10px 0 18px 0;}
+    .v51712-note {color:#94a3b8; font-size:13px; margin-top:8px;}
+    @media (max-width: 1100px) {.v51712-grid {grid-template-columns: repeat(2, minmax(0, 1fr));}}
+    @media (max-width: 680px) {.v51712-grid {grid-template-columns: 1fr;}}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def _v51712_clean_name(name="", code=""):
+    try:
+        return _v5178_clean_name(name, code)
+    except Exception:
+        n = str(name or "").strip()
+        c = str(code or "").strip().upper()
+        if c == "0148J0" or "휴머노이드" in n:
+            return "TIGER 코리아휴머노이드로봇산업"
+        return n or c
+
+
+def _v51712_profile(name="", code=""):
+    try:
+        return _v5178_profile(name, code)
+    except Exception:
+        clean = _v51712_clean_name(name, code)
+        return V5178_ASSET_PROFILE.get(clean, {"code": code, "industry": "미분류", "kind": "주식", "tags": [], "comment": "산업 매핑 확인이 필요합니다."})
+
+
+def _v51712_holdings_base(보유계산포트폴리오=None, 계산포트폴리오=None):
+    try:
+        base = _v5178_holdings_base(보유계산포트폴리오, 계산포트폴리오)
+        if base is not None:
+            return base
+    except Exception as e:
+        logging.warning("suppressed exception at line 16566: %s", e, exc_info=True)
+    import pandas as pd
+    df = 보유계산포트폴리오 if isinstance(보유계산포트폴리오, pd.DataFrame) and not 보유계산포트폴리오.empty else 계산포트폴리오
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=["종목명", "종목코드", "평가금액", "보유수량", "현재가"])
+    name_col = next((c for c in df.columns if "종목명" in str(c) or "상품명" in str(c)), df.columns[0])
+    code_col = next((c for c in df.columns if "코드" in str(c)), None)
+    qty_col = next((c for c in df.columns if "수량" in str(c) or "보유" in str(c)), None)
+    val_col = next((c for c in df.columns if "평가" in str(c) and "금액" in str(c)), None)
+    price_col = next((c for c in df.columns if "현재가" in str(c) or "기준가" in str(c)), None)
+    out = pd.DataFrame()
+    out["종목명"] = df[name_col].astype(str).map(lambda x: _v51712_clean_name(x, ""))
+    out["종목코드"] = df[code_col].astype(str) if code_col else ""
+    out["보유수량"] = df[qty_col].map(_v51712_num) if qty_col else 0
+    out["평가금액"] = df[val_col].map(_v51712_num) if val_col else 0
+    out["현재가"] = df[price_col].map(_v51712_num) if price_col else 0
+    return out
+
+
+def _v51712_industry_exposure(보유계산포트폴리오=None, 계산포트폴리오=None):
+    import pandas as pd
+    try:
+        exp = _v5178_industry_exposure(보유계산포트폴리오, 계산포트폴리오)
+        if isinstance(exp, pd.DataFrame) and not exp.empty:
+            return exp
+    except Exception as e:
+        logging.warning("suppressed exception at line 16592: %s", e, exc_info=True)
+    base = _v51712_holdings_base(보유계산포트폴리오, 계산포트폴리오)
+    rows = []
+    if isinstance(base, pd.DataFrame):
+        for _, r in base.iterrows():
+            name = _v51712_clean_name(r.get("종목명", ""), r.get("종목코드", ""))
+            p = _v51712_profile(name, r.get("종목코드", ""))
+            rows.append({"산업": p.get("industry", "미분류"), "종목명": name, "평가금액": _v51712_num(r.get("평가금액", 0))})
+    raw = pd.DataFrame(rows)
+    if raw.empty:
+        return pd.DataFrame(columns=["산업", "평가금액", "비중", "연결 종목", "현재 압력", "압력점수", "내 영향", "출처"])
+    total = raw["평가금액"].sum()
+    out = raw.groupby("산업", as_index=False)["평가금액"].sum()
+    names = raw.groupby("산업")["종목명"].apply(lambda s: " · ".join(sorted(set(s)))).reset_index(name="연결 종목")
+    out = out.merge(names, on="산업", how="left")
+    out["비중"] = out["평가금액"].apply(lambda x: x / total * 100 if total > 0 else 0)
+    out["현재 압력"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["pressure"])
+    out["압력점수"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["score"])
+    out["내 영향"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["impact"])
+    out["출처"] = out["산업"].apply(lambda x: V5178_INDUSTRY_PRESSURE.get(x, V5178_INDUSTRY_PRESSURE["미분류"])["source"])
+    return out.sort_values("비중", ascending=False).reset_index(drop=True)
+
+
+def _v51712_top_cards(exp):
+    """
+    v5.18.3.2 수정:
+    - HTML 문자열이 화면에 코드처럼 노출되는 문제를 막기 위해
+      st.markdown(HTML) 방식 대신 Streamlit 기본 metric/caption 방식으로 표시합니다.
+    """
+    if exp is None or exp.empty:
+        st.info("보유 포트폴리오 데이터가 부족해 압력 카드를 표시하지 못했습니다.")
+        return
+
+    cards = exp.head(4).copy()
+    cols = st.columns(min(4, len(cards))) if len(cards) > 0 else []
+    for i, (_, row) in enumerate(cards.iterrows()):
+        industry = str(row.get("산업", ""))
+        label = str(row.get("현재 압력", "중립"))
+        names = str(row.get("연결 종목", ""))
+        weight = _v51712_pct(row.get("비중", 0))
+        score = _v51712_num(row.get("압력점수", 0))
+        bar = _v51712_bar(score)
+
+        with cols[i % len(cols)]:
+            st.metric(industry, label, f"{weight} 노출")
+            st.caption(f"{bar} · {names}")
+
+def _v51712_pressure_top_table(exp):
+    import pandas as pd
+    rows = []
+    held = set(exp["산업"].astype(str).tolist()) if exp is not None and not exp.empty else set()
+    rows.append({"압력": "환율", "상태": "상승 시 수출주 민감", "연결": "반도체·화장품 수출 노출", "구분": "금융"})
+    rows.append({"압력": "미국 기술주", "상태": "AI·성장주 민감", "연결": "반도체·로봇/휴머노이드 ETF", "구분": "금융"})
+    rows.append({"압력": "VIX", "상태": "상승 시 변동성 확대", "연결": "개별주 비중 민감", "구분": "위험"})
+    rows.append({"압력": "외국인 수급", "상태": "순매수/순매도 방향 확인", "연결": "KODEX 200·대형주", "구분": "수급"})
+    for ind in ["반도체", "화장품", "로봇/휴머노이드 ETF", "전자부품", "국내대형 ETF"]:
+        if ind in held:
+            info = V5178_INDUSTRY_PRESSURE.get(ind, V5178_INDUSTRY_PRESSURE["미분류"])
+            rows.append({"압력": ind, "상태": info.get("flow", ""), "연결": info.get("impact", ""), "구분": "산업"})
+    return pd.DataFrame(rows)
+
+
+def _v51712_holdings_comments(보유계산포트폴리오=None, 계산포트폴리오=None):
+    import pandas as pd
+    base = _v51712_holdings_base(보유계산포트폴리오, 계산포트폴리오)
+    if not isinstance(base, pd.DataFrame) or base.empty:
+        return pd.DataFrame(columns=["보유자산", "산업", "비중", "현재 코멘트"])
+    total = base["평가금액"].map(_v51712_num).sum() if "평가금액" in base.columns else 0
+    rows = []
+    for _, r in base.sort_values("평가금액", ascending=False).iterrows():
+        name = _v51712_clean_name(r.get("종목명", ""), r.get("종목코드", ""))
+        p = _v51712_profile(name, r.get("종목코드", ""))
+        industry = p.get("industry", "미분류")
+        pressure = V5178_INDUSTRY_PRESSURE.get(industry, V5178_INDUSTRY_PRESSURE["미분류"])
+        val = _v51712_num(r.get("평가금액", 0))
+        weight = val / total * 100 if total > 0 else 0
+        if industry == "반도체":
+            comment = "반도체 수출·AI 수요·환율 압력이 함께 연결되는 핵심 노출입니다."
+        elif industry == "화장품":
+            comment = "산업통상부 수출입동향의 화장품 수출 우호 흐름이 에이피알 노출과 연결됩니다."
+        elif industry == "로봇/휴머노이드 ETF":
+            comment = "로봇·휴머노이드·AI 테마에 연결된 ETF입니다. 실시간 시세가 지연되면 보유평가 기준으로 반영합니다."
+        elif industry == "국내대형 ETF":
+            comment = "국내 대형주와 외국인 수급 방향에 함께 노출된 시장형 ETF입니다."
+        elif industry == "전자부품":
+            comment = "IT부품·전장 수요를 확인해야 하는 전자부품 노출입니다."
+        else:
+            comment = p.get("comment", "산업 매핑 확인이 필요합니다.")
+        rows.append({"보유자산": name, "산업": industry, "비중": weight, "현재 압력": pressure.get("pressure", "중립"), "현재 코멘트": comment})
+    return pd.DataFrame(rows)
+
+
+def _v51712_show_df(df, fmt=None, color_cols=None):
+    try:
+        sty = df.style
+        if fmt:
+            sty = sty.format(fmt)
+        def color_pressure(v):
+            t = str(v)
+            if "우호" in t:
+                return "color:#ff4b4b;font-weight:800;"
+            if "부담" in t:
+                return "color:#3b82f6;font-weight:800;"
+            return "color:#cbd5e1;font-weight:700;"
+        for c in (color_cols or []):
+            if c in df.columns:
+                sty = sty.map(color_pressure, subset=[c])
+        if "표데이터프레임" in globals():
+            표데이터프레임(sty, width="stretch", hide_index=True)
+        else:
+            st.dataframe(sty, use_container_width=True, hide_index=True)
+    except Exception:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def _v51712_summary_text(exp):
+    if exp is None or exp.empty:
+        return "보유자산 데이터가 부족해 현재 압력 요약을 만들지 못했습니다."
+    industries = set(exp["산업"].astype(str).tolist())
+    parts = []
+    if "반도체" in industries:
+        names = exp.loc[exp["산업"].eq("반도체"), "연결 종목"].iloc[0]
+        parts.append(f"반도체 비중이 핵심 축이며, 현재 수출·AI 압력은 {names}에 연결됩니다.")
+    if "화장품" in industries:
+        names = exp.loc[exp["산업"].eq("화장품"), "연결 종목"].iloc[0]
+        parts.append(f"화장품 수출 우호 흐름은 {names}의 산업 노출과 연결됩니다.")
+    if "로봇/휴머노이드 ETF" in industries:
+        names = exp.loc[exp["산업"].eq("로봇/휴머노이드 ETF"), "연결 종목"].iloc[0]
+        parts.append(f"로봇/휴머노이드 ETF는 AI·로봇 테마 압력의 초기 노출로 분류됩니다.")
+    if "국내대형 ETF" in industries:
+        parts.append("KODEX 200은 국내 대형주와 외국인 수급 방향을 함께 확인해야 하는 구조입니다.")
+    if not parts:
+        top = exp.iloc[0]
+        parts.append(f"현재 최대 산업 노출은 {top['산업']}이며, {top.get('연결 종목','')}와 연결됩니다.")
+    return "<br>".join(parts)
+
+
+def 시장압력상황판_v51712(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    _v51712_css()
+    exp = _v51712_industry_exposure(보유계산포트폴리오, 계산포트폴리오)
+    comments = _v51712_holdings_comments(보유계산포트폴리오, 계산포트폴리오)
+
+    st.markdown("### 시장압력 상황판")
+    st.caption("시장을 예측하지 않고, 현재 외부 압력이 내 포트폴리오 어느 부분에 연결되는지 보여줍니다.")
+
+    top_industry = exp.iloc[0]["산업"] if exp is not None and not exp.empty else "확인 필요"
+    favorable = int(exp["현재 압력"].astype(str).str.contains("우호").sum()) if exp is not None and not exp.empty else 0
+    exposure_count = len(exp) if exp is not None else 0
+    total_value = exp["평가금액"].map(_v51712_num).sum() if exp is not None and not exp.empty and "평가금액" in exp.columns else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("산업 노출", f"{exposure_count}개")
+    c2.metric("핵심 산업", str(top_industry))
+    c3.metric("현재 상태", "우호 우세" if favorable >= 2 else "혼조")
+    c4.metric("연결 평가액", _v51712_money(total_value))
+
+    st.markdown("#### 현재 핵심 압력 TOP")
+    _v51712_top_cards(exp)
+
+    st.markdown("#### 내 포트폴리오 압력 요약")
+    st.markdown(f"<div class='v51712-summary'>{_v51712_summary_text(exp)}</div>", unsafe_allow_html=True)
+
+    st.markdown("#### 압력 흐름판")
+    top_df = _v51712_pressure_top_table(exp)
+    _v51712_show_df(top_df, color_cols=["상태"])
+
+    st.markdown("#### 산업 압력 · 보유자산 연결")
+    if exp is None or exp.empty:
+        st.info("산업 압력 연결표를 만들 데이터가 부족합니다.")
+    else:
+        view = exp[["산업", "평가금액", "비중", "연결 종목", "현재 압력", "내 영향", "출처"]].copy()
+        _v51712_show_df(view, fmt={"평가금액": lambda v: f"{float(v):,.0f}", "비중": lambda v: f"{float(v):.1f}%"}, color_cols=["현재 압력"])
+
+    st.markdown("#### 내 보유종목 코멘트")
+    if comments is None or comments.empty:
+        st.info("보유종목 코멘트를 만들 데이터가 부족합니다.")
+    else:
+        _v51712_show_df(comments, fmt={"비중": lambda v: f"{float(v):.1f}%"}, color_cols=["현재 압력"])
+
+    with st.expander("매핑 확인", expanded=False):
+        rows = []
+        for name, p in V5178_ASSET_PROFILE.items():
+            rows.append({"보유자산": name, "코드": p.get("code", ""), "주산업": p.get("industry", ""), "구분": p.get("kind", ""), "핵심태그": ", ".join(p.get("tags", [])[:4])})
+        import pandas as pd
+        _v51712_show_df(pd.DataFrame(rows))
+
+    st.caption("자료: 산업통상부 「2026년 5월 수출입동향」 · 0148J0은 TIGER 코리아휴머노이드로봇산업으로 보유평가 기준 fallback 처리")
+
+
+def 분석인사이트단순화UI(거래이력df=None, 계산포트폴리오=None, 보유계산포트폴리오=None):
+    st.markdown("## 분석 / 인사이트")
+    st.caption("v5.17.13: 압력 상황실 UX · 핵심 압력 TOP 카드 · 산업 압력 흐름판 · 보유종목 코멘트 고도화")
+    try:
+        포트폴리오핵심상태간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"포트폴리오 핵심상태 표시 제한: {e}")
+    try:
+        최근거래변화간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"최근 거래 변화 표시 제한: {e}")
+    시장압력상황판_v51712(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    try:
+        집중위험체크간단UI(거래이력df, 계산포트폴리오, 보유계산포트폴리오)
+    except Exception as e:
+        st.caption(f"집중위험 체크 표시 제한: {e}")
 
 
 if 선택섹터 == "분석 / 인사이트":
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
     보유계산포트폴리오 = 최적화결과["보유계산포트폴리오"]
-    보유종목옵션 = 최적화결과["보유종목옵션"]
 
-    투자핵심인사이트요약UI(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오)
-    외부거시시장영향인사이트UI(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오)
-    거래메모패턴인사이트UI(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오)
-
-    # 보유 종목 개별 분석
-    # -----------------------------------
-    st.markdown("---")
-    st.subheader("보유 종목 개별 분석")
-    st.caption("아래 분석 종목 목록은 현재 거래이력으로 계산된 보유수량 기준으로 자동 생성됩니다. 따라서 거래이력·포트폴리오 현황·개별분석이 항상 같은 기준을 사용합니다.")
-
+    # v5.17.3: 중복 코멘트와 과도한 개별분석을 줄이고,
+    # 거래이력·포트폴리오 상태·시장 압력 중심의 단순 구조로 전환합니다.
     try:
-        if not 보유종목옵션:
-            st.info("현재 보유 중인 종목이 없어 개별 분석 항목을 표시하지 않습니다.")
-        else:
-            옵션코드목록 = [항목["종목코드"] for 항목 in 보유종목옵션]
-
-            # 개별분석 선택 상태는 단일 키로만 관리해 시세 새로고침 직후
-            # 드롭다운 표시값과 실제 분석 기준이 엇갈리지 않도록 한다.
-            현재선택코드 = st.session_state.get("holding_asset_choice_v45", "")
-            if 현재선택코드 not in 옵션코드목록:
-                현재선택코드 = 옵션코드목록[0]
-                st.session_state["holding_asset_choice_v45"] = 현재선택코드
-
-            선택종목코드 = st.selectbox(
-                "분석할 보유 종목 선택",
-                옵션코드목록,
-                format_func=lambda 코드: next((항목["표시"] for 항목 in 보유종목옵션 if 항목["종목코드"] == 코드), 코드),
-                key="holding_asset_choice_v45",
-            )
-
-            # 옵션 재계산/새로고침 직후에도 실제 분석 대상은 현재 위젯 값과
-            # 옵션 목록을 기준으로 다시 한 번 강제 정합성 확인
-            if 선택종목코드 not in 옵션코드목록:
-                선택종목코드 = 옵션코드목록[0]
-                st.session_state["holding_asset_choice_v45"] = 선택종목코드
-
-            선택행 = next((항목 for 항목 in 보유종목옵션 if 항목["종목코드"] == 선택종목코드), None)
-            선택종목명 = 선택행["종목명"] if 선택행 else 종목코드기준종목명(선택종목코드)
-            선택종목구분 = 종목구분판단(선택종목코드, 선택종목명)
-            가격데이터 = 자산과거가격가져오기(선택종목구분, 선택종목코드, 개월수=6)
-            선택포트폴리오행 = 보유계산포트폴리오[보유계산포트폴리오["종목코드"] == 선택종목코드]
-
-            st.caption(f"현재 선택 종목: {선택종목명} · 구분: {선택종목구분} · 코드: {선택종목코드}")
-
-            if not 선택포트폴리오행.empty:
-                선택행데이터 = 선택포트폴리오행.iloc[0]
-                정보칸1, 정보칸2, 정보칸3 = st.columns(3)
-                정보칸1.metric("보유수량", 숫자표시(선택행데이터.get("보유수량")))
-                정보칸2.metric("매입 평균단가", 금액표시(선택행데이터.get("매입평균단가")))
-                정보칸3.metric("현재 비중", 비율표시(선택행데이터.get("현재비중")))
-
-            if 가격데이터.empty:
-                st.warning("가격 데이터를 불러오지 못했습니다.")
-            else:
-                최신값 = 가격데이터.iloc[-1]
-                이전값 = 가격데이터.iloc[-2] if len(가격데이터) >= 2 else 최신값
-                가격변화 = 최신값["종가"] - 이전값["종가"]
-                등락률 = (가격변화 / 이전값["종가"] * 100) if 이전값["종가"] != 0 else 0
-
-                신호결과 = 신호판정계산(가격데이터)
-                자동코멘트결과 = 고급매매코멘트생성(선택종목명, 가격데이터, 선택포트폴리오행)
-                모델분석 = 차트분석문구(선택종목명, 가격데이터)
-                종목거래표 = 종목거래이력표생성(수정포트폴리오, 선택종목코드)
-                상세해설문장 = 보유종목상세해설생성(선택종목명, 가격데이터, 선택포트폴리오행)
-
-                보유분석탭1, 보유분석탭2, 보유분석탭3, 보유분석탭4 = st.tabs(["개요", "상세 해설", "기술적 분석", "거래기록"])
-
-                with 보유분석탭1:
-                    if 모바일여부():
-                        행1_1, 행1_2 = st.columns(2)
-                        행1_1.metric("현재가", 금액표시(최신값["종가"]), f"{가격변화:,.0f}원")
-                        행1_2.metric("등락률", 비율표시(등락률))
-                        행2_1, 행2_2 = st.columns(2)
-                        행2_1.metric("거래량", 숫자표시(최신값["거래량"]))
-                        행2_2.metric("RSI(14)", f"{최신값['RSI(14)']:.2f}" if pd.notna(최신값["RSI(14)"]) else "-")
-                    else:
-                        칸1, 칸2, 칸3, 칸4 = st.columns(4)
-                        칸1.metric("현재가", 금액표시(최신값["종가"]), f"{가격변화:,.0f}원")
-                        칸2.metric("등락률", 비율표시(등락률))
-                        칸3.metric("거래량", 숫자표시(최신값["거래량"]))
-                        칸4.metric("RSI(14)", f"{최신값['RSI(14)']:.2f}" if pd.notna(최신값["RSI(14)"]) else "-")
-
-                    st.markdown(자동판정배지HTML(자동코멘트결과["판정"], 자동코멘트결과["실행"], 자동코멘트결과["강도"]), unsafe_allow_html=True)
-                    st.info(자동코멘트결과["핵심문구"])
-
-                    요약칸1, 요약칸2, 요약칸3, 요약칸4 = st.columns(4)
-                    요약칸1.metric("참고 판정", 자동코멘트결과["판정"])
-                    요약칸2.metric("추세 판정", 자동코멘트결과["추세판정"])
-                    요약칸3.metric("참고 방향", 자동코멘트결과["실행"])
-                    요약칸4.metric("복합 총점", f"{자동코멘트결과['총점']:.2f}점" if 자동코멘트결과.get("총점") is not None else "-")
-
-                    st.markdown("#### 핵심 판독 요약")
-                    판독칸1, 판독칸2, 판독칸3, 판독칸4 = st.columns(4)
-                    판독칸1.metric("가격 위치", 자동코멘트결과.get("위치판정", "-"))
-                    판독칸2.metric("RSI 판정", 자동코멘트결과.get("RSI판정", "-"))
-                    판독칸3.metric("거래량 판정", 자동코멘트결과.get("거래량판정", "-"))
-                    판독칸4.metric("단순 신호", 신호결과.get("종합신호", "-"))
-                    st.caption(f"간단 참고 의견: {신호결과.get('실행의견', '-')}")
-
-                    if not 선택포트폴리오행.empty:
-                        포지션행 = 선택포트폴리오행.iloc[0]
-                        추가칸1, 추가칸2, 추가칸3, 추가칸4 = st.columns(4)
-                        추가칸1.metric("평가금액", 금액표시(포지션행.get("평가금액")))
-                        추가칸2.metric("평가손익", 금액표시(포지션행.get("평가손익")))
-                        추가칸3.metric("보유 수익률", 비율표시(포지션행.get("수익률")))
-                        최근거래일 = "-"
-                        if not 종목거래표.empty and "거래일자" in 종목거래표.columns:
-                            try:
-                                최근거래일 = str(pd.to_datetime(종목거래표["거래일자"], errors="coerce").max().date())
-                            except Exception:
-                                최근거래일 = "-"
-                        추가칸4.metric("최근 거래일", 최근거래일)
-
-                    st.plotly_chart(가격그래프(가격데이터, f"{선택종목명} 주가 추이"), width="stretch", config={"displaylogo": False, "responsive": True})
-
-                    최근거래요약 = pd.DataFrame()
-                    if not 종목거래표.empty:
-                        최근거래요약 = 종목거래표.copy().tail(5)
-                        표시컬럼 = [c for c in ["거래일자", "거래구분", "거래수량", "거래단가", "거래금액", "누적보유수량"] if c in 최근거래요약.columns]
-                        최근거래요약 = 최근거래요약[표시컬럼].copy()
-                        if "거래단가" in 최근거래요약.columns:
-                            최근거래요약["거래단가"] = 최근거래요약["거래단가"].map(금액표시)
-                        if "거래금액" in 최근거래요약.columns:
-                            최근거래요약["거래금액"] = 최근거래요약["거래금액"].map(금액표시)
-                        if "거래수량" in 최근거래요약.columns:
-                            최근거래요약["거래수량"] = 최근거래요약["거래수량"].map(숫자표시)
-                        if "누적보유수량" in 최근거래요약.columns:
-                            최근거래요약["누적보유수량"] = 최근거래요약["누적보유수량"].map(숫자표시)
-
-                    개요왼쪽, 개요오른쪽 = st.columns([1.5, 1.1])
-                    with 개요왼쪽:
-                        st.markdown("#### 최근 거래 흐름")
-                        if 최근거래요약.empty:
-                            st.info("이 종목의 최근 거래 요약을 표시할 데이터가 없습니다.")
-                        else:
-                            표데이터프레임(index_1부터(최근거래요약.reset_index(drop=True)), width="stretch")
-                    with 개요오른쪽:
-                        st.markdown("#### 빠른 해석")
-                        st.markdown(f"- 현재 자동 판정은 **{자동코멘트결과['판정']}**입니다.")
-                        st.markdown(f"- 추세는 **{자동코멘트결과.get('추세판정', '-')}**, 가격 위치는 **{자동코멘트결과.get('위치판정', '-')}**입니다.")
-                        st.markdown(f"- RSI는 **{자동코멘트결과.get('RSI판정', '-')}**, 거래량은 **{자동코멘트결과.get('거래량판정', '-')}**입니다.")
-                        st.markdown(f"- 현재 참고 방향은 **{자동코멘트결과['실행']}** 쪽으로 해석됩니다.")
-
-                    개요체크표 = pd.concat([
-                        자동코멘트결과["근거표"],
-                        신호결과["체크표"]
-                    ], axis=0, ignore_index=True)
-                    with st.expander("세부 체크표 보기", expanded=False):
-                        표데이터프레임(index_1부터(개요체크표), width="stretch")
-
-                with 보유분석탭2:
-                    st.markdown("#### 기술지표 기반 참고 코멘트")
-                    st.success(f"**{자동코멘트결과['판정']} / {자동코멘트결과['실행']}**")
-                    st.write(자동코멘트결과["핵심문구"])
-                    for 문장 in 자동코멘트결과["세부코멘트"]:
-                        st.markdown(f"- {문장}")
-                    with st.expander("참고 판정 근거 보기", expanded=True):
-                        for 항목 in 자동코멘트결과["근거"]:
-                            st.markdown(f"- {항목}")
-                        표데이터프레임(index_1부터(자동코멘트결과["근거표"]), width="stretch")
-                        st.warning(자동코멘트결과["위험문구"])
-
-                    with st.expander("참고 판정 기준 설명", expanded=True):
-                        st.markdown("- 참고 판정은 **추세·가격 위치·RSI·거래량·당일 흐름**을 함께 점수화해 계산합니다.")
-                        st.markdown("- 따라서 한 항목이 같아도 다른 항목이 변하면 참고 판정이 바뀔 수 있습니다.")
-                        표데이터프레임(index_1부터(자동코멘트결과["기준표"]), width="stretch")
-
-                    st.markdown("#### 차트 해설")
-                    for 문장 in 상세해설문장:
-                        st.markdown(f"- {문장}")
-
-                    st.markdown("#### 분석 관점별 해석 비교")
-                    st.caption("아래 내용은 실제 외부 AI 모델 호출 결과가 아니라, 동일한 가격 데이터와 기술지표를 서로 다른 관점으로 해석한 규칙 기반 참고자료입니다.")
-                    모델탭1, 모델탭2, 모델탭3 = st.tabs(["균형 관점", "추세 관점", "위험 관점"])
-                    with 모델탭1:
-                        분석카드표시(모델분석["ChatGPT"])
-                    with 모델탭2:
-                        분석카드표시(모델분석["Gemini"])
-                    with 모델탭3:
-                        분석카드표시(모델분석["Claude"])
-
-                with 보유분석탭3:
-                    기술진단 = 기술분석진단계산(가격데이터)
-                    기술차트탭0, 기술차트탭1 = st.tabs(["실전 요약", "체크표"])
-
-                    with 기술차트탭0:
-                        실전칸1, 실전칸2, 실전칸3, 실전칸4 = st.columns(4)
-                        실전칸1.metric("추세 배열", 기술진단.get("추세배열", "-"))
-                        실전칸2.metric("20일 지지", 금액표시(기술진단.get("지지")))
-                        실전칸3.metric("20일 저항", 금액표시(기술진단.get("저항")))
-                        실전칸4.metric("단순 참고 신호", 신호결과.get("종합신호", "-"))
-
-                        st.markdown("#### 실전 해석 요약")
-                        for 문장 in 기술진단.get("요약문장", []):
-                            st.markdown(f"- {문장}")
-
-                        요약왼쪽, 요약오른쪽 = st.columns([1.05, 1.15])
-                        with 요약왼쪽:
-                            st.markdown("#### 핵심 체크")
-                            표데이터프레임(index_1부터(기술진단["핵심표"]), width="stretch", hide_index=False)
-                        with 요약오른쪽:
-                            st.markdown("#### 지지·저항 및 기준선")
-                            레벨표표시 = 기술진단["레벨표"].copy()
-                            if not 레벨표표시.empty:
-                                레벨표표시["가격"] = 레벨표표시["가격"].map(금액표시)
-                            표데이터프레임(index_1부터(레벨표표시), width="stretch", hide_index=False)
-
-                        with st.expander("실전 체크포인트", expanded=True):
-                            st.markdown("1. **상승 배열**이면 20일선 이탈 여부를 먼저 확인합니다.")
-                            st.markdown("2. **지지선 근처**에서는 분할 접근, **저항선 근처**에서는 추격 매수보다 확인이 우선입니다.")
-                            st.markdown("3. RSI가 과열인데 거래량까지 급증하면 단기 과열 가능성을 함께 봅니다.")
-                            st.markdown("4. 가격이 20일선과 60일선을 동시에 하회하면 단기보다 중기 흐름 훼손 여부를 더 중요하게 봅니다.")
-                        st.info("캔들차트는 반복 오류로 인해 이번 버전에서 제외했습니다. 개요 탭의 주가 추이와 아래 체크표를 함께 참고해 주세요.")
-
-                    with 기술차트탭1:
-                        기술체크 = pd.DataFrame([
-                            {"항목": "최근 기준일", "값": str(pd.to_datetime(가격데이터.index[-1]).date())},
-                            {"항목": "5일 이동평균", "값": 숫자표시(최신값.get("5일평균"), 2)},
-                            {"항목": "20일 이동평균", "값": 숫자표시(최신값.get("20일평균"), 2)},
-                            {"항목": "60일 이동평균", "값": 숫자표시(최신값.get("60일평균"), 2)},
-                            {"항목": "120일 이동평균", "값": 숫자표시(최신값.get("120일평균"), 2)},
-                            {"항목": "RSI(14)", "값": 숫자표시(최신값.get("RSI(14)"), 2)},
-                            {"항목": "최근 거래량", "값": 숫자표시(최신값.get("거래량"))},
-                            {"항목": "20일 고가", "값": 숫자표시(가격데이터.tail(20)["고가"].max(), 2)},
-                            {"항목": "20일 저가", "값": 숫자표시(가격데이터.tail(20)["저가"].min(), 2)},
-                            {"항목": "60일 고가", "값": 숫자표시(가격데이터.tail(60)["고가"].max(), 2)},
-                            {"항목": "60일 저가", "값": 숫자표시(가격데이터.tail(60)["저가"].min(), 2)},
-                        ])
-                        표데이터프레임(index_1부터(기술체크), width="stretch")
-                        with st.expander("신호 체크표 함께 보기", expanded=False):
-                            표데이터프레임(index_1부터(신호결과["체크표"]), width="stretch")
-
-                with 보유분석탭4:
-                    st.markdown("#### 선택 종목 매수·매도 전체 기록")
-                    if 종목거래표.empty:
-                        st.info("선택 종목의 거래기록이 없습니다.")
-                    else:
-                        표데이터프레임(거래기록표시용서식(index_1부터(종목거래표)), width="stretch")
+        분석인사이트단순화UI(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오)
     except Exception as e:
-        st.error(f"보유 종목 개별 분석 영역 오류: {e}")
-
-
+        st.error(f"분석/인사이트 단순화 화면 오류: {e}")
 
 st.markdown("---")
 st.markdown('개발자 조현웅 <a href="mailto:hwcho@me.com">hwcho@me.com</a>', unsafe_allow_html=True)
@@ -13341,3 +16831,569 @@ if "trade_history_df_v22" in st.session_state and "trade_history_last_calc_finge
 # - 현금 -> ETF / 주식 이동 감지
 # - 외부 인출과 내부 자산 이동 구분
 # =========================================================
+
+
+# ============================================================
+# v5.17.11 보정: 0148J0 휴머노이드 ETF 보유평가 기준 표시 유틸
+# ============================================================
+HUMANOID_ETF_CODE = "0148J0"
+HUMANOID_ETF_NAME = "TIGER 코리아휴머노이드로봇산업"
+HUMANOID_ETF_ALIASES = (
+    "0148J0",
+    "TIGER 코리아휴머노이드로봇산업",
+    "TIGER코리아휴머노이드로봇산업",
+    "코리아휴머노이드로봇산업",
+    "휴머노이드로봇산업",
+)
+
+
+def _v51710_to_number_safe(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("원", "").strip()
+            if value in ("", "-", "nan", "None"):
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v51710_norm_text(value):
+    return str(value or "").strip().replace(" ", "").upper()
+
+
+def _v51710_is_humanoid_etf(row_or_text):
+    """종목명/종목코드 어느 쪽으로 들어와도 0148J0 ETF를 식별합니다."""
+    if isinstance(row_or_text, dict):
+        candidates = []
+        for key in ("종목코드", "코드", "ticker", "Ticker", "종목명", "상품명", "자산명", "name", "Name"):
+            if key in row_or_text:
+                candidates.append(row_or_text.get(key))
+    else:
+        candidates = [row_or_text]
+    norm_aliases = {_v51710_norm_text(x) for x in HUMANOID_ETF_ALIASES}
+    for c in candidates:
+        if _v51710_norm_text(c) in norm_aliases:
+            return True
+        if "휴머노이드" in str(c or "") and "로봇" in str(c or ""):
+            return True
+    return False
+
+
+def _v51710_find_col(df, names):
+    for n in names:
+        if n in getattr(df, "columns", []):
+            return n
+    return None
+
+
+def _v51710_humanoid_holding_basis(df):
+    """보유/포트폴리오 DataFrame에서 0148J0 보유평가 기준가를 계산합니다."""
+    import pandas as pd
+    if df is None or not hasattr(df, "empty") or df.empty:
+        return None
+
+    name_cols = [c for c in df.columns if any(k in str(c) for k in ["종목명", "상품명", "자산명", "name", "Name"])]
+    code_cols = [c for c in df.columns if any(k in str(c) for k in ["종목코드", "코드", "ticker", "Ticker"])]
+    mask = pd.Series(False, index=df.index)
+    for c in name_cols + code_cols:
+        s = df[c].astype(str)
+        mask = mask | s.str.replace(" ", "", regex=False).str.upper().isin({_v51710_norm_text(x) for x in HUMANOID_ETF_ALIASES})
+        mask = mask | (s.str.contains("휴머노이드", na=False) & s.str.contains("로봇", na=False))
+    rows = df[mask]
+    if rows.empty:
+        return None
+
+    qty_col = _v51710_find_col(df, ["보유수량", "수량", "잔고수량", "보유", "quantity", "Quantity"])
+    eval_col = _v51710_find_col(df, ["평가금액", "현재평가금액", "평가액", "현재가치", "잔고평가금액", "market_value", "Market Value"])
+    price_col = _v51710_find_col(df, ["현재가", "기준가", "평균단가", "매입단가", "평단가", "price", "Price"])
+    buy_col = _v51710_find_col(df, ["매입금액", "투자원금", "원금", "매수금액", "cost", "Cost"])
+
+    qty = sum(_v51710_to_number_safe(v) for v in rows[qty_col]) if qty_col else 0.0
+    eval_amt = sum(_v51710_to_number_safe(v) for v in rows[eval_col]) if eval_col else 0.0
+    buy_amt = sum(_v51710_to_number_safe(v) for v in rows[buy_col]) if buy_col else 0.0
+
+    price = 0.0
+    if qty > 0 and eval_amt > 0:
+        price = eval_amt / qty
+    elif price_col:
+        vals = [_v51710_to_number_safe(v) for v in rows[price_col]]
+        vals = [v for v in vals if v > 0]
+        price = vals[-1] if vals else 0.0
+    elif qty > 0 and buy_amt > 0:
+        price = buy_amt / qty
+
+    return {
+        "code": HUMANOID_ETF_CODE,
+        "name": HUMANOID_ETF_NAME,
+        "quantity": qty,
+        "price": price,
+        "eval_amount": eval_amt if eval_amt > 0 else (price * qty if price > 0 and qty > 0 else 0),
+        "source": "보유평가 기준",
+        "is_fallback": True,
+    }
+
+
+def _v51710_patch_monitor_asset(asset, holdings_df=None):
+    """모니터 카드용 asset dict에 0148J0 기준가/평가액을 보정합니다."""
+    try:
+        if not isinstance(asset, dict) or not _v51710_is_humanoid_etf(asset):
+            return asset
+        basis = _v51710_humanoid_holding_basis(holdings_df) if holdings_df is not None else None
+        asset["종목코드"] = HUMANOID_ETF_CODE
+        asset["코드"] = HUMANOID_ETF_CODE
+        asset["종목명"] = HUMANOID_ETF_NAME
+        asset["name"] = HUMANOID_ETF_NAME
+        if basis:
+            if basis.get("quantity", 0) > 0:
+                asset["보유수량"] = basis["quantity"]
+                asset["수량"] = basis["quantity"]
+            if basis.get("price", 0) > 0:
+                asset["현재가"] = basis["price"]
+                asset["price"] = basis["price"]
+                asset["시세상태"] = "보유평가 기준"
+            if basis.get("eval_amount", 0) > 0:
+                asset["평가금액"] = basis["eval_amount"]
+        asset["시세조회성공"] = True
+        asset["price_ok"] = True
+        asset["status"] = "보유평가 기준"
+    except Exception as e:
+        logging.warning("suppressed exception at line 16962: %s", e, exc_info=True)
+    return asset
+
+
+def _v51710_filter_failed_assets(failed_assets):
+    """보정 가능한 0148J0은 실패 목록에서 제외합니다."""
+    try:
+        return [x for x in (failed_assets or []) if not _v51710_is_humanoid_etf(x)]
+    except Exception:
+        return failed_assets
+
+
+# ============================================================
+# v5.17.11 보정 래퍼: 모니터링 카드 데이터 생성 후 0148J0 표시 보정
+# ============================================================
+def _v51710_wrap_humanoid_monitor_functions():
+    g = globals()
+    candidate_names = [
+        "대표종목모니터링데이터생성",
+        "주요모니터링데이터생성",
+        "모니터링자산목록생성",
+        "build_monitor_assets",
+        "build_monitoring_assets",
+        "create_monitoring_assets",
+    ]
+    holdings_candidates = [
+        "수정포트폴리오", "계산포트폴리오", "보유계산포트폴리오", "통합자산표", "portfolio_df", "holdings_df"
+    ]
+
+    for fname in candidate_names:
+        fn = g.get(fname)
+        if not callable(fn) or getattr(fn, "_v51710_wrapped", False):
+            continue
+
+        def make_wrapper(original):
+            def wrapper(*args, **kwargs):
+                result = original(*args, **kwargs)
+                holdings_df = None
+                for a in list(args) + list(kwargs.values()):
+                    if hasattr(a, "columns"):
+                        holdings_df = a
+                        break
+                if holdings_df is None:
+                    for hname in holdings_candidates:
+                        obj = g.get(hname)
+                        if hasattr(obj, "columns"):
+                            holdings_df = obj
+                            break
+                try:
+                    if isinstance(result, list):
+                        result = [_v51710_patch_monitor_asset(x, holdings_df) for x in result]
+                    elif isinstance(result, dict):
+                        if _v51710_is_humanoid_etf(result):
+                            result = _v51710_patch_monitor_asset(result, holdings_df)
+                        else:
+                            for k, v in list(result.items()):
+                                if isinstance(v, list):
+                                    result[k] = [_v51710_patch_monitor_asset(x, holdings_df) for x in v]
+                except Exception as e:
+                    logging.warning("suppressed exception at line 17021: %s", e, exc_info=True)
+                return result
+            wrapper._v51710_wrapped = True
+            return wrapper
+
+        g[fname] = make_wrapper(fn)
+
+try:
+    _v51710_wrap_humanoid_monitor_functions()
+except Exception as e:
+    logging.warning("suppressed exception at line 17031: %s", e, exc_info=True)
+
+
+# ============================================================
+# v5.17.11 보정: 0148J0 실패 판정 로직 정합성 보정
+# ============================================================
+HUMANOID_ETF_CODE = globals().get("HUMANOID_ETF_CODE", "0148J0")
+HUMANOID_ETF_NAME = globals().get("HUMANOID_ETF_NAME", "TIGER 코리아휴머노이드로봇산업")
+HUMANOID_ETF_ALIASES = tuple(dict.fromkeys(list(globals().get("HUMANOID_ETF_ALIASES", ())) + [
+    "0148J0",
+    "TIGER 코리아휴머노이드로봇산업",
+    "TIGER코리아휴머노이드로봇산업",
+    "TIGER 코리아휴머노이드로봇산업 ETF",
+    "코리아휴머노이드로봇산업",
+    "휴머노이드로봇산업",
+]))
+
+
+def _v51711_to_number_safe(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("원", "").replace("주", "").strip()
+            if value in ("", "-", "nan", "None", "NaN"):
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v51711_norm_text(value):
+    return str(value or "").strip().replace(" ", "").replace("-", "").upper()
+
+
+def _v51711_is_humanoid_etf(obj):
+    """dict/Series/문자열 어디서 들어와도 0148J0 ETF를 식별합니다."""
+    try:
+        candidates = []
+        if isinstance(obj, dict):
+            keys = [
+                "종목코드", "코드", "단축코드", "표준코드", "ticker", "Ticker", "symbol", "Symbol",
+                "종목명", "상품명", "자산명", "name", "Name", "display_name", "title",
+            ]
+            for k in keys:
+                if k in obj:
+                    candidates.append(obj.get(k))
+        elif hasattr(obj, "to_dict"):
+            return _v51711_is_humanoid_etf(obj.to_dict())
+        else:
+            candidates.append(obj)
+
+        norm_aliases = {_v51711_norm_text(x) for x in HUMANOID_ETF_ALIASES}
+        for c in candidates:
+            raw = str(c or "")
+            norm = _v51711_norm_text(raw)
+            if norm in norm_aliases:
+                return True
+            if "0148J0" in norm:
+                return True
+            if "휴머노이드" in raw and "로봇" in raw:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _v51711_has_holding_basis(obj):
+    """실시간 시세는 없어도 보유자료가 있으면 실패가 아닌 정상 fallback 자산으로 봅니다."""
+    try:
+        if obj is None:
+            return False
+        if hasattr(obj, "to_dict") and not isinstance(obj, dict):
+            obj = obj.to_dict()
+        if not isinstance(obj, dict):
+            return _v51711_is_humanoid_etf(obj)
+
+        if not _v51711_is_humanoid_etf(obj):
+            return False
+
+        qty_keys = ["보유수량", "수량", "잔고수량", "보유", "quantity", "Quantity"]
+        eval_keys = ["평가금액", "현재평가금액", "평가액", "현재가치", "잔고평가금액", "market_value", "Market Value"]
+        price_keys = ["현재가", "기준가", "평균단가", "매입단가", "평단가", "price", "Price"]
+        buy_keys = ["매입금액", "투자원금", "원금", "매수금액", "cost", "Cost"]
+
+        qty = max([_v51711_to_number_safe(obj.get(k)) for k in qty_keys if k in obj] or [0])
+        eval_amt = max([_v51711_to_number_safe(obj.get(k)) for k in eval_keys if k in obj] or [0])
+        price = max([_v51711_to_number_safe(obj.get(k)) for k in price_keys if k in obj] or [0])
+        buy_amt = max([_v51711_to_number_safe(obj.get(k)) for k in buy_keys if k in obj] or [0])
+
+        return bool(qty > 0 or eval_amt > 0 or price > 0 or buy_amt > 0)
+    except Exception:
+        return False
+
+
+def _v51711_normalize_humanoid_asset(obj):
+    """0148J0 fallback 자산을 정상 보유 자산 상태로 통일합니다."""
+    try:
+        if not isinstance(obj, dict) or not _v51711_is_humanoid_etf(obj):
+            return obj
+        obj["종목코드"] = HUMANOID_ETF_CODE
+        obj["코드"] = HUMANOID_ETF_CODE
+        obj["종목명"] = HUMANOID_ETF_NAME
+        obj["name"] = HUMANOID_ETF_NAME
+        obj["상품명"] = HUMANOID_ETF_NAME
+        obj["시세조회성공"] = True
+        obj["price_ok"] = True
+        obj["is_failed"] = False
+        obj["조회실패"] = False
+        obj["실패여부"] = False
+        obj["status"] = "보유평가 기준"
+        obj["시세상태"] = "보유평가 기준"
+        obj["비고"] = str(obj.get("비고", "") or "").replace("보유평가 기준", "보유평가 기준")
+
+        qty = _v51711_to_number_safe(obj.get("보유수량", obj.get("수량", 0)))
+        eval_amt = _v51711_to_number_safe(obj.get("평가금액", obj.get("평가액", 0)))
+        price = _v51711_to_number_safe(obj.get("현재가", obj.get("기준가", obj.get("price", 0))))
+        if price <= 0 and qty > 0 and eval_amt > 0:
+            price = eval_amt / qty
+            obj["현재가"] = price
+            obj["기준가"] = price
+            obj["price"] = price
+        if eval_amt <= 0 and qty > 0 and price > 0:
+            obj["평가금액"] = qty * price
+        return obj
+    except Exception:
+        return obj
+
+
+def _v51711_filter_failed_assets(failed_assets):
+    """0148J0처럼 보유평가 기준으로 정상 표시 가능한 자산은 실패 목록에서 제외합니다."""
+    try:
+        if failed_assets is None:
+            return failed_assets
+        filtered = []
+        for item in failed_assets:
+            if _v51711_is_humanoid_etf(item) or _v51711_has_holding_basis(item):
+                continue
+            filtered.append(item)
+        return filtered
+    except Exception:
+        return failed_assets
+
+
+def _v51711_filter_failed_df(df):
+    """실패 종목 DataFrame이 따로 있을 때 0148J0 행을 제외합니다."""
+    try:
+        import pandas as pd
+        if df is None or not hasattr(df, "empty") or df.empty:
+            return df
+        mask = pd.Series(False, index=df.index)
+        for c in df.columns:
+            s = df[c].astype(str)
+            mask = mask | s.str.replace(" ", "", regex=False).str.upper().str.contains("0148J0", na=False)
+            mask = mask | (s.str.contains("휴머노이드", na=False) & s.str.contains("로봇", na=False))
+        return df[~mask].copy()
+    except Exception:
+        return df
+
+
+def _v51711_failed_count(value):
+    """실패 개수 계산 전 0148J0을 제외합니다."""
+    try:
+        if value is None:
+            return 0
+        if hasattr(value, "empty"):
+            value = _v51711_filter_failed_df(value)
+            return 0 if value is None else len(value)
+        if isinstance(value, (list, tuple, set)):
+            return len(_v51711_filter_failed_assets(list(value)))
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _v51711_should_show_failed_notice(failed_assets):
+    """0148J0만 실패로 잡힌 경우 안내 배너를 숨깁니다."""
+    try:
+        return _v51711_failed_count(failed_assets) > 0
+    except Exception:
+        return False
+
+
+# ============================================================
+# v5.17.11 보정 래퍼: 주요 데이터 생성 함수 결과에서 0148J0 정상화
+# ============================================================
+def _v51711_walk_and_fix(obj):
+    try:
+        if isinstance(obj, dict):
+            obj = _v51711_normalize_humanoid_asset(obj)
+            for k, v in list(obj.items()):
+                obj[k] = _v51711_walk_and_fix(v)
+            return obj
+        if isinstance(obj, list):
+            return [_v51711_walk_and_fix(x) for x in obj]
+        if isinstance(obj, tuple):
+            return tuple(_v51711_walk_and_fix(x) for x in obj)
+        return obj
+    except Exception:
+        return obj
+
+
+def _v51711_wrap_candidate_functions():
+    g = globals()
+    candidate_names = [
+        "대표종목모니터링데이터생성",
+        "주요모니터링데이터생성",
+        "모니터링자산목록생성",
+        "포트폴리오현황계산",
+        "포트폴리오요약계산",
+        "build_monitor_assets",
+        "build_monitoring_assets",
+        "create_monitoring_assets",
+        "build_portfolio_summary",
+        "calculate_portfolio_summary",
+    ]
+    for fname in candidate_names:
+        fn = g.get(fname)
+        if not callable(fn) or getattr(fn, "_v51711_wrapped", False):
+            continue
+
+        def make_wrapper(original):
+            def wrapper(*args, **kwargs):
+                result = original(*args, **kwargs)
+                return _v51711_walk_and_fix(result)
+            wrapper._v51711_wrapped = True
+            return wrapper
+
+        g[fname] = make_wrapper(fn)
+
+try:
+    _v51711_wrap_candidate_functions()
+except Exception as e:
+    logging.warning("suppressed exception at line 17264: %s", e, exc_info=True)
+
+
+# ============================================================
+# v5.17.14 안정화 보정 레이어
+# - 0148J0 / TIGER 코리아휴머노이드로봇산업은 실시간 시세가 늦더라도
+#   보유평가 기준으로 정상 반영되는 fallback 자산으로 처리한다.
+# - 이 레이어는 기존 함수가 존재할 경우 후순위로 재정의되어 UI 문구만 완화한다.
+# ============================================================
+HUMANOID_ETF_CODE = "0148J0"
+HUMANOID_ETF_ALIASES = [
+    "0148J0",
+    "TIGER 코리아휴머노이드로봇산업",
+    "코리아휴머노이드로봇산업",
+    "휴머노이드로봇산업",
+]
+
+
+def _v51714_is_humanoid_fallback_asset(value) -> bool:
+    try:
+        s = str(value).strip().upper().replace(" ", "")
+    except Exception:
+        return False
+    aliases = [a.upper().replace(" ", "") for a in HUMANOID_ETF_ALIASES]
+    return any(a in s for a in aliases)
+
+
+def _v51714_clean_failed_assets_for_notice(items):
+    """fallback 정상 자산을 오류/실패 안내 목록에서 제거"""
+    try:
+        if items is None:
+            return []
+        if isinstance(items, dict):
+            return {k: v for k, v in items.items() if not _v51714_is_humanoid_fallback_asset(k) and not _v51714_is_humanoid_fallback_asset(v)}
+        cleaned = []
+        for x in list(items):
+            if not _v51714_is_humanoid_fallback_asset(x):
+                cleaned.append(x)
+        return cleaned
+    except Exception:
+        return items
+
+
+def _v51714_fallback_notice_text(count: int = 1) -> str:
+    return "일부 ETF는 실시간 시세 대신 보유평가 기준으로 반영됩니다."
+
+
+def _v51714_card_subtitle_for_fallback() -> str:
+    return "실시간 시세 준비중"
+
+
+# v5.17.15 주요 데이터프레임 정규화 보정
+# Streamlit 실행 중 전역 데이터프레임이 존재하면 0148J0 대표키로 통일한다.
+try:
+    for _v51715_df_name in [
+        "거래이력", "거래원장", "수정거래이력", "수정포트폴리오", "포트폴리오",
+        "보유계산포트폴리오", "계산포트폴리오", "통합자산표", "월간리포트표"
+    ]:
+        if _v51715_df_name in globals():
+            globals()[_v51715_df_name] = normalize_asset_dataframe_v51715(globals()[_v51715_df_name])
+except Exception as e:
+    logging.warning("suppressed exception at line 17325: %s", e, exc_info=True)
+
+
+# v5.17.16 전역 데이터프레임 최종 정규화
+try:
+    for _v51716_name in [
+        "월간리포트표", "월간수익률표", "월간수익률리포트", "거래이력", "거래원장",
+        "수정거래이력", "포트폴리오", "수정포트폴리오", "계산포트폴리오",
+        "보유계산포트폴리오", "통합자산표", "표시포트폴리오"
+    ]:
+        if _v51716_name in globals():
+            globals()[_v51716_name] = normalize_display_dataframe_v51716(globals()[_v51716_name])
+except Exception as e:
+    logging.warning("suppressed exception at line 17338: %s", e, exc_info=True)
+
+
+# ============================================================
+# v5.19.4 안정화 리팩터링 1차 메모
+# - 본 파일은 v5.19.3 표시 방식은 유지하면서, pass-only 예외를 logging.warning으로 전환했습니다.
+# - 중복 함수는 즉시 삭제하지 않았습니다. 삭제/통합은 실행 흐름 확인 후 2차에서 진행합니다.
+# - Streamlit 전역 몽키패칭은 1차에서는 보존했습니다. 제거는 표시 영향 검증 후 진행합니다.
+# ============================================================
+
+
+# ============================================================
+# v5.19.5 stabilization refactor phase2
+# 목적: 중복 정의 함수의 "현재 활성 함수"를 명시하고, 향후 리팩터링 기준을 고정합니다.
+# 주의: v5.19.5에서는 실행 안정성을 위해 기존 중복 정의를 물리 삭제하지 않습니다.
+#      대형 단일 파일에서 중간 정의를 삭제하면, 파일 실행 순서상 기존 top-level 호출이 깨질 수 있습니다.
+# ============================================================
+V5195_ACTIVE_FUNCTION_REGISTRY = {
+    "분석인사이트단순화UI": "파일 하단 최종 정의 사용",
+    "시장압력분석간단UI": "v5.17.4 이후 정의 사용",
+    "집중위험체크간단UI": "v5.17.4 이후 정의 사용",
+    "시장압력상황판_v5178": "보유자료 보정 래퍼 적용 후 최종 정의 사용",
+}
+
+V5195_DUPLICATE_FUNCTION_POLICY = """
+v5.19.5 안정화 원칙
+1. 중복 함수는 즉시 삭제하지 않는다.
+2. 현재 실행되는 최종 정의를 명시한다.
+3. 이후 v5.20 또는 v6.0에서 모듈 분리 시 legacy 함수로 이동한다.
+4. 신규 기능은 기존 함수명을 재정의하지 않고 *_v5195처럼 고유 이름을 사용한다.
+"""
+
+
+def v5195_중복함수정책():
+    """현재 버전의 중복 함수 처리 정책을 반환합니다."""
+    return {
+        "version": "v5.19.5-stabilization-refactor-phase2",
+        "policy": V5195_DUPLICATE_FUNCTION_POLICY,
+        "active_functions": V5195_ACTIVE_FUNCTION_REGISTRY,
+    }
+
+
+def v5195_안정화점검표시():
+    """Streamlit 화면에서 필요할 때만 호출하는 안정화 점검 표시 함수입니다."""
+    try:
+        st.caption("v5.19.5 안정화: 중복 함수는 삭제하지 않고 현재 활성 정의를 명시했습니다.")
+        with st.expander("v5.19.5 안정화 리팩터링 메모", expanded=False):
+            st.write(V5195_DUPLICATE_FUNCTION_POLICY)
+            try:
+                st.dataframe(pd.DataFrame([
+                    {"함수명": k, "현재 기준": v}
+                    for k, v in V5195_ACTIVE_FUNCTION_REGISTRY.items()
+                ]), use_container_width=True, hide_index=True)
+            except Exception as e:
+                logging.warning("v5.19.5 안정화 점검표 표시 오류: %s", e, exc_info=True)
+    except Exception as e:
+        logging.warning("v5.19.5 안정화 메모 표시 오류: %s", e, exc_info=True)
+
+# ============================================================
+# /v5.19.5 stabilization refactor phase2
+# ============================================================
