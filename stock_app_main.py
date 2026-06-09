@@ -10583,9 +10583,7 @@ def 시장지표카드하단메모생성(행):
 
 def 대시보드보유정보사전(거래df):
     """상단 모니터 보유 표시용 요약.
-    v5.11 성능 개선:
-    - 주요 모니터링 화면에서는 포트폴리오 전체 현재가 계산을 호출하지 않습니다.
-    - 거래원장 집계만으로 보유수량을 산출하고, 실시간 스냅샷이 이미 있을 때만 평가금액을 가볍게 보강합니다.
+    v5.20.0: 현재가·평가금액·수익률까지 표시하도록 확장.
     """
     try:
         계산대상 = 거래이력계산대상추출(거래df)
@@ -10594,6 +10592,7 @@ def 대시보드보유정보사전(거래df):
             return {}
         작업 = 집계표.copy()
         작업["보유수량"] = pd.to_numeric(작업.get("보유수량"), errors="coerce").fillna(0)
+        작업["매입평균단가"] = pd.to_numeric(작업.get("매입평균단가"), errors="coerce").fillna(0)
         작업 = 작업[작업["보유수량"] > 0].copy()
         if 작업.empty:
             return {}
@@ -10603,11 +10602,19 @@ def 대시보드보유정보사전(거래df):
             코드 = normalize_asset_code_v518(행.get("종목코드", ""))
             이름 = 종목명자동보정(코드, 행.get("종목명", ""))
             구분 = 종목구분판단(코드, 이름)
-            수량 = pd.to_numeric(pd.Series([행.get("보유수량")]), errors="coerce").fillna(0).iloc[0]
+            수량 = float(pd.to_numeric(pd.Series([행.get("보유수량")]), errors="coerce").fillna(0).iloc[0])
+            매입단가 = float(pd.to_numeric(pd.Series([행.get("매입평균단가")]), errors="coerce").fillna(0).iloc[0])
             현재가 = 스냅샷현재가조회(구분, 코드)
             if 현재가 not in [None, 0]:
-                평가금액 = float(현재가) * float(수량)
-                결과[코드] = f"보유 {숫자표시(수량, 0)}주 · 평가 {금액표시(평가금액)}"
+                현재가 = float(현재가)
+                평가금액 = 현재가 * 수량
+                투자원금 = 매입단가 * 수량
+                if 투자원금 > 0:
+                    수익률 = (평가금액 - 투자원금) / 투자원금 * 100
+                    수익률부호 = "+" if 수익률 >= 0 else ""
+                    결과[코드] = f"보유 {숫자표시(수량, 0)}주 · 평가 {금액표시(평가금액)} · {수익률부호}{수익률:.1f}%"
+                else:
+                    결과[코드] = f"보유 {숫자표시(수량, 0)}주 · 평가 {금액표시(평가금액)}"
             else:
                 결과[코드] = f"보유 {숫자표시(수량, 0)}주"
         return 결과
@@ -12734,13 +12741,8 @@ for idx, 섹터명 in enumerate(섹터목록):
 선택섹터 = st.session_state[섹터선택키]
 
 if 선택섹터 == "주요 모니터링":
-    # v5.19.2: 앱 실행 첫 화면은 시세 모니터가 아니라 포트폴리오 핵심상태를 먼저 보여줍니다.
+    # v5.20.0: 첫 화면 = 내 보유종목 시세·수익률 → 시장 지수 순서로 표시
     대시보드기준거래 = 현재거래이력가져오기().copy()
-    v5192_포트폴리오핵심상태메인UI(대시보드기준거래)
-
-    # 하단 참고자료: 주요 지수/대표 종목 모니터
-    # -----------------------------------
-    st.markdown("---")
     대시보드스타일적용()
     st.markdown(
         """
@@ -12808,8 +12810,7 @@ if 선택섹터 == "주요 모니터링":
         """,
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="top-monitor-title">주요 지수 및 대표 종목 모니터</div>', unsafe_allow_html=True)
-    st.caption('위 핵심상태의 참고자료로 확인하는 시장·보유종목 시세입니다.')
+    st.markdown("### 📈 내 보유종목 현황")
 
     if "monitor_realtime_mode_v1" not in st.session_state:
         st.session_state["monitor_realtime_mode_v1"] = False
@@ -12910,10 +12911,10 @@ if 선택섹터 == "주요 모니터링":
     # 투자자수급섹션표시(refresh_token=st.session_state.get("price_refresh_token_v51", 0))
 
     # -----------------------------------
-    # 주요 경제지표
+    # 시장 주요 지수
     # -----------------------------------
     st.markdown("---")
-    st.subheader("주요 지표")
+    st.subheader("📊 시장 주요 지수")
     시장지표df = 네이버시장지표목록가져오기()
 
     if 시장지표df.empty:
