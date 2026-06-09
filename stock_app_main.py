@@ -12152,60 +12152,52 @@ if 선택섹터 == "주요 모니터링":
     모니터자산목록 = 주요모니터자산구성(대시보드기준거래)
     보유정보사전 = 대시보드보유정보사전(대시보드기준거래)
 
+    # 보유종목 / 지수 분리
+    보유종목목록 = [(n, i, l) for n, i, l in 모니터자산목록 if l == "보유 종목"]
+    지수목록 = [(n, i, l) for n, i, l in 모니터자산목록 if l != "보유 종목"]
 
-    if 모바일여부():
-        렌더목록 = 모니터자산목록.copy() + [("__ADD__", {"코드": ""}, "추가")]
-        카드열수 = 2 if len(렌더목록) > 2 else len(렌더목록)
-        for row_start in range(0, len(렌더목록), 카드열수):
-            현재행 = 렌더목록[row_start:row_start + 카드열수]
-            cols = st.columns(len(현재행))
-            for col, (자산명, 자산정보, 구분라벨) in zip(cols, 현재행):
-                with col:
-                    if 자산명 == "__ADD__":
-                        if 모니터추가카드버튼(key=f"monitor_add_card_mobile_{row_start}"):
-                            st.session_state["show_monitor_add_form_v53"] = not st.session_state.get("show_monitor_add_form_v53", False)
-                            st.rerun()
-                    else:
-                        정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
-                        종목코드 = normalize_asset_code_v518(자산정보['코드'])
-                        보유정보문자 = 보유정보사전.get(종목코드, "") if 구분라벨 == "보유 종목" else ""
-                        st.markdown(
-                            심플카드HTML(
-                                자산명,
-                                정보.get("현재가"),
-                                정보.get("전일대비"),
-                                정보.get("등락률"),
-                                보조라벨=구분라벨,
-                                하단메모="",
-                                보유정보문자=보유정보문자,
-                            ),
-                            unsafe_allow_html=True,
-                        )
-    else:
-        # 데스크톱: 코스피·코스닥 이후 ETF/개별종목을 투자원금 큰 순서로 6열 심플 배치
-        카드열수 = 6
-        for row_start in range(0, len(모니터자산목록), 카드열수):
-            현재행 = 모니터자산목록[row_start:row_start + 카드열수]
+    def _카드렌더(자산명, 자산정보, 구분라벨):
+        정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
+        종목코드 = normalize_asset_code_v518(자산정보['코드'])
+        보유정보문자 = 보유정보사전.get(종목코드, "") if 구분라벨 == "보유 종목" else ""
+        st.markdown(
+            심플카드HTML(
+                자산명,
+                정보.get("현재가"),
+                정보.get("전일대비"),
+                정보.get("등락률"),
+                보조라벨=구분라벨,
+                하단메모="",
+                보유정보문자=보유정보문자,
+            ),
+            unsafe_allow_html=True,
+        )
+
+    # ① 내 보유종목 (항상 먼저)
+    if 보유종목목록:
+        카드열수 = 2 if 모바일여부() else 6
+        for row_start in range(0, len(보유종목목록), 카드열수):
+            현재행 = 보유종목목록[row_start:row_start + 카드열수]
             cols = st.columns(카드열수, gap="small")
             for idx in range(카드열수):
                 with cols[idx]:
                     if idx < len(현재행):
-                        자산명, 자산정보, 구분라벨 = 현재행[idx]
-                        정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
-                        종목코드 = normalize_asset_code_v518(자산정보['코드'])
-                        보유정보문자 = 보유정보사전.get(종목코드, "") if 구분라벨 == "보유 종목" else ""
-                        st.markdown(
-                            심플카드HTML(
-                                자산명,
-                                정보.get("현재가"),
-                                정보.get("전일대비"),
-                                정보.get("등락률"),
-                                보조라벨=구분라벨,
-                                하단메모="",
-                                보유정보문자=보유정보문자,
-                            ),
-                            unsafe_allow_html=True,
-                        )
+                        _카드렌더(*현재행[idx])
+    else:
+        st.info("보유 종목이 없습니다. 거래이력을 입력해주세요.")
+
+    # ② 주요 지수 (보유종목 아래)
+    if 지수목록:
+        st.markdown("---")
+        st.markdown("#### 📊 주요 지수")
+        카드열수 = 2 if 모바일여부() else 6
+        for row_start in range(0, len(지수목록), 지표열수 if False else 카드열수):
+            현재행 = 지수목록[row_start:row_start + 카드열수]
+            cols = st.columns(카드열수, gap="small")
+            for idx in range(카드열수):
+                with cols[idx]:
+                    if idx < len(현재행):
+                        _카드렌더(*현재행[idx])
 
     모니터실패건수 = sum(1 for 자산명, 자산정보, _ in 모니터자산목록 if 자산현재가정보(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0)).get("현재가") is None)
     if 모니터실패건수 > 0:
@@ -12214,38 +12206,6 @@ if 선택섹터 == "주요 모니터링":
     # 수급 기능은 데이터 소스 재설계 전까지 보류합니다.
     # 투자자수급섹션표시(refresh_token=st.session_state.get("price_refresh_token_v51", 0))
 
-    # -----------------------------------
-    # 시장 주요 지수
-    # -----------------------------------
-    st.markdown("---")
-    st.subheader("📊 시장 주요 지수")
-    시장지표df = 네이버시장지표목록가져오기()
-
-    if 시장지표df.empty:
-        st.warning("시장지표 데이터를 불러오지 못했습니다.")
-    else:
-        지표행목록 = list(시장지표df.iterrows())
-        지표열수 = 2 if 모바일여부() else min(7, len(지표행목록))
-        for row_start in range(0, len(지표행목록), 지표열수):
-            cols = st.columns(지표열수, gap="small")
-            for col, (_, row) in zip(cols, 지표행목록[row_start:row_start + 지표열수]):
-                with col:
-                    st.markdown(
-                        심플카드HTML(
-                            row["지표"],
-                            row.get("현재값"),
-                            row.get("전일대비"),
-                            row.get("등락률"),
-                            보조라벨="",
-                            하단메모="",
-                        ),
-                        unsafe_allow_html=True,
-                    )
-
-
-    # -----------------------------------
-    # -----------------------------------
-    # 포트폴리오 입력/수정
     # -----------------------------------
 with st.sidebar.expander("거래이력 관리", expanded=False):
     st.markdown("#### 포트폴리오 거래이력")
