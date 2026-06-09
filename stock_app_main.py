@@ -12155,6 +12155,7 @@ if 선택섹터 == "주요 모니터링":
     # 보유종목 / 지수 분리
     보유종목목록 = [(n, i, l) for n, i, l in 모니터자산목록 if l == "보유 종목"]
     지수목록 = [(n, i, l) for n, i, l in 모니터자산목록 if l != "보유 종목"]
+    모바일 = 모바일여부()
 
     def _카드렌더(자산명, 자산정보, 구분라벨):
         정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
@@ -12175,7 +12176,7 @@ if 선택섹터 == "주요 모니터링":
 
     # ① 내 보유종목 (항상 먼저)
     if 보유종목목록:
-        카드열수 = 2 if 모바일여부() else 6
+        카드열수 = 2 if 모바일 else 6
         for row_start in range(0, len(보유종목목록), 카드열수):
             현재행 = 보유종목목록[row_start:row_start + 카드열수]
             cols = st.columns(카드열수, gap="small")
@@ -12186,12 +12187,18 @@ if 선택섹터 == "주요 모니터링":
     else:
         st.info("보유 종목이 없습니다. 거래이력을 입력해주세요.")
 
-    # ② 주요 지수 (보유종목 아래)
+    모니터실패건수 = sum(1 for 자산명, 자산정보, _ in 보유종목목록 if 자산현재가정보(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0)).get("현재가") is None)
+    if 모니터실패건수 > 0:
+        st.info(f"평가기준 반영 자산이 {모니터실패건수}개 있습니다.")
+
+    # ② 주요 지수 — 코스피/코스닥 + 네이버 시장지표
+    st.markdown("---")
+    st.markdown("#### 📊 주요 지수")
+    카드열수 = 2 if 모바일 else 6
+
+    # 코스피·코스닥 먼저
     if 지수목록:
-        st.markdown("---")
-        st.markdown("#### 📊 주요 지수")
-        카드열수 = 2 if 모바일여부() else 6
-        for row_start in range(0, len(지수목록), 지표열수 if False else 카드열수):
+        for row_start in range(0, len(지수목록), 카드열수):
             현재행 = 지수목록[row_start:row_start + 카드열수]
             cols = st.columns(카드열수, gap="small")
             for idx in range(카드열수):
@@ -12199,12 +12206,25 @@ if 선택섹터 == "주요 모니터링":
                     if idx < len(현재행):
                         _카드렌더(*현재행[idx])
 
-    모니터실패건수 = sum(1 for 자산명, 자산정보, _ in 모니터자산목록 if 자산현재가정보(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0)).get("현재가") is None)
-    if 모니터실패건수 > 0:
-        st.info(f"평가기준 반영 자산이 {모니터실패건수}개 있습니다.")
-
-    # 수급 기능은 데이터 소스 재설계 전까지 보류합니다.
-    # 투자자수급섹션표시(refresh_token=st.session_state.get("price_refresh_token_v51", 0))
+    # 네이버 시장지표 (환율·금·WTI 등)
+    시장지표df = 네이버시장지표목록가져오기()
+    if not 시장지표df.empty:
+        지표행목록 = list(시장지표df.iterrows())
+        for row_start in range(0, len(지표행목록), 카드열수):
+            cols = st.columns(카드열수, gap="small")
+            for col, (_, row) in zip(cols, 지표행목록[row_start:row_start + 카드열수]):
+                with col:
+                    st.markdown(
+                        심플카드HTML(
+                            row["지표"],
+                            row.get("현재값"),
+                            row.get("전일대비"),
+                            row.get("등락률"),
+                            보조라벨="",
+                            하단메모="",
+                        ),
+                        unsafe_allow_html=True,
+                    )
 
     # -----------------------------------
 with st.sidebar.expander("거래이력 관리", expanded=False):
