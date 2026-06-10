@@ -9314,6 +9314,26 @@ def 대시보드스타일적용():
     .simple-market-card.up {{border-left-color: #dc2626;}}
     .simple-market-card.down {{border-left-color: #2563eb;}}
     .simple-market-card.flat {{border-left-color: #94a3b8;}}
+    /* 반응형 카드 그리드 — 모바일 2열, PC 6열 자동 전환 */
+    .monitor-card-grid {{
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+        margin-bottom: 8px;
+    }}
+    @media (min-width: 768px) {{
+        .monitor-card-grid {{
+            grid-template-columns: repeat(3, 1fr);
+        }}
+    }}
+    @media (min-width: 1100px) {{
+        .monitor-card-grid {{
+            grid-template-columns: repeat(6, 1fr);
+        }}
+    }}
+    .monitor-card-item {{
+        min-width: 0;
+    }}
     .simple-market-label {{
         display: inline-flex;
         align-items: center;
@@ -12182,15 +12202,23 @@ if 선택섹터 == "주요 모니터링":
             unsafe_allow_html=True,
         )
 
-    # ① 내 보유종목 — 항상 2열 (모바일/PC 모두)
+    def _카드HTML모아서렌더(카드HTML목록):
+        """CSS grid로 카드 렌더링 - 모바일 2열, PC 6열 자동 전환"""
+        카드내용 = "".join(f'<div class="monitor-card-item">{html}</div>' for html in 카드HTML목록)
+        st.markdown(f'<div class="monitor-card-grid">{카드내용}</div>', unsafe_allow_html=True)
+
+    # ① 내 보유종목
     if 보유종목목록:
-        for row_start in range(0, len(보유종목목록), 2):
-            현재행 = 보유종목목록[row_start:row_start + 2]
-            cols = st.columns(2, gap="small")
-            for idx in range(2):
-                with cols[idx]:
-                    if idx < len(현재행):
-                        _카드렌더(*현재행[idx])
+        카드HTML목록 = []
+        for 자산명, 자산정보, 구분라벨 in 보유종목목록:
+            정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
+            종목코드 = normalize_asset_code_v518(자산정보['코드'])
+            보유정보문자 = 보유정보사전.get(종목코드, "")
+            카드HTML목록.append(심플카드HTML(
+                자산명, 정보.get("현재가"), 정보.get("전일대비"), 정보.get("등락률"),
+                보조라벨=구분라벨, 하단메모="", 보유정보문자=보유정보문자,
+            ))
+        _카드HTML모아서렌더(카드HTML목록)
     else:
         st.info("보유 종목이 없습니다. 거래이력을 입력해주세요.")
 
@@ -12198,39 +12226,28 @@ if 선택섹터 == "주요 모니터링":
     if 모니터실패건수 > 0:
         st.info(f"평가기준 반영 자산이 {모니터실패건수}개 있습니다.")
 
-    # ② 주요 지수 — 항상 2열
+    # ② 주요 지수
     st.markdown("---")
     st.markdown("#### 📊 주요 지수")
 
-    # 코스피·코스닥
-    if 지수목록:
-        for row_start in range(0, len(지수목록), 2):
-            현재행 = 지수목록[row_start:row_start + 2]
-            cols = st.columns(2, gap="small")
-            for idx in range(2):
-                with cols[idx]:
-                    if idx < len(현재행):
-                        _카드렌더(*현재행[idx])
+    지수카드HTML목록 = []
+    for 자산명, 자산정보, 구분라벨 in 지수목록:
+        정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
+        지수카드HTML목록.append(심플카드HTML(
+            자산명, 정보.get("현재가"), 정보.get("전일대비"), 정보.get("등락률"),
+            보조라벨="", 하단메모="",
+        ))
 
-    # 네이버 시장지표 (S&P500·나스닥·SOX·환율·금·WTI 등)
     시장지표df = 네이버시장지표목록가져오기()
     if not 시장지표df.empty:
-        지표행목록 = list(시장지표df.iterrows())
-        for row_start in range(0, len(지표행목록), 2):
-            cols = st.columns(2, gap="small")
-            for col, (_, row) in zip(cols, 지표행목록[row_start:row_start + 2]):
-                with col:
-                    st.markdown(
-                        심플카드HTML(
-                            row["지표"],
-                            row.get("현재값"),
-                            row.get("전일대비"),
-                            row.get("등락률"),
-                            보조라벨="",
-                            하단메모="",
-                        ),
-                        unsafe_allow_html=True,
-                    )
+        for _, row in 시장지표df.iterrows():
+            지수카드HTML목록.append(심플카드HTML(
+                row["지표"], row.get("현재값"), row.get("전일대비"), row.get("등락률"),
+                보조라벨="", 하단메모="",
+            ))
+
+    if 지수카드HTML목록:
+        _카드HTML모아서렌더(지수카드HTML목록)
 
     # -----------------------------------
 with st.sidebar.expander("거래이력 관리", expanded=False):
