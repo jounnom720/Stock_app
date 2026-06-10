@@ -8356,6 +8356,179 @@ def 비중그래프(계산표):
     return 그림
 
 
+def 투자원금변화그래프(거래df):
+    """거래 시점별 누적 투자원금 변화 막대그래프"""
+    try:
+        작업 = 거래df.copy()
+        작업["거래일자"] = pd.to_datetime(작업["거래일자"], errors="coerce")
+        작업["거래수량"] = pd.to_numeric(작업["거래수량"], errors="coerce").fillna(0)
+        작업["거래단가"] = pd.to_numeric(작업["거래단가"], errors="coerce").fillna(0)
+        작업["거래금액"] = 작업["거래수량"] * 작업["거래단가"]
+        작업.loc[작업["거래구분"] == "매도", "거래금액"] *= -1
+        작업 = 작업.dropna(subset=["거래일자"]).sort_values("거래일자")
+        작업["누적원금"] = 작업["거래금액"].cumsum()
+
+        그림 = go.Figure()
+        그림.add_trace(go.Bar(
+            x=작업["거래일자"],
+            y=작업["거래금액"],
+            name="거래금액",
+            marker_color=["#ef4444" if v < 0 else "#3b82f6" for v in 작업["거래금액"]],
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.0f}원<extra></extra>",
+        ))
+        그림.add_trace(go.Scatter(
+            x=작업["거래일자"],
+            y=작업["누적원금"],
+            name="누적 투자원금",
+            mode="lines+markers",
+            line=dict(color="#f59e0b", width=2),
+            yaxis="y2",
+            hovertemplate="%{x|%Y-%m-%d}<br>누적 %{y:,.0f}원<extra></extra>",
+        ))
+        그림.update_layout(
+            title=dict(text="투자원금 변화", x=0.02, xanchor="left"),
+            height=340,
+            margin=dict(l=10, r=10, t=50, b=10),
+            xaxis=dict(title=""),
+            yaxis=dict(title="거래금액", tickformat=",.0f"),
+            yaxis2=dict(title="누적원금", overlaying="y", side="right", tickformat=",.0f"),
+            legend=dict(orientation="h", y=1.08, x=0),
+            barmode="relative",
+        )
+        return 그림
+    except Exception:
+        그림 = go.Figure()
+        그림.update_layout(title="투자원금 변화 (데이터 없음)", height=340)
+        return 그림
+
+
+def 실현손익누적그래프(거래df):
+    """매도 시점별 실현손익 누적 꺾은선 그래프"""
+    try:
+        작업 = 거래df.copy()
+        작업["거래일자"] = pd.to_datetime(작업["거래일자"], errors="coerce")
+        작업["거래수량"] = pd.to_numeric(작업["거래수량"], errors="coerce").fillna(0)
+        작업["거래단가"] = pd.to_numeric(작업["거래단가"], errors="coerce").fillna(0)
+        작업 = 작업.dropna(subset=["거래일자"]).sort_values("거래일자")
+
+        # 종목별 평균단가 계산해서 실현손익 산출
+        평균단가 = {}
+        실현손익행 = []
+
+        for _, 행 in 작업.iterrows():
+            코드 = str(행.get("종목코드", ""))
+            구분 = str(행.get("거래구분", ""))
+            수량 = float(행["거래수량"])
+            단가 = float(행["거래단가"])
+
+            if 구분 == "매수":
+                기존수량 = 평균단가.get(코드, {}).get("수량", 0)
+                기존단가 = 평균단가.get(코드, {}).get("단가", 0)
+                신규수량 = 기존수량 + 수량
+                신규단가 = (기존수량 * 기존단가 + 수량 * 단가) / 신규수량 if 신규수량 > 0 else 단가
+                평균단가[코드] = {"수량": 신규수량, "단가": 신규단가}
+
+            elif 구분 == "매도" and 코드 in 평균단가:
+                매입단가 = 평균단가[코드]["단가"]
+                손익 = (단가 - 매입단가) * 수량
+                실현손익행.append({"거래일자": 행["거래일자"], "종목명": 행.get("종목명", ""), "실현손익": 손익})
+                평균단가[코드]["수량"] = max(0, 평균단가[코드]["수량"] - 수량)
+
+        if not 실현손익행:
+            그림 = go.Figure()
+            그림.update_layout(title="실현손익 누적 (매도 이력 없음)", height=300)
+            return 그림
+
+        손익df = pd.DataFrame(실현손익행).sort_values("거래일자")
+        손익df["누적손익"] = 손익df["실현손익"].cumsum()
+
+        그림 = go.Figure()
+        그림.add_trace(go.Bar(
+            x=손익df["거래일자"],
+            y=손익df["실현손익"],
+            name="매도 손익",
+            marker_color=["#ef4444" if v < 0 else "#22c55e" for v in 손익df["실현손익"]],
+            hovertemplate="%{x|%Y-%m-%d}<br>%{customdata}<br>%{y:,.0f}원<extra></extra>",
+            customdata=손익df["종목명"],
+        ))
+        그림.add_trace(go.Scatter(
+            x=손익df["거래일자"],
+            y=손익df["누적손익"],
+            name="누적 실현손익",
+            mode="lines+markers",
+            line=dict(color="#f59e0b", width=2.5),
+            yaxis="y2",
+            hovertemplate="%{x|%Y-%m-%d}<br>누적 %{y:,.0f}원<extra></extra>",
+        ))
+        그림.update_layout(
+            title=dict(text="실현손익 누적", x=0.02, xanchor="left"),
+            height=300,
+            margin=dict(l=10, r=10, t=50, b=10),
+            yaxis=dict(title="매도 손익", tickformat=",.0f"),
+            yaxis2=dict(title="누적", overlaying="y", side="right", tickformat=",.0f"),
+            legend=dict(orientation="h", y=1.08, x=0),
+        )
+        return 그림
+    except Exception:
+        그림 = go.Figure()
+        그림.update_layout(title="실현손익 누적 (데이터 없음)", height=300)
+        return 그림
+
+
+def 자산변동추이UI(거래df, 계산포트폴리오):
+    """포트폴리오 자산 변동 추이 — 3가지 시각화"""
+    st.markdown("### 📈 자산 변동 추이")
+
+    # 요약 숫자 카드
+    try:
+        작업 = 거래df.copy()
+        작업["거래수량"] = pd.to_numeric(작업["거래수량"], errors="coerce").fillna(0)
+        작업["거래단가"] = pd.to_numeric(작업["거래단가"], errors="coerce").fillna(0)
+        작업["거래금액"] = 작업["거래수량"] * 작업["거래단가"]
+
+        총매수금액 = 작업[작업["거래구분"] == "매수"]["거래금액"].sum()
+        총매도금액 = 작업[작업["거래구분"] == "매도"]["거래금액"].sum()
+        현재원금 = 총매수금액 - 총매도금액
+        거래횟수 = len(작업[작업["거래구분"].isin(["매수", "매도"])])
+        매도횟수 = len(작업[작업["거래구분"] == "매도"])
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("총 매수금액", f"{총매수금액:,.0f}원")
+        c2.metric("총 매도금액", f"{총매도금액:,.0f}원")
+        c3.metric("현재 투자원금", f"{현재원금:,.0f}원")
+        c4.metric("총 거래횟수", f"{거래횟수}회 (매도 {매도횟수}회)")
+    except Exception:
+        pass
+
+    st.markdown("---")
+
+    # ① 투자원금 변화
+    st.markdown("#### ① 거래별 투자원금 변화")
+    st.caption("파란색: 매수, 빨간색: 매도, 노란선: 누적 투자원금")
+    st.plotly_chart(
+        투자원금변화그래프(거래df),
+        use_container_width=True,
+        config={"displaylogo": False},
+    )
+
+    # ② 실현손익 누적
+    st.markdown("#### ② 실현손익 누적")
+    st.caption("매도 시점별 실현손익과 누적 합계")
+    st.plotly_chart(
+        실현손익누적그래프(거래df),
+        use_container_width=True,
+        config={"displaylogo": False},
+    )
+
+    # ③ 현재 종목별 비중 (도넛 개선)
+    st.markdown("#### ③ 현재 포트폴리오 비중")
+    st.plotly_chart(
+        비중그래프(계산포트폴리오),
+        use_container_width=True,
+        config={"displaylogo": False, "responsive": True},
+    )
+
+
 def 목표비중비교그래프(리밸런싱표):
     그림 = go.Figure()
     그림.add_trace(go.Bar(x=리밸런싱표["종목명"], y=리밸런싱표["현재비중"], name="현재 비중"))
@@ -11898,46 +12071,9 @@ if 선택섹터 == "포트폴리오 현황":
 
         st.markdown("---")
 
-        # ③ 비중 그래프
-        비중그래프칸, 비중요약칸 = st.columns([1.45, 0.85], gap="large")
-        with 비중그래프칸:
-            st.plotly_chart(
-                비중그래프(계산포트폴리오),
-                width="stretch",
-                config={"displaylogo": False, "responsive": True},
-            )
-        with 비중요약칸:
-            비중요약표 = 계산포트폴리오.copy()
-            비중요약표 = 비중요약표[["종목명", "현재비중", "평가금액"]].copy()
-            비중요약표["현재비중"] = pd.to_numeric(비중요약표["현재비중"], errors="coerce").fillna(0)
-            비중요약표["평가금액"] = pd.to_numeric(비중요약표["평가금액"], errors="coerce").fillna(0)
-            비중요약표 = 비중요약표[비중요약표["평가금액"] > 0].sort_values(["현재비중", "평가금액"], ascending=[False, False]).reset_index(drop=True)
-
-            if not 비중요약표.empty:
-                최대행 = 비중요약표.iloc[0]
-                st.markdown(
-                    f"""
-                    <div class="ratio-summary-card">
-                        <div class="ratio-summary-title">최대 비중 종목</div>
-                        <div class="ratio-summary-main">{최대행['종목명']}</div>
-                        <div class="ratio-summary-sub">비중 {최대행['현재비중']:.2f}% · 평가금액 {금액표시(최대행['평가금액'])}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                표시용비중요약표 = 비중요약표.copy()
-                표시용비중요약표["현재비중"] = 표시용비중요약표["현재비중"].map(lambda x: f"{x:.2f}%")
-                표시용비중요약표["평가금액"] = 표시용비중요약표["평가금액"].map(금액표시)
-                표시용비중요약표_styled = index_1부터(표시용비중요약표).style.set_properties(
-                    subset=["현재비중", "평가금액"],
-                    **{"text-align": "right", "font-variant-numeric": "tabular-nums", "font-feature-settings": '"tnum"'} 
-                ).set_properties(
-                    subset=["종목명"],
-                    **{"text-align": "left"}
-                )
-                표데이터프레임(표시용비중요약표_styled, width="stretch", hide_index=False)
-            else:
-                st.info("비중 요약을 표시할 보유 종목이 없습니다.")
+        # ③ 자산 변동 추이 (접힘)
+        with st.expander("📈 자산 변동 추이", expanded=True):
+            자산변동추이UI(수정포트폴리오, 계산포트폴리오)
 
         st.markdown("---")
 
