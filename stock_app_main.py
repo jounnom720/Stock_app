@@ -1174,6 +1174,24 @@ st.markdown(
 모바일모드 = st.query_params.get("mobile", "0") == "1"
 
 def 모바일여부():
+    """
+    모바일 여부 감지.
+    URL에 ?mobile=1 파라미터가 있으면 모바일로 처리.
+    없으면 User-Agent로 판단.
+    """
+    # URL 파라미터로 강제 지정
+    if st.query_params.get("mobile") == "1":
+        return True
+    if st.query_params.get("mobile") == "0":
+        return False
+    # User-Agent 기반 자동 감지
+    try:
+        headers = st.context.headers
+        ua = headers.get("User-Agent", "")
+        if any(x in ua.lower() for x in ["mobile", "android", "iphone", "ipad", "ipod"]):
+            return True
+    except Exception:
+        pass
     return 모바일모드
 
 if 모바일여부():
@@ -3286,12 +3304,14 @@ def 거래이력이상치점검표생성(df):
 기본포트폴리오 = pd.DataFrame(columns=거래이력표준열)
 
 시장지표네이버URL = {
-    "USD/KRW": "https://finance.yahoo.com/quote/KRW%3DX",
-    "국제 금": "https://finance.yahoo.com/quote/GC%3DF",
-    "WTI": "https://finance.yahoo.com/quote/CL%3DF",
-    "브렌트유": "https://finance.yahoo.com/quote/BZ%3DF",
+    "USD/KRW":      "https://finance.yahoo.com/quote/KRW%3DX",
+    "국제 금":       "https://finance.yahoo.com/quote/GC%3DF",
+    "WTI":           "https://finance.yahoo.com/quote/CL%3DF",
     "미국 10년물 금리": "https://finance.yahoo.com/quote/%5ETNX",
-    "VIX": "https://finance.yahoo.com/quote/%5EVIX",
+    "VIX":           "https://finance.yahoo.com/quote/%5EVIX",
+    "S&P 500":       "https://finance.yahoo.com/quote/%5EGSPC",
+    "나스닥":         "https://finance.yahoo.com/quote/%5EIXIC",
+    "SOX":           "https://finance.yahoo.com/quote/%5ESOX",
 }
 
 목표비중저장파일 = "v5146_personal_target_weights.json"
@@ -7516,7 +7536,7 @@ def 시장지표단건가져오기(이름, url):
 
 def 네이버시장지표목록가져오기():
     결과 = []
-    표시순서 = ["USD/KRW", "국제 금", "WTI", "브렌트유", "미국 10년물 금리", "VIX"]
+    표시순서 = ["S&P 500", "나스닥", "SOX", "USD/KRW", "국제 금", "WTI", "미국 10년물 금리", "VIX"]
     for 이름 in 표시순서:
         url = 시장지표네이버URL.get(이름)
         if not url:
@@ -7526,12 +7546,14 @@ def 네이버시장지표목록가져오기():
     df = pd.DataFrame(결과)
     if df.empty:
         return pd.DataFrame([
-            {"지표": "USD/KRW", "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
-            {"지표": "국제 금", "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
-            {"지표": "WTI", "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
-            {"지표": "브렌트유", "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
+            {"지표": "S&P 500",       "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
+            {"지표": "나스닥",          "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
+            {"지표": "SOX",            "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
+            {"지표": "USD/KRW",        "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
+            {"지표": "국제 금",         "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
+            {"지표": "WTI",            "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
             {"지표": "미국 10년물 금리", "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
-            {"지표": "VIX", "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
+            {"지표": "VIX",            "현재값": None, "전일대비": None, "등락률": None, "출처": "-"},
         ])
     return df
 
