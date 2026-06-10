@@ -1174,24 +1174,11 @@ st.markdown(
 모바일모드 = st.query_params.get("mobile", "0") == "1"
 
 def 모바일여부():
-    """
-    모바일 여부 감지.
-    URL에 ?mobile=1 파라미터가 있으면 모바일로 처리.
-    없으면 User-Agent로 판단.
-    """
-    # URL 파라미터로 강제 지정
+    # URL 파라미터로 강제 지정 가능
     if st.query_params.get("mobile") == "1":
         return True
     if st.query_params.get("mobile") == "0":
         return False
-    # User-Agent 기반 자동 감지
-    try:
-        headers = st.context.headers
-        ua = headers.get("User-Agent", "")
-        if any(x in ua.lower() for x in ["mobile", "android", "iphone", "ipad", "ipod"]):
-            return True
-    except Exception:
-        pass
     return 모바일모드
 
 if 모바일여부():
@@ -12177,7 +12164,6 @@ if 선택섹터 == "주요 모니터링":
     # 보유종목 / 지수 분리
     보유종목목록 = [(n, i, l) for n, i, l in 모니터자산목록 if l == "보유 종목"]
     지수목록 = [(n, i, l) for n, i, l in 모니터자산목록 if l != "보유 종목"]
-    모바일 = 모바일여부()
 
     def _카드렌더(자산명, 자산정보, 구분라벨):
         정보 = 모니터표시시세요약(자산명, 자산정보, refresh_token=st.session_state.get("price_refresh_token_v51", 0))
@@ -12196,13 +12182,12 @@ if 선택섹터 == "주요 모니터링":
             unsafe_allow_html=True,
         )
 
-    # ① 내 보유종목 (항상 먼저)
+    # ① 내 보유종목 — 항상 2열 (모바일/PC 모두)
     if 보유종목목록:
-        카드열수 = 2 if 모바일 else 6
-        for row_start in range(0, len(보유종목목록), 카드열수):
-            현재행 = 보유종목목록[row_start:row_start + 카드열수]
-            cols = st.columns(카드열수, gap="small")
-            for idx in range(카드열수):
+        for row_start in range(0, len(보유종목목록), 2):
+            현재행 = 보유종목목록[row_start:row_start + 2]
+            cols = st.columns(2, gap="small")
+            for idx in range(2):
                 with cols[idx]:
                     if idx < len(현재행):
                         _카드렌더(*현재행[idx])
@@ -12213,28 +12198,27 @@ if 선택섹터 == "주요 모니터링":
     if 모니터실패건수 > 0:
         st.info(f"평가기준 반영 자산이 {모니터실패건수}개 있습니다.")
 
-    # ② 주요 지수 — 코스피/코스닥 + 네이버 시장지표
+    # ② 주요 지수 — 항상 2열
     st.markdown("---")
     st.markdown("#### 📊 주요 지수")
-    카드열수 = 2 if 모바일 else 6
 
-    # 코스피·코스닥 먼저
+    # 코스피·코스닥
     if 지수목록:
-        for row_start in range(0, len(지수목록), 카드열수):
-            현재행 = 지수목록[row_start:row_start + 카드열수]
-            cols = st.columns(카드열수, gap="small")
-            for idx in range(카드열수):
+        for row_start in range(0, len(지수목록), 2):
+            현재행 = 지수목록[row_start:row_start + 2]
+            cols = st.columns(2, gap="small")
+            for idx in range(2):
                 with cols[idx]:
                     if idx < len(현재행):
                         _카드렌더(*현재행[idx])
 
-    # 네이버 시장지표 (환율·금·WTI 등)
+    # 네이버 시장지표 (S&P500·나스닥·SOX·환율·금·WTI 등)
     시장지표df = 네이버시장지표목록가져오기()
     if not 시장지표df.empty:
         지표행목록 = list(시장지표df.iterrows())
-        for row_start in range(0, len(지표행목록), 카드열수):
-            cols = st.columns(카드열수, gap="small")
-            for col, (_, row) in zip(cols, 지표행목록[row_start:row_start + 카드열수]):
+        for row_start in range(0, len(지표행목록), 2):
+            cols = st.columns(2, gap="small")
+            for col, (_, row) in zip(cols, 지표행목록[row_start:row_start + 2]):
                 with col:
                     st.markdown(
                         심플카드HTML(
