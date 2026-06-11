@@ -50,7 +50,6 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -4295,9 +4294,6 @@ def IRP비주식자산표준열맞추기(df):
     return 작업.reset_index(drop=True)
 
 
-    with 점검탭:
-        자산데이터무결성점검UI(최적화결과)
-
 
 def IRP비주식자산불러오기():
     """비주식자산을 Google Sheets에서만 불러옵니다.
@@ -7493,12 +7489,6 @@ def 시장지표결과보강(결과, 이름, url=None):
 
 
 def 시장지표단건가져오기(이름, url):
-    if 이름 == "두바이유":
-        결과 = 두바이유현재가가져오기()
-        if 결과 and 결과.get("현재값") is not None:
-            return 시장지표결과보강(결과, 이름, url)
-        return 시장지표결과보강({"지표": 이름, "현재값": None, "전일대비": None, "등락률": None, "링크": url, "출처": "-", "상태": "보유평가 기준"}, 이름, url)
-
     우선순위 = 지표대체우선순위.get(이름, ["naver", "yahoo"])
 
     for 소스 in 우선순위:
@@ -7509,9 +7499,6 @@ def 시장지표단건가져오기(이름, url):
             결과 = 야후현재가요약가져오기(심볼, 이름) if 심볼 else None
             if 결과:
                 결과["링크"] = url
-        elif 소스 in ["derived_domestic_gold", "derived_dubai"]:
-            결과 = 파생주요지표가져오기(이름)
-            결과["링크"] = url
         else:
             결과 = None
 
@@ -8356,54 +8343,94 @@ def 비중그래프(계산표):
     return 그림
 
 
-def 투자원금변화그래프(거래df):
-    """거래 시점별 누적 투자원금 변화 막대그래프"""
+def 계좌별자산비교그래프(통합표):
+    """계좌별 원금 vs 평가금액 비교 막대그래프"""
     try:
-        작업 = 거래df.copy()
-        작업["거래일자"] = pd.to_datetime(작업["거래일자"], errors="coerce")
-        작업["거래수량"] = pd.to_numeric(작업["거래수량"], errors="coerce").fillna(0)
-        작업["거래단가"] = pd.to_numeric(작업["거래단가"], errors="coerce").fillna(0)
-        작업["거래금액"] = 작업["거래수량"] * 작업["거래단가"]
-        작업.loc[작업["거래구분"] == "매도", "거래금액"] *= -1
-        작업 = 작업.dropna(subset=["거래일자"]).sort_values("거래일자")
-        작업["누적원금"] = 작업["거래금액"].cumsum()
+        계좌별 = 통합표.groupby("계좌", as_index=False).agg({"원금": "sum", "평가금액": "sum"})
+        계좌별["평가손익"] = 계좌별["평가금액"] - 계좌별["원금"]
+        계좌별["수익률"] = np.where(계좌별["원금"] > 0, 계좌별["평가손익"] / 계좌별["원금"] * 100, 0)
 
         그림 = go.Figure()
         그림.add_trace(go.Bar(
-            x=작업["거래일자"],
-            y=작업["거래금액"],
-            name="거래금액",
-            marker_color=["#ef4444" if v < 0 else "#3b82f6" for v in 작업["거래금액"]],
-            hovertemplate="%{x|%Y-%m-%d}<br>%{y:,.0f}원<extra></extra>",
+            name="원금",
+            x=계좌별["계좌"],
+            y=계좌별["원금"],
+            marker_color="#64748b",
+            text=[f"{v:,.0f}원" for v in 계좌별["원금"]],
+            textposition="outside",
+            hovertemplate="%{x}<br>원금: %{y:,.0f}원<extra></extra>",
         ))
-        그림.add_trace(go.Scatter(
-            x=작업["거래일자"],
-            y=작업["누적원금"],
-            name="누적 투자원금",
-            mode="lines+markers",
-            line=dict(color="#f59e0b", width=2),
-            yaxis="y2",
-            hovertemplate="%{x|%Y-%m-%d}<br>누적 %{y:,.0f}원<extra></extra>",
+        그림.add_trace(go.Bar(
+            name="평가금액",
+            x=계좌별["계좌"],
+            y=계좌별["평가금액"],
+            marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in 계좌별["평가손익"]],
+            text=[f"{v:,.0f}원\n({r:+.1f}%)" for v, r in zip(계좌별["평가금액"], 계좌별["수익률"])],
+            textposition="outside",
+            hovertemplate="%{x}<br>평가금액: %{y:,.0f}원<br>수익률: " + "<br>".join([f"{r:+.1f}%" for r in 계좌별["수익률"]]) + "<extra></extra>",
         ))
         그림.update_layout(
-            title=dict(text="투자원금 변화", x=0.02, xanchor="left"),
-            height=340,
-            margin=dict(l=10, r=10, t=50, b=10),
-            xaxis=dict(title=""),
-            yaxis=dict(title="거래금액", tickformat=",.0f"),
-            yaxis2=dict(title="누적원금", overlaying="y", side="right", tickformat=",.0f"),
+            title=dict(text="계좌별 원금 vs 평가금액", x=0.02, xanchor="left"),
+            height=380,
+            margin=dict(l=10, r=10, t=60, b=10),
+            barmode="group",
+            yaxis=dict(tickformat=",.0f", title="금액 (원)"),
             legend=dict(orientation="h", y=1.08, x=0),
-            barmode="relative",
+            bargap=0.3,
         )
         return 그림
     except Exception:
         그림 = go.Figure()
-        그림.update_layout(title="투자원금 변화 (데이터 없음)", height=340)
+        그림.update_layout(title="계좌별 자산 비교 (데이터 없음)", height=380)
+        return 그림
+
+
+def 자산군비중그래프(통합표):
+    """자산군별 비중 도넛 차트 — 주식/TDF/현금성자산"""
+    try:
+        자산군별 = 통합표.groupby("자산군", as_index=False).agg({"평가금액": "sum"})
+        자산군별 = 자산군별[자산군별["평가금액"] > 0].sort_values("평가금액", ascending=False)
+
+        색상맵 = {
+            "주식": "#3b82f6",
+            "ETF": "#6366f1",
+            "TDF": "#8b5cf6",
+            "현금성자산": "#64748b",
+        }
+        색상 = [색상맵.get(g, "#94a3b8") for g in 자산군별["자산군"]]
+        총액 = 자산군별["평가금액"].sum()
+
+        그림 = go.Figure(go.Pie(
+            labels=자산군별["자산군"],
+            values=자산군별["평가금액"],
+            hole=0.55,
+            marker=dict(colors=색상),
+            textinfo="label+percent",
+            textfont=dict(size=13),
+            hovertemplate="%{label}<br>%{value:,.0f}원<br>%{percent}<extra></extra>",
+        ))
+        그림.update_layout(
+            title=dict(text="자산군별 비중", x=0.02, xanchor="left"),
+            height=360,
+            margin=dict(l=10, r=10, t=50, b=10),
+            annotations=[dict(
+                text=f"총<br>{총액/1e8:.1f}억",
+                x=0.5, y=0.5,
+                font=dict(size=16, color="white"),
+                showarrow=False,
+            )],
+            legend=dict(orientation="h", y=-0.05, x=0.5, xanchor="center"),
+            showlegend=True,
+        )
+        return 그림
+    except Exception:
+        그림 = go.Figure()
+        그림.update_layout(title="자산군별 비중 (데이터 없음)", height=360)
         return 그림
 
 
 def 실현손익누적그래프(거래df):
-    """매도 시점별 실현손익 누적 꺾은선 그래프"""
+    """매도 시점별 실현손익 누적 꺾은선"""
     try:
         작업 = 거래df.copy()
         작업["거래일자"] = pd.to_datetime(작업["거래일자"], errors="coerce")
@@ -8411,32 +8438,27 @@ def 실현손익누적그래프(거래df):
         작업["거래단가"] = pd.to_numeric(작업["거래단가"], errors="coerce").fillna(0)
         작업 = 작업.dropna(subset=["거래일자"]).sort_values("거래일자")
 
-        # 종목별 평균단가 계산해서 실현손익 산출
         평균단가 = {}
         실현손익행 = []
-
         for _, 행 in 작업.iterrows():
             코드 = str(행.get("종목코드", ""))
             구분 = str(행.get("거래구분", ""))
             수량 = float(행["거래수량"])
             단가 = float(행["거래단가"])
-
             if 구분 == "매수":
-                기존수량 = 평균단가.get(코드, {}).get("수량", 0)
-                기존단가 = 평균단가.get(코드, {}).get("단가", 0)
-                신규수량 = 기존수량 + 수량
-                신규단가 = (기존수량 * 기존단가 + 수량 * 단가) / 신규수량 if 신규수량 > 0 else 단가
+                기존 = 평균단가.get(코드, {"수량": 0, "단가": 0})
+                신규수량 = 기존["수량"] + 수량
+                신규단가 = (기존["수량"] * 기존["단가"] + 수량 * 단가) / 신규수량 if 신규수량 > 0 else 단가
                 평균단가[코드] = {"수량": 신규수량, "단가": 신규단가}
-
             elif 구분 == "매도" and 코드 in 평균단가:
-                매입단가 = 평균단가[코드]["단가"]
-                손익 = (단가 - 매입단가) * 수량
+                손익 = (단가 - 평균단가[코드]["단가"]) * 수량
                 실현손익행.append({"거래일자": 행["거래일자"], "종목명": 행.get("종목명", ""), "실현손익": 손익})
                 평균단가[코드]["수량"] = max(0, 평균단가[코드]["수량"] - 수량)
 
         if not 실현손익행:
             그림 = go.Figure()
-            그림.update_layout(title="실현손익 누적 (매도 이력 없음)", height=300)
+            그림.add_annotation(text="매도 이력이 없습니다", x=0.5, y=0.5, showarrow=False, font=dict(size=14))
+            그림.update_layout(title="실현손익 누적", height=280, margin=dict(l=10, r=10, t=50, b=10))
             return 그림
 
         손익df = pd.DataFrame(실현손익행).sort_values("거래일자")
@@ -8447,8 +8469,9 @@ def 실현손익누적그래프(거래df):
             x=손익df["거래일자"],
             y=손익df["실현손익"],
             name="매도 손익",
-            marker_color=["#ef4444" if v < 0 else "#22c55e" for v in 손익df["실현손익"]],
-            hovertemplate="%{x|%Y-%m-%d}<br>%{customdata}<br>%{y:,.0f}원<extra></extra>",
+            marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in 손익df["실현손익"]],
+            width=1000 * 3600 * 24 * 3,
+            hovertemplate="%{x|%Y-%m-%d}<br>%{customdata}<br>손익: %{y:,.0f}원<extra></extra>",
             customdata=손익df["종목명"],
         ))
         그림.add_trace(go.Scatter(
@@ -8457,77 +8480,262 @@ def 실현손익누적그래프(거래df):
             name="누적 실현손익",
             mode="lines+markers",
             line=dict(color="#f59e0b", width=2.5),
+            marker=dict(size=7),
             yaxis="y2",
-            hovertemplate="%{x|%Y-%m-%d}<br>누적 %{y:,.0f}원<extra></extra>",
+            hovertemplate="%{x|%Y-%m-%d}<br>누적: %{y:,.0f}원<extra></extra>",
         ))
         그림.update_layout(
             title=dict(text="실현손익 누적", x=0.02, xanchor="left"),
-            height=300,
+            height=280,
             margin=dict(l=10, r=10, t=50, b=10),
             yaxis=dict(title="매도 손익", tickformat=",.0f"),
             yaxis2=dict(title="누적", overlaying="y", side="right", tickformat=",.0f"),
-            legend=dict(orientation="h", y=1.08, x=0),
+            legend=dict(orientation="h", y=1.12, x=0),
+            bargap=0.3,
         )
         return 그림
     except Exception:
         그림 = go.Figure()
-        그림.update_layout(title="실현손익 누적 (데이터 없음)", height=300)
+        그림.update_layout(title="실현손익 누적 (데이터 없음)", height=280)
         return 그림
 
 
-def 자산변동추이UI(거래df, 계산포트폴리오):
-    """포트폴리오 자산 변동 추이 — 3가지 시각화"""
+SNAPSHOT_SHEET = "자산스냅샷"
+
+
+def 스냅샷저장(통합자산표):
+    """현재 통합자산 현황을 Google Sheets 자산스냅샷 시트에 저장."""
+    try:
+        if 통합자산표 is None or 통합자산표.empty:
+            return False, "저장할 자산 데이터가 없습니다."
+
+        오늘 = 서울현재시각()
+        년월 = 오늘.strftime("%Y-%m")
+        저장시각 = 오늘.strftime("%Y-%m-%d %H:%M")
+
+        # 계좌별 집계
+        계좌별 = 통합자산표.groupby("계좌", as_index=False).agg({"원금": "sum", "평가금액": "sum"})
+        계좌별["평가손익"] = 계좌별["평가금액"] - 계좌별["원금"]
+        계좌별["수익률"] = np.where(계좌별["원금"] > 0, 계좌별["평가손익"] / 계좌별["원금"] * 100, 0)
+
+        총원금 = 통합자산표["원금"].sum()
+        총평가 = 통합자산표["평가금액"].sum()
+        총손익 = 총평가 - 총원금
+        총수익률 = (총손익 / 총원금 * 100) if 총원금 > 0 else 0
+
+        # 자산군별 집계
+        자산군별 = 통합자산표.groupby("자산군", as_index=False).agg({"원금": "sum", "평가금액": "sum"})
+
+        # 새 스냅샷 행 구성
+        새행 = {"년월": 년월, "저장시각": 저장시각, "통합원금": 총원금, "통합평가": 총평가, "통합손익": 총손익, "통합수익률": round(총수익률, 2)}
+
+        for _, 행 in 계좌별.iterrows():
+            계좌키 = str(행["계좌"]).replace("/", "_").replace(" ", "_")
+            새행[f"{계좌키}_원금"] = int(행["원금"])
+            새행[f"{계좌키}_평가"] = int(행["평가금액"])
+            새행[f"{계좌키}_수익률"] = round(float(행["수익률"]), 2)
+
+        for _, 행 in 자산군별.iterrows():
+            군키 = str(행["자산군"])
+            새행[f"{군키}_원금"] = int(행["원금"])
+            새행[f"{군키}_평가"] = int(행["평가금액"])
+
+        # 기존 스냅샷 불러오기
+        기존df = 스냅샷불러오기()
+
+        if not 기존df.empty and 년월 in 기존df["년월"].values:
+            # 같은 달 데이터 덮어쓰기
+            기존df = 기존df[기존df["년월"] != 년월].copy()
+
+        새df = pd.DataFrame([새행])
+        결합df = pd.concat([기존df, 새df], ignore_index=True) if not 기존df.empty else 새df
+        결합df = 결합df.sort_values("년월").reset_index(drop=True)
+
+        성공, 메시지 = 구글시트데이터프레임저장(SNAPSHOT_SHEET, 결합df)
+        return 성공, 메시지
+
+    except Exception as e:
+        return False, f"스냅샷 저장 오류: {e}"
+
+
+def 스냅샷불러오기():
+    """Google Sheets에서 자산스냅샷 시트 읽기."""
+    try:
+        df = 구글시트데이터프레임읽기(SNAPSHOT_SHEET)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        숫자컬럼 = [c for c in df.columns if c not in ["년월", "저장시각"]]
+        for col in 숫자컬럼:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        return df.sort_values("년월").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+def 스냅샷추이그래프(스냅샷df):
+    """월별 통합 평가금액 + 수익률 추이 그래프."""
+    try:
+        if 스냅샷df.empty or "통합평가" not in 스냅샷df.columns:
+            그림 = go.Figure()
+            그림.add_annotation(text="스냅샷 데이터가 없습니다\n이번 달 스냅샷을 저장하면 추이를 볼 수 있습니다",
+                              x=0.5, y=0.5, showarrow=False, font=dict(size=14, color="#94a3b8"),
+                              align="center")
+            그림.update_layout(height=320, margin=dict(l=10, r=10, t=40, b=10))
+            return 그림
+
+        그림 = go.Figure()
+
+        # 원금 영역
+        그림.add_trace(go.Scatter(
+            x=스냅샷df["년월"], y=스냅샷df["통합원금"],
+            name="통합 원금", mode="lines",
+            line=dict(color="#64748b", width=1.5, dash="dot"),
+            fill=None,
+            hovertemplate="%{x}<br>원금: %{y:,.0f}원<extra></extra>",
+        ))
+
+        # 평가금액 영역
+        그림.add_trace(go.Scatter(
+            x=스냅샷df["년월"], y=스냅샷df["통합평가"],
+            name="통합 평가금액", mode="lines+markers",
+            line=dict(color="#3b82f6", width=2.5),
+            marker=dict(size=8),
+            fill="tonexty",
+            fillcolor="rgba(59,130,246,0.1)",
+            hovertemplate="%{x}<br>평가: %{y:,.0f}원<extra></extra>",
+        ))
+
+        # 수익률 (우측 축)
+        if "통합수익률" in 스냅샷df.columns:
+            그림.add_trace(go.Scatter(
+                x=스냅샷df["년월"], y=스냅샷df["통합수익률"],
+                name="수익률", mode="lines+markers",
+                line=dict(color="#f59e0b", width=2),
+                marker=dict(size=7),
+                yaxis="y2",
+                hovertemplate="%{x}<br>수익률: %{y:+.2f}%<extra></extra>",
+            ))
+
+        그림.update_layout(
+            title=dict(text="월별 자산 변동 추이", x=0.02, xanchor="left"),
+            height=320,
+            margin=dict(l=10, r=10, t=50, b=10),
+            yaxis=dict(title="금액 (원)", tickformat=",.0f"),
+            yaxis2=dict(title="수익률 (%)", overlaying="y", side="right",
+                       tickformat=".1f", ticksuffix="%"),
+            legend=dict(orientation="h", y=1.1, x=0),
+            hovermode="x unified",
+        )
+        return 그림
+    except Exception:
+        그림 = go.Figure()
+        그림.update_layout(title="월별 추이 (오류)", height=320)
+        return 그림
+
+
+def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None):
+    """포트폴리오 자산 변동 추이 — 스냅샷 + 시각화"""
     st.markdown("### 📈 자산 변동 추이")
 
     # 요약 숫자 카드
-    try:
-        작업 = 거래df.copy()
-        작업["거래수량"] = pd.to_numeric(작업["거래수량"], errors="coerce").fillna(0)
-        작업["거래단가"] = pd.to_numeric(작업["거래단가"], errors="coerce").fillna(0)
-        작업["거래금액"] = 작업["거래수량"] * 작업["거래단가"]
-
-        총매수금액 = 작업[작업["거래구분"] == "매수"]["거래금액"].sum()
-        총매도금액 = 작업[작업["거래구분"] == "매도"]["거래금액"].sum()
-        현재원금 = 총매수금액 - 총매도금액
-        거래횟수 = len(작업[작업["거래구분"].isin(["매수", "매도"])])
-        매도횟수 = len(작업[작업["거래구분"] == "매도"])
-
+    if 통합자산표 is not None and not 통합자산표.empty:
+        총원금 = 통합자산표["원금"].sum()
+        총평가 = 통합자산표["평가금액"].sum()
+        총손익 = 총평가 - 총원금
+        총수익률 = (총손익 / 총원금 * 100) if 총원금 > 0 else 0
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("총 매수금액", f"{총매수금액:,.0f}원")
-        c2.metric("총 매도금액", f"{총매도금액:,.0f}원")
-        c3.metric("현재 투자원금", f"{현재원금:,.0f}원")
-        c4.metric("총 거래횟수", f"{거래횟수}회 (매도 {매도횟수}회)")
-    except Exception:
-        pass
+        c1.metric("통합 원금", f"{총원금:,.0f}원")
+        c2.metric("통합 평가금액", f"{총평가:,.0f}원")
+        c3.metric("통합 손익", f"{총손익:+,.0f}원")
+        c4.metric("통합 수익률", f"{총수익률:+.2f}%")
 
     st.markdown("---")
 
-    # ① 투자원금 변화
-    st.markdown("#### ① 거래별 투자원금 변화")
-    st.caption("파란색: 매수, 빨간색: 매도, 노란선: 누적 투자원금")
+    # ── 월별 스냅샷 저장 & 추이 ──
+    st.markdown("#### 📅 월별 자산 추이")
+    st.caption("매월 말 스냅샷을 저장하면 자산 변동 추이를 확인할 수 있습니다.")
+
+    저장칸, 상태칸 = st.columns([1, 3])
+    with 저장칸:
+        if st.button("💾 이번 달 스냅샷 저장", key="snapshot_save_btn", use_container_width=True):
+            if 통합자산표 is not None and not 통합자산표.empty:
+                with st.spinner("저장 중..."):
+                    성공, 메시지 = 스냅샷저장(통합자산표)
+                if 성공:
+                    st.success("저장 완료!")
+                else:
+                    st.error(f"저장 실패: {메시지}")
+            else:
+                st.warning("자산 데이터를 먼저 불러오세요.")
+
+    스냅샷df = 스냅샷불러오기()
+
+    with 상태칸:
+        if not 스냅샷df.empty:
+            st.caption(f"저장된 스냅샷: {len(스냅샷df)}개월 ({스냅샷df['년월'].iloc[0]} ~ {스냅샷df['년월'].iloc[-1]})")
+        else:
+            st.caption("아직 저장된 스냅샷이 없습니다. 위 버튼으로 첫 스냅샷을 저장해보세요.")
+
     st.plotly_chart(
-        투자원금변화그래프(거래df),
+        스냅샷추이그래프(스냅샷df),
         use_container_width=True,
         config={"displaylogo": False},
     )
 
-    # ② 실현손익 누적
-    st.markdown("#### ② 실현손익 누적")
+    if not 스냅샷df.empty:
+        with st.expander("📋 월별 스냅샷 상세", expanded=False):
+            표시컬럼 = ["년월", "저장시각", "통합원금", "통합평가", "통합손익", "통합수익률"]
+            표시컬럼 = [c for c in 표시컬럼 if c in 스냅샷df.columns]
+            표시df = 스냅샷df[표시컬럼].copy()
+            서식 = {}
+            for col in ["통합원금", "통합평가", "통합손익"]:
+                if col in 표시df.columns:
+                    서식[col] = 안전정수포맷
+            if "통합수익률" in 표시df.columns:
+                서식["통합수익률"] = lambda x: f"{x:+.2f}%"
+            표데이터프레임(index_1부터(표시df).style.format(서식), width="stretch")
+
+    st.markdown("---")
+
+    # ① 계좌별 자산 비교
+    if 통합자산표 is not None and not 통합자산표.empty:
+        st.markdown("#### ① 계좌별 원금 vs 평가금액")
+        st.plotly_chart(
+            계좌별자산비교그래프(통합자산표),
+            use_container_width=True,
+            config={"displaylogo": False},
+        )
+        st.markdown("---")
+
+    # ② 자산군별 비중
+    st.markdown("#### ② 자산군별 비중")
+    좌칸, 우칸 = st.columns([1, 1], gap="large")
+    with 좌칸:
+        if 통합자산표 is not None and not 통합자산표.empty:
+            st.plotly_chart(자산군비중그래프(통합자산표), use_container_width=True, config={"displaylogo": False})
+        else:
+            st.plotly_chart(비중그래프(계산포트폴리오), use_container_width=True, config={"displaylogo": False})
+    with 우칸:
+        if 통합자산표 is not None and not 통합자산표.empty:
+            자산군별 = 통합자산표.groupby("자산군", as_index=False).agg({"원금": "sum", "평가금액": "sum", "평가손익": "sum"})
+            자산군별["수익률"] = np.where(자산군별["원금"] > 0, 자산군별["평가손익"] / 자산군별["원금"] * 100, 0)
+            총평가 = 자산군별["평가금액"].sum()
+            자산군별["비중"] = np.where(총평가 > 0, 자산군별["평가금액"] / 총평가 * 100, 0)
+            자산군별 = 자산군별.sort_values("평가금액", ascending=False).reset_index(drop=True)
+            표시 = index_1부터(자산군별[["자산군", "원금", "평가금액", "평가손익", "수익률", "비중"]].copy())
+            표데이터프레임(
+                표시.style.format({"원금": 안전정수포맷, "평가금액": 안전정수포맷, "평가손익": 손익문자열,
+                                  "수익률": 수익률문자열, "비중": lambda x: f"{x:.1f}%"})
+                .map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]),
+                width="stretch",
+            )
+
+    st.markdown("---")
+
+    # ③ 실현손익 누적
+    st.markdown("#### ③ 실현손익 누적")
     st.caption("매도 시점별 실현손익과 누적 합계")
-    st.plotly_chart(
-        실현손익누적그래프(거래df),
-        use_container_width=True,
-        config={"displaylogo": False},
-    )
-
-    # ③ 현재 종목별 비중 (도넛 개선)
-    st.markdown("#### ③ 현재 포트폴리오 비중")
-    st.plotly_chart(
-        비중그래프(계산포트폴리오),
-        use_container_width=True,
-        config={"displaylogo": False, "responsive": True},
-    )
-
+    st.plotly_chart(실현손익누적그래프(거래df), use_container_width=True, config={"displaylogo": False})
 
 def 목표비중비교그래프(리밸런싱표):
     그림 = go.Figure()
@@ -11296,9 +11504,6 @@ def 시세관련캐시초기화():
         시세스냅샷캐시.clear()
         포트폴리오계산캐시.clear()
         야후현재가요약가져오기.clear()
-        네이버일별원자재표가져오기.clear()
-        두바이유현재가가져오기.clear()
-        파생주요지표가져오기.clear()
         네이버시장지표현재가가져오기.clear()
         네이버시장지표목록가져오기.clear()
     except Exception:
@@ -12073,7 +12278,10 @@ if 선택섹터 == "포트폴리오 현황":
 
         # ③ 자산 변동 추이 (접힘)
         with st.expander("📈 자산 변동 추이", expanded=True):
-            자산변동추이UI(수정포트폴리오, 계산포트폴리오)
+            IRP비주식자산df_추이 = IRP비주식자산편집UI()
+            현금성자산df_추이 = 현금성자산불러오기()
+            통합자산표_추이 = 통합자산현황표생성(보유계산포트폴리오, IRP비주식자산df_추이, 현금성자산df_추이)
+            자산변동추이UI(수정포트폴리오, 계산포트폴리오, 통합자산표_추이)
 
         st.markdown("---")
 
