@@ -713,7 +713,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.21.1-asset-change-reason-fix"
+APP_VERSION = "v5.21.2-nonstock-read-stabilized"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1251,7 +1251,7 @@ GOOGLE_SHEETS_MONTHLY_SNAPSHOT_SHEET = "월별자산스냅샷"
 # - 아래 3개 시트는 과거 기록 보존용으로만 남기고, 화면 메뉴/계산 흐름에서는 사용하지 않습니다.
 # - Google Sheets에서 물리 삭제하지 않아도 앱 실행에는 영향을 주지 않도록 분리합니다.
 # -----------------------------------
-LEGACY_DISABLED_SHEETS_V515 = {"현금성자산", "원금변동원장", "자산변화로그"}
+LEGACY_DISABLED_SHEETS_V515 = {"현금성자산", "원금변동원장"}
 
 def 운영시트목록정리(시트목록):
     try:
@@ -1730,30 +1730,75 @@ def 구글시트사이드바간단표시():
         st.caption(f"Google Sheets 상태 확인 오류: {e}")
 
 
-def 구글시트워크시트확보(spreadsheet, sheet_name, rows=1000, cols=30):
-    try:
-        return spreadsheet.worksheet(sheet_name)
-    except Exception:
-        return spreadsheet.add_worksheet(title=sheet_name, rows=rows, cols=cols)
+def 구글시트워크시트찾기(spreadsheet, sheet_name):
+    """읽기 전용 워크시트 찾기.
+    중요: 읽기 과정에서는 빈 시트를 새로 만들지 않습니다.
+    API 일시 오류나 이름 공백 문제 때문에 실제 데이터가 빈 값처럼 보이는 것을 방지합니다.
+    """
+    if spreadsheet is None:
+        return None
+    target = str(sheet_name or "").strip()
+    if not target:
+        return None
 
+    try:
+        return spreadsheet.worksheet(target)
+    except Exception as first_error:
+        try:
+            for ws in spreadsheet.worksheets():
+                if str(getattr(ws, "title", "")).strip() == target:
+                    return ws
+        except Exception as e:
+            logging.warning("worksheet list failed while finding %s: %s", target, e, exc_info=True)
+        logging.warning("worksheet not found for read: %s / %s", target, first_error, exc_info=True)
+        return None
+
+
+def 구글시트워크시트확보(spreadsheet, sheet_name, rows=1000, cols=30):
+    """쓰기용 워크시트 확보.
+    읽기 함수에서는 이 함수를 쓰지 않습니다. 없는 시트가 필요할 때만 생성합니다.
+    """
+    try:
+        existing = 구글시트워크시트찾기(spreadsheet, sheet_name)
+        if existing is not None:
+            return existing
+    except Exception as e:
+        logging.warning("worksheet pre-check failed: %s", e, exc_info=True)
+    return spreadsheet.add_worksheet(title=sheet_name, rows=rows, cols=cols)
 
 def 구글시트데이터프레임읽기(sheet_name):
+    """Google Sheets 탭을 DataFrame으로 읽습니다.
+    v5.21.2: 읽기 중에는 새 빈 시트를 만들지 않고, 실제 탭을 찾지 못하면 빈 DataFrame만 반환합니다.
+    """
     spreadsheet, info = 구글시트문서연결()
     if spreadsheet is None:
+        logging.warning("google sheet read skipped; connection failed: %s", info)
         return pd.DataFrame()
     try:
-        ws = 구글시트워크시트확보(spreadsheet, sheet_name)
+        ws = 구글시트워크시트찾기(spreadsheet, sheet_name)
+        if ws is None:
+            return pd.DataFrame()
         values = ws.get_all_values()
         if not values:
             return pd.DataFrame()
-        header = values[0]
+        header = [str(x).strip() for x in values[0]]
         rows = values[1:]
-        if not header:
+        if not header or all(h == "" for h in header):
             return pd.DataFrame()
-        return normalize_asset_dataframe_v518(pd.DataFrame(rows, columns=header))
-    except Exception:
+        # Google Sheets 우측 빈 열 때문에 컬럼명이 빈 문자열로 들어오는 경우 제거
+        valid_idx = [i for i, h in enumerate(header) if h != ""]
+        header = [header[i] for i in valid_idx]
+        cleaned_rows = []
+        for row in rows:
+            cleaned_rows.append([(row[i] if i < len(row) else "") for i in valid_idx])
+        df = pd.DataFrame(cleaned_rows, columns=header)
+        # 완전 빈 행 제거
+        if not df.empty:
+            df = df.replace("", pd.NA).dropna(how="all").fillna("")
+        return normalize_asset_dataframe_v518(df)
+    except Exception as e:
+        logging.warning("google sheet dataframe read failed: %s / %s", sheet_name, e, exc_info=True)
         return pd.DataFrame()
-
 
 def _구글시트날짜문자열(값):
     """Google Sheets 저장 전 날짜/일시 값을 YYYY-MM-DD 문자열로 고정합니다."""
@@ -4457,24 +4502,43 @@ def IRP비주식자산표준열맞추기(df):
 
 
 def IRP비주식자산불러오기():
-    """비주식자산을 Google Sheets에서만 불러옵니다.
-    Google Sheets 연결 실패 시 과거 로컬 JSON/기본값을 표시하지 않습니다.
+    """비주식자산을 Google Sheets에서 불러옵니다.
+    v5.21.2:
+    - 읽기 실패 시 Google Sheets를 빈 값으로 덮어쓰지 않습니다.
+    - 세션에 정상 데이터가 남아 있으면 임시로 유지합니다.
+    - 현금성자산은 원금=평가금액 현재잔액으로 정규화합니다.
     """
     연결됨, info = 구글시트운영연결확인(화면표시=False)
+    캐시 = st.session_state.get("irp_non_stock_assets_df_v512")
+
     if not 연결됨:
-        st.session_state.pop("irp_non_stock_assets_df_v512", None)
+        if isinstance(캐시, pd.DataFrame) and not 캐시.empty:
+            return IRP비주식자산표준열맞추기(캐시)
         return IRP비주식자산표준열맞추기(pd.DataFrame())
 
     try:
         구글df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_NON_STOCK_SHEET)
         df = IRP비주식자산표준열맞추기(구글df)
-        st.session_state["irp_non_stock_assets_df_v512"] = df
-        return df
-    except Exception as e:
-        st.session_state.pop("irp_non_stock_assets_df_v512", None)
-        st.warning(f"비주식자산 Google Sheets 읽기 실패: {type(e).__name__}: {e}")
+
+        if not df.empty:
+            st.session_state["irp_non_stock_assets_df_v512"] = df
+            st.session_state["irp_non_stock_assets_last_loaded_rows_v5212"] = len(df)
+            return df
+
+        # Google Sheets 연결은 되었지만 읽기 결과가 비어 있을 때:
+        # 실제 시트가 비어 있는지, API/시트명 문제인지 구분하기 전까지 기존 정상 캐시를 보존합니다.
+        if isinstance(캐시, pd.DataFrame) and not 캐시.empty:
+            st.warning("비주식자산 시트 읽기 결과가 비어 있어 직전 정상 데이터를 임시 표시합니다. Google Sheets 새로고침 후 다시 확인하세요.")
+            return IRP비주식자산표준열맞추기(캐시)
+
         return IRP비주식자산표준열맞추기(pd.DataFrame())
 
+    except Exception as e:
+        if isinstance(캐시, pd.DataFrame) and not 캐시.empty:
+            st.warning(f"비주식자산 Google Sheets 읽기 실패로 직전 정상 데이터를 표시합니다: {type(e).__name__}: {e}")
+            return IRP비주식자산표준열맞추기(캐시)
+        st.warning(f"비주식자산 Google Sheets 읽기 실패: {type(e).__name__}: {e}")
+        return IRP비주식자산표준열맞추기(pd.DataFrame())
 
 def IRP비주식자산저장(df):
     """비주식자산을 Google Sheets에만 저장합니다. 연결 실패 시 로컬 저장을 차단합니다."""
