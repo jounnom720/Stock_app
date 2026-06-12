@@ -704,7 +704,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.20.4-cash-snapshot-fix"
+APP_VERSION = "v5.20.5-cash-source-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -3358,6 +3358,15 @@ def 현금성자산표준화(df):
     for 열 in ["원금", "평가금액"]:
         작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0.0)
 
+    # v5.20.5: 현금성자산은 투자수익 계산 대상이 아니라 현재 잔액입니다.
+    # 따라서 원금과 평가금액은 항상 같은 금액으로 맞춥니다.
+    try:
+        현재잔액 = 작업["평가금액"].where(작업["평가금액"] > 0, 작업["원금"])
+        작업["원금"] = 현재잔액
+        작업["평가금액"] = 현재잔액
+    except Exception as e:
+        logging.warning("cash balance normalization failed: %s", e, exc_info=True)
+
     작업["계좌"] = 작업["계좌"].replace("", "미지정 계좌")
     작업["유형"] = 작업["유형"].replace("", "예수금")
     작업 = 작업[(작업["원금"] > 0) | (작업["평가금액"] > 0) | (작업["메모"].astype(str).str.strip() != "")].copy()
@@ -4660,13 +4669,9 @@ def 주식ETF자산요약행생성(보유포트폴리오):
 
 
 def IRP비주식자산요약행생성(irp_df):
+    # v5.20.5: 비주식자산 시트를 사용자가 직접 관리하는 기준 원장으로 사용합니다.
+    # 현금성자산 시트가 과거 값으로 남아 있어도 비주식자산의 현금성 행을 삭제하지 않습니다.
     작업 = IRP비주식자산표준열맞추기(irp_df)
-    try:
-        별도현금 = 현금성자산불러오기()
-        if 별도현금 is not None and not 별도현금.empty:
-            작업 = 작업[작업["자산군"].astype(str) != "현금성자산"].copy()
-    except Exception as e:
-        logging.warning("suppressed exception at line 4645: %s", e, exc_info=True)
     작업 = 작업[(작업["원금"] > 0) | (작업["평가금액"] > 0)].copy()
     if 작업.empty:
         return pd.DataFrame(columns=["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"])
@@ -4675,12 +4680,37 @@ def IRP비주식자산요약행생성(irp_df):
     return 작업[["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"]].copy()
 
 
+def 비주식자산현금성행존재여부(irp_df):
+    try:
+        작업 = IRP비주식자산표준열맞추기(irp_df)
+        if 작업.empty:
+            return False
+        현금마스크 = (
+            작업["자산군"].astype(str).str.contains("현금|예수금|대기|CMA", case=False, na=False)
+            | 작업["상품명"].astype(str).str.contains("현금|예수금|대기|CMA", case=False, na=False)
+        )
+        return bool(현금마스크.any())
+    except Exception as e:
+        logging.warning("cash row detection failed: %s", e, exc_info=True)
+        return False
+
+
 def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
+    # v5.20.5 원칙
+    # 1) 사용자가 비주식자산 시트에 현금성자산을 관리하면 그 값을 최우선으로 사용합니다.
+    # 2) 과거 현금성자산 별도 시트가 남아 있어도 중복/구버전 금액을 합산하지 않습니다.
+    # 3) 비주식자산에 현금성 행이 전혀 없을 때만 별도 현금성자산 시트를 보조로 사용합니다.
+    비주식현금있음 = 비주식자산현금성행존재여부(irp_df)
     if cash_df is None:
-        try:
-            cash_df = 현금성자산불러오기()
-        except Exception:
+        if 비주식현금있음:
             cash_df = pd.DataFrame()
+        else:
+            try:
+                cash_df = 현금성자산불러오기()
+            except Exception:
+                cash_df = pd.DataFrame()
+    elif 비주식현금있음:
+        cash_df = pd.DataFrame()
     통합 = pd.concat([주식ETF자산요약행생성(보유포트폴리오), IRP비주식자산요약행생성(irp_df), 현금성자산요약행생성(cash_df)], ignore_index=True)
     if 통합.empty:
         return 통합
