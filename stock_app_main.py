@@ -704,7 +704,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.20.0-cleanup"
+APP_VERSION = "v5.20.4-cash-snapshot-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -864,7 +864,7 @@ def v51833_safe_markdown_html(html_text):
         st.caption(f"HTML 표시 오류: {type(e).__name__}: {e}")
 
 
-st.set_page_config(page_title=f"투자 분석 시스템 {APP_VERSION}", layout="wide")
+st.set_page_config(page_title=f"나의 포트폴리오 관리 시스템 {APP_VERSION}", layout="wide")
 
 # -----------------------------------
 # v5.13.7 안정화 스타일 세트
@@ -1181,10 +1181,10 @@ def 모바일여부():
     return 모바일모드
 
 if 모바일여부():
-    st.title("📈 투자 분석 시스템")
+    st.title("📈 나의 포트폴리오 관리 시스템")
     st.caption("모바일 조회용 간소화 화면")
 else:
-    st.title("📈 투자 분석 시스템")
+    st.title("📈 나의 포트폴리오 관리 시스템")
 
 
     
@@ -1235,6 +1235,7 @@ GOOGLE_SHEETS_SUMMARY_SHEET = "통합요약"
 GOOGLE_SHEETS_ASSET_CHANGE_LOG_SHEET = "자산변화로그"
 GOOGLE_SHEETS_CASH_ASSET_SHEET = "현금성자산"
 GOOGLE_SHEETS_PRINCIPAL_LEDGER_SHEET = "원금변동원장"
+GOOGLE_SHEETS_MONTHLY_SNAPSHOT_SHEET = "월별자산스냅샷"
 # -----------------------------------
 # v5.15.1 운영 방향 정리
 # - 핵심 운영 데이터는 거래이력·비주식자산·통합요약만 사용합니다.
@@ -4286,6 +4287,25 @@ def IRP비주식자산표준열맞추기(df):
 
     for 열 in ["원금", "평가금액", "예상연수익률"]:
         작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0.0)
+
+    # v5.20.4: 현금성자산은 투자 손익 계산 대상이 아니라 현재 잔액입니다.
+    # 현금으로 주식을 매수한 경우에는 거래이력에 매수 기록을 추가하고,
+    # 비주식자산 시트의 현금성자산 잔액을 줄이면 통합원금이 중복 증가하지 않습니다.
+    # 따라서 현금성자산 행은 원금과 평가금액을 항상 같은 현재 잔액으로 맞춥니다.
+    try:
+        현금마스크 = (
+            작업["자산군"].astype(str).str.contains("현금|예수금|대기", na=False)
+            | 작업["상품명"].astype(str).str.contains("현금|예수금|대기", na=False)
+        )
+        if 현금마스크.any():
+            평가우선잔액 = 작업.loc[현금마스크, "평가금액"].where(
+                작업.loc[현금마스크, "평가금액"] > 0,
+                작업.loc[현금마스크, "원금"]
+            )
+            작업.loc[현금마스크, "원금"] = 평가우선잔액
+            작업.loc[현금마스크, "평가금액"] = 평가우선잔액
+    except Exception as e:
+        logging.warning("cash asset normalization failed: %s", e, exc_info=True)
 
     작업["계좌"] = 작업["계좌"].replace({"": "미지정 계좌", "신한 IRP": "신한은행 IRP", "미래에셋": "미래에셋증권"})
     작업["자산군"] = 작업["자산군"].replace("", "기타")
@@ -8533,6 +8553,76 @@ def 실현손익누적그래프(거래df):
         그림.update_layout(title="실현손익 (오류)", height=250)
         return 그림
 
+
+# ============================================================
+# v5.20.4 월별 자산 스냅샷 저장/불러오기 안정화
+# - 기존 자산변동추이UI가 스냅샷저장/스냅샷불러오기 미정의 상태로 호출되어 NameError 발생
+# - Google Sheets의 월별자산스냅샷 탭에 저장하며, 같은 년월은 최신 값으로 갱신
+# - Google Sheets 미연결 시에는 빈 표/오류 메시지로 안전하게 처리
+# ============================================================
+월별자산스냅샷표준열 = [
+    "년월", "저장시각", "통합원금", "통합평가", "통합손익", "통합수익률", "메모"
+]
+
+
+def 월별자산스냅샷표준화(df):
+    작업 = pd.DataFrame() if df is None else pd.DataFrame(df).copy()
+    for 열 in 월별자산스냅샷표준열:
+        if 열 not in 작업.columns:
+            작업[열] = 0 if 열 in ["통합원금", "통합평가", "통합손익", "통합수익률"] else ""
+    작업 = 작업[월별자산스냅샷표준열].copy()
+    for 열 in ["통합원금", "통합평가", "통합손익", "통합수익률"]:
+        작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0.0)
+    for 열 in ["년월", "저장시각", "메모"]:
+        작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
+    작업 = 작업[작업["년월"].astype(str).str.strip() != ""].copy()
+    if not 작업.empty:
+        작업 = 작업.sort_values("년월").drop_duplicates(subset=["년월"], keep="last").reset_index(drop=True)
+    return 작업
+
+
+def 스냅샷불러오기():
+    try:
+        df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_MONTHLY_SNAPSHOT_SHEET)
+        return 월별자산스냅샷표준화(df)
+    except Exception as e:
+        logging.warning("monthly snapshot load failed: %s", e, exc_info=True)
+        return 월별자산스냅샷표준화(pd.DataFrame())
+
+
+def 스냅샷저장(통합자산표, 메모=""):
+    try:
+        if 통합자산표 is None or pd.DataFrame(통합자산표).empty:
+            return False, "저장할 통합자산표가 없습니다."
+        작업 = pd.DataFrame(통합자산표).copy()
+        for 필수열 in ["원금", "평가금액"]:
+            if 필수열 not in 작업.columns:
+                return False, f"통합자산표에 '{필수열}' 컬럼이 없습니다."
+        총원금 = float(pd.to_numeric(작업["원금"], errors="coerce").fillna(0).sum())
+        총평가 = float(pd.to_numeric(작업["평가금액"], errors="coerce").fillna(0).sum())
+        총손익 = 총평가 - 총원금
+        총수익률 = (총손익 / 총원금 * 100) if 총원금 else 0.0
+        지금 = 서울현재시각()
+        새행 = {
+            "년월": 지금.strftime("%Y-%m"),
+            "저장시각": 지금.strftime("%Y-%m-%d %H:%M:%S"),
+            "통합원금": round(총원금),
+            "통합평가": round(총평가),
+            "통합손익": round(총손익),
+            "통합수익률": round(총수익률, 2),
+            "메모": 메모 or "월별 자산 스냅샷",
+        }
+        기존 = 스냅샷불러오기()
+        저장df = pd.concat([기존, pd.DataFrame([새행])], ignore_index=True)
+        저장df = 월별자산스냅샷표준화(저장df)
+        성공, 메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_MONTHLY_SNAPSHOT_SHEET, 저장df)
+        if 성공:
+            return True, f"{새행['년월']} 스냅샷 저장 완료"
+        return False, 메시지
+    except Exception as e:
+        logging.warning("monthly snapshot save failed: %s", e, exc_info=True)
+        return False, f"스냅샷 저장 오류: {type(e).__name__}: {e}"
+
 def 스냅샷추이그래프(스냅샷df):
     """월별 통합 평가금액 + 수익률 추이 그래프."""
     try:
@@ -12278,10 +12368,8 @@ if 선택섹터 == "포트폴리오 현황":
 
         st.markdown("---")
 
-        # ⑤ 리스크 분석 + 종합 인사이트 (접힘 처리)
-        with st.expander("📊 리스크 분석 & 종합 인사이트", expanded=False):
-            위험분석결과_v514 = 포트폴리오리스크분석UI(보유계산포트폴리오, 통합자산표)
-            포트폴리오종합인사이트UI(보유계산포트폴리오, 통합자산표, 위험분석결과_v514)
+        # ⑤ v5.20.4: 리스크 분석 & 종합 인사이트는 현재 실행 화면에서 제외합니다.
+        # 필요 시 별도 안정화 후 독립 메뉴로 다시 연결합니다.
 
         # 청산 종목 (접힘)
         청산종목표 = 계산포트폴리오[계산포트폴리오["보유수량"] <= 0].copy()
