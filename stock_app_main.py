@@ -8344,93 +8344,102 @@ def 비중그래프(계산표):
 
 
 def 계좌별자산비교그래프(통합표):
-    """계좌별 원금 vs 평가금액 비교 막대그래프"""
+    """계좌별 원금 vs 평가금액 비교 — 세련된 가로 막대"""
     try:
         계좌별 = 통합표.groupby("계좌", as_index=False).agg({"원금": "sum", "평가금액": "sum"})
         계좌별["평가손익"] = 계좌별["평가금액"] - 계좌별["원금"]
         계좌별["수익률"] = np.where(계좌별["원금"] > 0, 계좌별["평가손익"] / 계좌별["원금"] * 100, 0)
 
         그림 = go.Figure()
+
         그림.add_trace(go.Bar(
             name="원금",
-            x=계좌별["계좌"],
-            y=계좌별["원금"],
-            marker_color="#64748b",
-            text=[f"{v:,.0f}원" for v in 계좌별["원금"]],
-            textposition="outside",
-            hovertemplate="%{x}<br>원금: %{y:,.0f}원<extra></extra>",
+            x=계좌별["원금"],
+            y=계좌별["계좌"],
+            orientation="h",
+            marker=dict(color="#475569", line=dict(width=0)),
+            text=[f"{v/1e8:.2f}억" for v in 계좌별["원금"]],
+            textposition="inside",
+            textfont=dict(color="white", size=12),
+            hovertemplate="%{y}<br>원금: %{x:,.0f}원<extra></extra>",
         ))
+
         그림.add_trace(go.Bar(
             name="평가금액",
-            x=계좌별["계좌"],
-            y=계좌별["평가금액"],
-            marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in 계좌별["평가손익"]],
-            text=[f"{v:,.0f}원\n({r:+.1f}%)" for v, r in zip(계좌별["평가금액"], 계좌별["수익률"])],
-            textposition="outside",
-            hovertemplate="%{x}<br>평가금액: %{y:,.0f}원<br>수익률: " + "<br>".join([f"{r:+.1f}%" for r in 계좌별["수익률"]]) + "<extra></extra>",
+            x=계좌별["평가금액"],
+            y=계좌별["계좌"],
+            orientation="h",
+            marker=dict(
+                color=["#22c55e" if v >= 0 else "#ef4444" for v in 계좌별["평가손익"]],
+                line=dict(width=0),
+            ),
+            text=[f"{v/1e8:.2f}억 ({r:+.1f}%)" for v, r in zip(계좌별["평가금액"], 계좌별["수익률"])],
+            textposition="inside",
+            textfont=dict(color="white", size=12),
+            hovertemplate="%{y}<br>평가: %{x:,.0f}원<br>수익률: " +
+                          "<br>".join([f"{r:+.1f}%" for r in 계좌별["수익률"]]) + "<extra></extra>",
         ))
+
         그림.update_layout(
-            title=dict(text="계좌별 원금 vs 평가금액", x=0.02, xanchor="left"),
-            height=380,
-            margin=dict(l=10, r=10, t=60, b=10),
+            height=200,
+            margin=dict(l=10, r=20, t=30, b=10),
             barmode="group",
-            yaxis=dict(tickformat=",.0f", title="금액 (원)"),
-            legend=dict(orientation="h", y=1.08, x=0),
             bargap=0.3,
+            bargroupgap=0.05,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(tickformat=",.0f", gridcolor="rgba(255,255,255,0.05)"),
+            yaxis=dict(tickfont=dict(size=12)),
+            legend=dict(orientation="h", y=1.15, x=0, font=dict(size=11)),
         )
         return 그림
     except Exception:
         그림 = go.Figure()
-        그림.update_layout(title="계좌별 자산 비교 (데이터 없음)", height=380)
+        그림.update_layout(title="계좌별 비교 (오류)", height=200)
         return 그림
 
-
 def 자산군비중그래프(통합표):
-    """자산군별 비중 도넛 차트 — 주식/TDF/현금성자산"""
+    """자산군별 비중 도넛 차트"""
     try:
         자산군별 = 통합표.groupby("자산군", as_index=False).agg({"평가금액": "sum"})
         자산군별 = 자산군별[자산군별["평가금액"] > 0].sort_values("평가금액", ascending=False)
-
-        색상맵 = {
-            "주식": "#3b82f6",
-            "ETF": "#6366f1",
-            "TDF": "#8b5cf6",
-            "현금성자산": "#64748b",
-        }
-        색상 = [색상맵.get(g, "#94a3b8") for g in 자산군별["자산군"]]
         총액 = 자산군별["평가금액"].sum()
+
+        색상팔레트 = ["#3b82f6", "#8b5cf6", "#6366f1", "#64748b", "#0ea5e9", "#10b981"]
+        색상 = [색상팔레트[i % len(색상팔레트)] for i in range(len(자산군별))]
 
         그림 = go.Figure(go.Pie(
             labels=자산군별["자산군"],
             values=자산군별["평가금액"],
-            hole=0.55,
-            marker=dict(colors=색상),
+            hole=0.60,
+            marker=dict(colors=색상, line=dict(color="rgba(0,0,0,0.2)", width=1)),
             textinfo="label+percent",
-            textfont=dict(size=13),
+            textfont=dict(size=12),
             hovertemplate="%{label}<br>%{value:,.0f}원<br>%{percent}<extra></extra>",
+            direction="clockwise",
         ))
         그림.update_layout(
-            title=dict(text="자산군별 비중", x=0.02, xanchor="left"),
-            height=360,
-            margin=dict(l=10, r=10, t=50, b=10),
+            height=300,
+            margin=dict(l=10, r=10, t=10, b=30),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
             annotations=[dict(
-                text=f"총<br>{총액/1e8:.1f}억",
+                text=f"총<br><b>{총액/1e8:.1f}억</b>",
                 x=0.5, y=0.5,
-                font=dict(size=16, color="white"),
+                font=dict(size=15, color="white"),
                 showarrow=False,
             )],
-            legend=dict(orientation="h", y=-0.05, x=0.5, xanchor="center"),
+            legend=dict(orientation="h", y=-0.08, x=0.5, xanchor="center", font=dict(size=11)),
             showlegend=True,
         )
         return 그림
     except Exception:
         그림 = go.Figure()
-        그림.update_layout(title="자산군별 비중 (데이터 없음)", height=360)
+        그림.update_layout(title="자산군 비중 (오류)", height=300)
         return 그림
 
-
 def 실현손익누적그래프(거래df):
-    """매도 시점별 실현손익 누적 꺾은선"""
+    """매도 시점별 실현손익 누적"""
     try:
         작업 = 거래df.copy()
         작업["거래일자"] = pd.to_datetime(작업["거래일자"], errors="coerce")
@@ -8452,186 +8461,166 @@ def 실현손익누적그래프(거래df):
                 평균단가[코드] = {"수량": 신규수량, "단가": 신규단가}
             elif 구분 == "매도" and 코드 in 평균단가:
                 손익 = (단가 - 평균단가[코드]["단가"]) * 수량
-                실현손익행.append({"거래일자": 행["거래일자"], "종목명": 행.get("종목명", ""), "실현손익": 손익})
+                실현손익행.append({
+                    "거래일자": 행["거래일자"],
+                    "종목명": 행.get("종목명", ""),
+                    "실현손익": 손익,
+                })
                 평균단가[코드]["수량"] = max(0, 평균단가[코드]["수량"] - 수량)
 
         if not 실현손익행:
             그림 = go.Figure()
-            그림.add_annotation(text="매도 이력이 없습니다", x=0.5, y=0.5, showarrow=False, font=dict(size=14))
-            그림.update_layout(title="실현손익 누적", height=280, margin=dict(l=10, r=10, t=50, b=10))
+            그림.add_annotation(
+                text="매도 이력이 없습니다",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=14, color="#94a3b8"),
+                xref="paper", yref="paper",
+            )
+            그림.update_layout(
+                height=220,
+                margin=dict(l=10, r=10, t=30, b=10),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(visible=False), yaxis=dict(visible=False),
+            )
             return 그림
 
         손익df = pd.DataFrame(실현손익행).sort_values("거래일자")
         손익df["누적손익"] = 손익df["실현손익"].cumsum()
+        # 날짜별로 집계 (같은 날 여러 건이면 합산)
+        날짜별 = 손익df.groupby(손익df["거래일자"].dt.date).agg(
+            실현손익=("실현손익", "sum"),
+            누적손익=("누적손익", "last"),
+            종목명=("종목명", lambda x: ", ".join(x.unique())),
+        ).reset_index()
+        날짜별["거래일자"] = pd.to_datetime(날짜별["거래일자"])
 
         그림 = go.Figure()
         그림.add_trace(go.Bar(
-            x=손익df["거래일자"],
-            y=손익df["실현손익"],
+            x=날짜별["거래일자"],
+            y=날짜별["실현손익"],
             name="매도 손익",
-            marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in 손익df["실현손익"]],
-            width=1000 * 3600 * 24 * 3,
+            marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in 날짜별["실현손익"]],
+            marker_line_width=0,
+            width=1000 * 3600 * 24 * 5,
+            customdata=날짜별["종목명"],
             hovertemplate="%{x|%Y-%m-%d}<br>%{customdata}<br>손익: %{y:,.0f}원<extra></extra>",
-            customdata=손익df["종목명"],
         ))
         그림.add_trace(go.Scatter(
-            x=손익df["거래일자"],
-            y=손익df["누적손익"],
+            x=날짜별["거래일자"],
+            y=날짜별["누적손익"],
             name="누적 실현손익",
             mode="lines+markers",
             line=dict(color="#f59e0b", width=2.5),
-            marker=dict(size=7),
+            marker=dict(size=8, color="#f59e0b"),
             yaxis="y2",
             hovertemplate="%{x|%Y-%m-%d}<br>누적: %{y:,.0f}원<extra></extra>",
         ))
         그림.update_layout(
-            title=dict(text="실현손익 누적", x=0.02, xanchor="left"),
-            height=280,
-            margin=dict(l=10, r=10, t=50, b=10),
-            yaxis=dict(title="매도 손익", tickformat=",.0f"),
-            yaxis2=dict(title="누적", overlaying="y", side="right", tickformat=",.0f"),
-            legend=dict(orientation="h", y=1.12, x=0),
-            bargap=0.3,
+            height=250,
+            margin=dict(l=10, r=60, t=40, b=10),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(tickformat="%m/%d", gridcolor="rgba(255,255,255,0.05)"),
+            yaxis=dict(title="손익(원)", tickformat=",.0f", gridcolor="rgba(255,255,255,0.05)"),
+            yaxis2=dict(title="누적(원)", overlaying="y", side="right", tickformat=",.0f", showgrid=False),
+            legend=dict(orientation="h", y=1.12, x=0, font=dict(size=11)),
+            bargap=0.4,
         )
         return 그림
     except Exception:
         그림 = go.Figure()
-        그림.update_layout(title="실현손익 누적 (데이터 없음)", height=280)
+        그림.update_layout(title="실현손익 (오류)", height=250)
         return 그림
-
-
-SNAPSHOT_SHEET = "자산스냅샷"
-
-
-def 스냅샷저장(통합자산표):
-    """현재 통합자산 현황을 Google Sheets 자산스냅샷 시트에 저장."""
-    try:
-        if 통합자산표 is None or 통합자산표.empty:
-            return False, "저장할 자산 데이터가 없습니다."
-
-        오늘 = 서울현재시각()
-        년월 = 오늘.strftime("%Y-%m")
-        저장시각 = 오늘.strftime("%Y-%m-%d %H:%M")
-
-        # 계좌별 집계
-        계좌별 = 통합자산표.groupby("계좌", as_index=False).agg({"원금": "sum", "평가금액": "sum"})
-        계좌별["평가손익"] = 계좌별["평가금액"] - 계좌별["원금"]
-        계좌별["수익률"] = np.where(계좌별["원금"] > 0, 계좌별["평가손익"] / 계좌별["원금"] * 100, 0)
-
-        총원금 = 통합자산표["원금"].sum()
-        총평가 = 통합자산표["평가금액"].sum()
-        총손익 = 총평가 - 총원금
-        총수익률 = (총손익 / 총원금 * 100) if 총원금 > 0 else 0
-
-        # 자산군별 집계
-        자산군별 = 통합자산표.groupby("자산군", as_index=False).agg({"원금": "sum", "평가금액": "sum"})
-
-        # 새 스냅샷 행 구성
-        새행 = {"년월": 년월, "저장시각": 저장시각, "통합원금": 총원금, "통합평가": 총평가, "통합손익": 총손익, "통합수익률": round(총수익률, 2)}
-
-        for _, 행 in 계좌별.iterrows():
-            계좌키 = str(행["계좌"]).replace("/", "_").replace(" ", "_")
-            새행[f"{계좌키}_원금"] = int(행["원금"])
-            새행[f"{계좌키}_평가"] = int(행["평가금액"])
-            새행[f"{계좌키}_수익률"] = round(float(행["수익률"]), 2)
-
-        for _, 행 in 자산군별.iterrows():
-            군키 = str(행["자산군"])
-            새행[f"{군키}_원금"] = int(행["원금"])
-            새행[f"{군키}_평가"] = int(행["평가금액"])
-
-        # 기존 스냅샷 불러오기
-        기존df = 스냅샷불러오기()
-
-        if not 기존df.empty and 년월 in 기존df["년월"].values:
-            # 같은 달 데이터 덮어쓰기
-            기존df = 기존df[기존df["년월"] != 년월].copy()
-
-        새df = pd.DataFrame([새행])
-        결합df = pd.concat([기존df, 새df], ignore_index=True) if not 기존df.empty else 새df
-        결합df = 결합df.sort_values("년월").reset_index(drop=True)
-
-        성공, 메시지 = 구글시트데이터프레임저장(SNAPSHOT_SHEET, 결합df)
-        return 성공, 메시지
-
-    except Exception as e:
-        return False, f"스냅샷 저장 오류: {e}"
-
-
-def 스냅샷불러오기():
-    """Google Sheets에서 자산스냅샷 시트 읽기."""
-    try:
-        df = 구글시트데이터프레임읽기(SNAPSHOT_SHEET)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        숫자컬럼 = [c for c in df.columns if c not in ["년월", "저장시각"]]
-        for col in 숫자컬럼:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        return df.sort_values("년월").reset_index(drop=True)
-    except Exception:
-        return pd.DataFrame()
-
 
 def 스냅샷추이그래프(스냅샷df):
     """월별 통합 평가금액 + 수익률 추이 그래프."""
     try:
         if 스냅샷df.empty or "통합평가" not in 스냅샷df.columns:
             그림 = go.Figure()
-            그림.add_annotation(text="스냅샷 데이터가 없습니다\n이번 달 스냅샷을 저장하면 추이를 볼 수 있습니다",
-                              x=0.5, y=0.5, showarrow=False, font=dict(size=14, color="#94a3b8"),
-                              align="center")
-            그림.update_layout(height=320, margin=dict(l=10, r=10, t=40, b=10))
+            그림.add_annotation(
+                text="📅 첫 스냅샷을 저장하면<br>월별 자산 추이를 확인할 수 있습니다",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=15, color="#94a3b8"), align="center",
+                xref="paper", yref="paper",
+            )
+            그림.update_layout(
+                height=280,
+                margin=dict(l=20, r=20, t=30, b=20),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(visible=False),
+                yaxis=dict(visible=False),
+            )
             return 그림
+
+        # x축을 년월 문자열로 사용
+        x값 = 스냅샷df["년월"].astype(str).tolist()
 
         그림 = go.Figure()
 
-        # 원금 영역
+        # 원금 점선
         그림.add_trace(go.Scatter(
-            x=스냅샷df["년월"], y=스냅샷df["통합원금"],
-            name="통합 원금", mode="lines",
+            x=x값, y=스냅샷df["통합원금"],
+            name="통합 원금",
+            mode="lines+markers",
             line=dict(color="#64748b", width=1.5, dash="dot"),
-            fill=None,
+            marker=dict(size=5),
             hovertemplate="%{x}<br>원금: %{y:,.0f}원<extra></extra>",
         ))
 
-        # 평가금액 영역
+        # 평가금액 실선 + 음영
         그림.add_trace(go.Scatter(
-            x=스냅샷df["년월"], y=스냅샷df["통합평가"],
-            name="통합 평가금액", mode="lines+markers",
+            x=x값, y=스냅샷df["통합평가"],
+            name="통합 평가금액",
+            mode="lines+markers",
             line=dict(color="#3b82f6", width=2.5),
-            marker=dict(size=8),
+            marker=dict(size=8, color="#3b82f6"),
             fill="tonexty",
-            fillcolor="rgba(59,130,246,0.1)",
+            fillcolor="rgba(59,130,246,0.12)",
             hovertemplate="%{x}<br>평가: %{y:,.0f}원<extra></extra>",
         ))
 
-        # 수익률 (우측 축)
+        # 수익률 우측 축
         if "통합수익률" in 스냅샷df.columns:
             그림.add_trace(go.Scatter(
-                x=스냅샷df["년월"], y=스냅샷df["통합수익률"],
-                name="수익률", mode="lines+markers",
+                x=x값, y=스냅샷df["통합수익률"],
+                name="수익률",
+                mode="lines+markers",
                 line=dict(color="#f59e0b", width=2),
-                marker=dict(size=7),
+                marker=dict(size=7, color="#f59e0b"),
                 yaxis="y2",
                 hovertemplate="%{x}<br>수익률: %{y:+.2f}%<extra></extra>",
             ))
 
         그림.update_layout(
-            title=dict(text="월별 자산 변동 추이", x=0.02, xanchor="left"),
-            height=320,
-            margin=dict(l=10, r=10, t=50, b=10),
-            yaxis=dict(title="금액 (원)", tickformat=",.0f"),
-            yaxis2=dict(title="수익률 (%)", overlaying="y", side="right",
-                       tickformat=".1f", ticksuffix="%"),
-            legend=dict(orientation="h", y=1.1, x=0),
+            height=300,
+            margin=dict(l=10, r=60, t=40, b=40),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(
+                type="category",
+                tickangle=-30,
+                tickfont=dict(size=11),
+                gridcolor="rgba(255,255,255,0.05)",
+            ),
+            yaxis=dict(
+                title="금액 (원)", tickformat=",.0f",
+                gridcolor="rgba(255,255,255,0.05)",
+            ),
+            yaxis2=dict(
+                title="수익률 (%)", overlaying="y", side="right",
+                tickformat=".1f", ticksuffix="%",
+                showgrid=False,
+            ),
+            legend=dict(orientation="h", y=1.12, x=0, font=dict(size=11)),
             hovermode="x unified",
         )
         return 그림
     except Exception:
         그림 = go.Figure()
-        그림.update_layout(title="월별 추이 (오류)", height=320)
+        그림.update_layout(title="월별 추이 (오류)", height=300)
         return 그림
-
 
 def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None):
     """포트폴리오 자산 변동 추이 — 스냅샷 + 시각화"""
