@@ -81,6 +81,7 @@ ASSET_MASTER_V518 = {
     "009150": {"name": "삼성전기", "kind": "주식", "industry": "전자부품", "aliases": ["009150", "삼성전기"]},
     "278470": {"name": "에이피알", "kind": "주식", "industry": "화장품", "aliases": ["278470", "에이피알", "APR"]},
     "005380": {"name": "현대차", "kind": "주식", "industry": "자동차", "aliases": ["005380", "현대차", "현대자동차"]},
+    "005380": {"name": "현대차", "kind": "주식", "industry": "자동차", "aliases": ["005380", "현대차", "현대자동차"]},
     "069500": {"name": "KODEX 200", "kind": "ETF", "industry": "국내대형 ETF", "aliases": ["069500", "KODEX 200", "KODEX200"]},
     "0148J0": {
         "name": "TIGER 코리아휴머노이드로봇산업",
@@ -284,6 +285,14 @@ ASSET_MASTER_V51715 = {
         "주산업": "전자부품",
         "보조태그": ["MLCC", "IT부품", "전장"],
         "aliases": ["009150", "삼성전기"],
+    },
+    "005380": {
+        "표시명": "현대차",
+        "정규명": "현대차",
+        "구분": "주식",
+        "주산업": "자동차",
+        "보조태그": ["자동차", "전기차", "로봇"],
+        "aliases": ["005380", "현대차", "현대자동차"],
     },
     "278470": {
         "표시명": "에이피알",
@@ -713,7 +722,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.21.3-asset-change-explanation-visible"
+APP_VERSION = "v5.21.4-asset-change-log-restored"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -8985,6 +8994,206 @@ def 스냅샷추이그래프(스냅샷df):
         그림.update_layout(title="월별 추이 (오류)", height=300)
         return 그림
 
+
+
+# ============================================================
+# v5.21.4 자산변화로그 복원 + 최근 거래 기반 설명 표시
+# - 월별 스냅샷 화면에서 최근 거래의 자산이동을 직접 표시합니다.
+# - 스냅샷 저장 시 자산변화로그에도 자산이동 행을 추가 저장합니다.
+# ============================================================
+def _v5214_num(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5214_first_col(df, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    for col in df.columns:
+        if str(col).strip() in candidates:
+            return col
+    return None
+
+
+def _v5214_asset_kind(code='', name=''):
+    try:
+        kind = asset_kind_v518(code, name)
+        if kind:
+            return kind
+    except Exception:
+        pass
+    text = f"{code} {name}".upper()
+    if any(x in text for x in ['ETF', 'KODEX', 'TIGER', 'ACE ', 'SOL ', 'KBSTAR']):
+        return 'ETF'
+    return '주식'
+
+
+def _v5214_cash_source(account=''):
+    account = str(account or '')
+    if 'IRP' in account or '신한' in account:
+        return '현금성 대기자산'
+    return '예수금'
+
+
+def 최근거래자산이동목록생성(거래df, 최근일수=90):
+    """거래이력에서 최근 매수/매도 건을 자산이동 설명으로 변환합니다."""
+    try:
+        df = pd.DataFrame() if 거래df is None else pd.DataFrame(거래df).copy()
+        if df.empty:
+            return pd.DataFrame(columns=['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','변화유형','상세설명','자동분석'])
+
+        date_col = _v5214_first_col(df, ['거래일자','거래일','날짜','일자'])
+        type_col = _v5214_first_col(df, ['거래구분','구분','매매구분'])
+        qty_col = _v5214_first_col(df, ['거래수량','수량','체결수량'])
+        price_col = _v5214_first_col(df, ['거래단가','단가','체결단가','가격'])
+        name_col = _v5214_first_col(df, ['종목명','상품명','자산명','name'])
+        code_col = _v5214_first_col(df, ['종목코드','코드','ticker','symbol'])
+        acct_col = _v5214_first_col(df, ['계좌','계좌명','증권사'])
+        if not all([date_col, type_col, qty_col, price_col]):
+            return pd.DataFrame(columns=['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','변화유형','상세설명','자동분석'])
+
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        df = df.dropna(subset=[date_col]).copy()
+        if df.empty:
+            return pd.DataFrame(columns=['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','변화유형','상세설명','자동분석'])
+        기준일 = 서울현재시각().replace(tzinfo=None) - timedelta(days=int(최근일수))
+        df = df[df[date_col] >= pd.Timestamp(기준일)].copy()
+        df = df.sort_values(date_col, ascending=False)
+
+        rows = []
+        for _, r in df.iterrows():
+            구분 = str(r.get(type_col, '')).strip()
+            if 구분 not in ['매수', '매도']:
+                continue
+            수량 = _v5214_num(r.get(qty_col, 0))
+            단가 = _v5214_num(r.get(price_col, 0))
+            금액 = round(abs(수량 * 단가))
+            if 금액 <= 0:
+                continue
+            코드 = str(r.get(code_col, '')).strip() if code_col else ''
+            종목명 = str(r.get(name_col, '')).strip() if name_col else ''
+            try:
+                종목명 = asset_name_v518(코드, 종목명)
+            except Exception:
+                종목명 = 종목명 or 코드
+            계좌 = str(r.get(acct_col, '')).strip() if acct_col else ''
+            자산유형 = _v5214_asset_kind(코드, 종목명)
+            현금명 = _v5214_cash_source(계좌)
+            if 구분 == '매수':
+                상세 = f"{현금명} → {종목명} {자산유형} 매수"
+                자동 = f"{현금명} {금액:,.0f}원이 {종목명} {자산유형} 매수에 사용되었습니다. 외부 인출이 아니라 현금성자산에서 {자산유형}으로 이동한 거래입니다."
+            else:
+                상세 = f"{종목명} {자산유형} 매도 → {현금명}"
+                자동 = f"{종목명} {자산유형} 매도로 {금액:,.0f}원이 {현금명}으로 이동했습니다. 외부 입금이 아니라 보유자산이 현금성자산으로 전환된 거래입니다."
+            rows.append({
+                '날짜': r.get(date_col).strftime('%Y-%m-%d'),
+                '계좌': 계좌,
+                '구분': 구분,
+                '종목명': 종목명,
+                '자산유형': 자산유형,
+                '수량': 수량,
+                '단가': 단가,
+                '금액': 금액,
+                '변화유형': '자산 이동',
+                '상세설명': 상세,
+                '자동분석': 자동,
+            })
+        return pd.DataFrame(rows)
+    except Exception as e:
+        logging.warning('recent asset movement build failed: %s', e, exc_info=True)
+        return pd.DataFrame(columns=['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','변화유형','상세설명','자동분석'])
+
+
+def 최근자산변화카드표시(거래df, 최대표시=5):
+    """자산 변화 탭에 '왜 변했는지'를 카드/표로 표시합니다."""
+    이동df = 최근거래자산이동목록생성(거래df)
+    st.markdown('#### 🔎 최근 자산 변화 해석')
+    if 이동df.empty:
+        st.caption('최근 거래이력에서 자산이동으로 해석할 매수·매도 내역을 찾지 못했습니다.')
+        return 이동df
+    for _, row in 이동df.head(최대표시).iterrows():
+        with st.container(border=True):
+            st.markdown(f"**{row['날짜']} · {row['변화유형']}**")
+            st.markdown(f"### {row['상세설명']}")
+            st.caption(f"금액: {row['금액']:,.0f}원 · 계좌: {row['계좌'] or '확인 필요'}")
+            st.info(row['자동분석'])
+    with st.expander('최근 자산 변화 목록 보기', expanded=False):
+        표시 = 이동df[['날짜','계좌','변화유형','상세설명','금액','자동분석']].copy()
+        try:
+            표데이터프레임(표시.style.format({'금액': 원화정수포맷}), width='stretch', hide_index=True)
+        except Exception:
+            표데이터프레임(표시, width='stretch', hide_index=True)
+    return 이동df
+
+
+def 자산변화로그최근거래저장(거래df, 통합자산표=None):
+    """최근 거래 기반 자산이동을 기존 자산변화로그 시트에 추가합니다.
+    같은 날짜+설명+금액은 중복 저장하지 않습니다.
+    """
+    try:
+        이동df = 최근거래자산이동목록생성(거래df, 최근일수=120)
+        if 이동df.empty:
+            return True, '저장할 최근 자산이동 거래가 없습니다.', 0
+        기존 = 자산변화로그읽기()
+        기존키 = set()
+        if not 기존.empty:
+            for _, r in 기존.iterrows():
+                기존키.add((str(r.get('기준일','')).strip(), str(r.get('원금변화설명','')).strip(), round(_v5214_num(r.get('원금변화확인금액',0)))))
+        총원금 = 총평가 = 총손익 = 0
+        if 통합자산표 is not None and not pd.DataFrame(통합자산표).empty:
+            t = pd.DataFrame(통합자산표).copy()
+            총원금 = round(pd.to_numeric(t.get('원금', 0), errors='coerce').fillna(0).sum())
+            총평가 = round(pd.to_numeric(t.get('평가금액', 0), errors='coerce').fillna(0).sum())
+            총손익 = round(총평가 - 총원금)
+        now = 서울현재시각().strftime('%Y-%m-%d %H:%M:%S')
+        추가행 = []
+        for _, row in 이동df.iterrows():
+            key = (str(row['날짜']), str(row['상세설명']), round(_v5214_num(row['금액'])))
+            if key in 기존키:
+                continue
+            추가행.append({
+                '저장시각': now,
+                '기준일': row['날짜'],
+                '변화유형': '자산 이동',
+                '계좌': row.get('계좌','') or '전체',
+                '자산구분': row.get('자산유형',''),
+                '종목명': row.get('종목명',''),
+                '원금': 총원금,
+                '평가액': 총평가,
+                '평가손익': 총손익,
+                '실현손익': 0,
+                '보유종목수': 0,
+                '원금변화': 0,
+                '평가액변화': 0,
+                '평가손익변화': 0,
+                '실현손익변화': 0,
+                '원금변화사유': '자산 이동',
+                '원금변화확인금액': round(_v5214_num(row.get('금액',0))),
+                '원금변화설명': row.get('상세설명',''),
+                '자동분석': row.get('자동분석',''),
+                '메모': '거래이력 기반 자동 기록',
+            })
+        if not 추가행:
+            return True, '이미 기록된 자산이동 거래입니다.', 0
+        저장대상 = 자산변화로그표준화(pd.concat([기존, pd.DataFrame(추가행)], ignore_index=True))
+        성공, 메시지 = 자산변화로그저장(저장대상)
+        return 성공, 메시지, len(추가행)
+    except Exception as e:
+        logging.warning('recent asset movement log save failed: %s', e, exc_info=True)
+        return False, f'자산변화로그 저장 오류: {type(e).__name__}: {e}', 0
+
 def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None):
     """포트폴리오 자산 변동 추이 — 스냅샷 + 시각화"""
     st.markdown("### 📈 자산 변동 추이")
@@ -9003,6 +9212,11 @@ def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None):
 
     st.markdown("---")
 
+    # 최근 거래 기반 자산변화 해석
+    최근자산변화카드표시(거래df)
+
+    st.markdown("---")
+
     # ── 월별 스냅샷 저장 & 추이 ──
     st.markdown("#### 📅 월별 자산 추이")
     st.caption("매월 말 스냅샷을 저장하면 자산 변동 추이를 확인할 수 있습니다.")
@@ -9014,7 +9228,11 @@ def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None):
                 with st.spinner("저장 중..."):
                     성공, 메시지 = 스냅샷저장(통합자산표)
                 if 성공:
-                    st.success("저장 완료!")
+                    로그성공, 로그메시지, 로그건수 = 자산변화로그최근거래저장(거래df, 통합자산표)
+                    if 로그성공:
+                        st.success(f"저장 완료! 자산변화로그 {로그건수}건 반영")
+                    else:
+                        st.warning(f"스냅샷은 저장되었지만 자산변화로그 저장은 확인 필요: {로그메시지}")
                 else:
                     st.error(f"저장 실패: {메시지}")
             else:
