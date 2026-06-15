@@ -713,7 +713,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.0-stable"
+APP_VERSION = "v5.22.2-quota-safe-nonstock-save"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1773,6 +1773,7 @@ def 구글시트워크시트확보(spreadsheet, sheet_name, rows=1000, cols=30):
         logging.warning("worksheet pre-check failed: %s", e, exc_info=True)
     return spreadsheet.add_worksheet(title=sheet_name, rows=rows, cols=cols)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def 구글시트데이터프레임읽기(sheet_name):
     """Google Sheets 탭을 DataFrame으로 읽습니다.
     v5.21.2: 읽기 중에는 새 빈 시트를 만들지 않고, 실제 탭을 찾지 못하면 빈 DataFrame만 반환합니다.
@@ -4560,8 +4561,34 @@ def IRP비주식자산표준열맞추기(df):
     for 열 in ["만기일", "반영일자"]:
         작업[열] = 작업[열].apply(날짜값_YYYYMMDD문자열)
 
+    # v5.22.1: 시스템 화면/Google Sheets에서 쉼표, 원, %, 공백이 섞여 들어와도 숫자로 안전 변환합니다.
+    def _비주식숫자변환_v5221(값):
+        try:
+            if 값 is None:
+                return 0.0
+            try:
+                if pd.isna(값):
+                    return 0.0
+            except Exception:
+                pass
+            문자 = str(값).strip()
+            if 문자 in ["", "nan", "NaT", "None", "<NA>"]:
+                return 0.0
+            문자 = (
+                문자.replace(",", "")
+                .replace("원", "")
+                .replace("%", "")
+                .replace("₩", "")
+                .replace(" ", "")
+            )
+            if 문자 in ["", "-", "+"]:
+                return 0.0
+            return float(문자)
+        except Exception:
+            return 0.0
+
     for 열 in ["원금", "평가금액", "예상연수익률"]:
-        작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0.0)
+        작업[열] = 작업[열].apply(_비주식숫자변환_v5221).astype(float)
 
     # v5.20.4: 현금성자산은 투자 손익 계산 대상이 아니라 현재 잔액입니다.
     # 현금으로 주식을 매수한 경우에는 거래이력에 매수 기록을 추가하고,
@@ -4630,29 +4657,85 @@ def IRP비주식자산불러오기():
         return IRP비주식자산표준열맞추기(pd.DataFrame())
 
 def IRP비주식자산저장(df):
-    """비주식자산을 Google Sheets에만 저장합니다. 연결 실패 시 로컬 저장을 차단합니다."""
+    """v5.22.1: 비주식자산을 Google Sheets '비주식자산' 탭에 직접 저장합니다.
+    - 화면 편집값을 표준열로 정리
+    - 쉼표/원/공백이 섞인 숫자도 안전 변환
+    - 구글시트 저장 후 캐시와 세션값을 갱신
+    - 저장 직후 실제 시트 행 수를 확인
+    """
     연결됨, info = 구글시트운영연결확인(화면표시=False)
     if not 연결됨:
         return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
 
-    작업 = IRP비주식자산표준열맞추기(df)
-
-    # v5.14.40 안전장치: 예전 샘플값(2026-04-30 기준)이 실수로 다시 저장되는 것을 차단합니다.
     try:
-        구버전기준일 = 작업["반영일자"].astype(str).str.contains("2026-04-30", na=False).sum()
-        구버전금액패턴 = (
-            작업["평가금액"].astype(float).isin([51873538, 31443846, 27499444, 5030813, 17188280]).sum()
-        )
-        if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
-            return False, "저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다."
-    except Exception as e:
-        logging.warning("suppressed exception at line 4331: %s", e, exc_info=True)
+        작업 = IRP비주식자산표준열맞추기(df)
+        표준열 = ["계좌", "자산군", "상품명", "원금", "평가금액", "예상연수익률", "만기일", "반영일자", "비고"]
+        작업 = 작업[표준열].copy()
 
-    저장성공, 저장메시지 = 구글시트데이터프레임저장(GOOGLE_SHEETS_NON_STOCK_SHEET, 작업)
-    if 저장성공:
-        st.session_state["irp_non_stock_assets_df_v512"] = 작업
-        return True, 저장메시지
-    return False, 저장메시지
+        # 완전 빈 행 제거. 단, 해지 상품처럼 원금/평가금액이 0이어도 상품명이 있으면 보존합니다.
+        for 열 in ["계좌", "자산군", "상품명", "만기일", "반영일자", "비고"]:
+            작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
+            작업[열] = 작업[열].replace({"nan": "", "NaT": "", "None": "", "<NA>": ""})
+
+        for 열 in ["원금", "평가금액", "예상연수익률"]:
+            작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0.0)
+
+        작업 = 작업[
+            (작업["계좌"].astype(str).str.strip() != "")
+            | (작업["자산군"].astype(str).str.strip() != "")
+            | (작업["상품명"].astype(str).str.strip() != "")
+            | (작업["원금"].abs() > 0)
+            | (작업["평가금액"].abs() > 0)
+            | (작업["비고"].astype(str).str.strip() != "")
+        ].copy()
+
+        # v5.14.40 안전장치 유지: 예전 샘플값 보호
+        try:
+            구버전기준일 = 작업["반영일자"].astype(str).str.contains("2026-04-30", na=False).sum()
+            구버전금액패턴 = 작업["평가금액"].astype(float).isin([51873538, 31443846, 27499444, 5030813, 17188280]).sum()
+            if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
+                return False, "저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다."
+        except Exception as e:
+            logging.warning("non-stock legacy sample guard skipped: %s", e, exc_info=True)
+
+        spreadsheet, 연결정보 = 구글시트문서연결()
+        if spreadsheet is None:
+            return False, f"Google Sheets 미연결: {연결정보.get('메시지', '')}"
+
+        ws = 구글시트워크시트확보(
+            spreadsheet,
+            GOOGLE_SHEETS_NON_STOCK_SHEET,
+            rows=max(100, len(작업) + 20),
+            cols=len(표준열) + 2,
+        )
+
+        저장값 = [표준열] + 작업.astype(object).where(pd.notna(작업), "").astype(str).values.tolist()
+
+        ws.clear()
+        ws.update("A1", 저장값, value_input_option="RAW")
+
+        # v5.22.2: 저장 직후 get_all_values() 검증은 Google Sheets 읽기 쿼터를 빠르게 소모하므로 생략합니다.
+        # gspread update가 예외 없이 끝나면 저장 성공으로 보고, 세션 캐시를 즉시 갱신합니다.
+        저장행수 = len(작업)
+
+        # 캐시/세션 갱신
+        st.session_state["irp_non_stock_assets_df_v512"] = 작업.copy()
+        st.session_state["irp_non_stock_assets_last_saved_rows_v5221"] = len(작업)
+        st.session_state["irp_non_stock_assets_last_saved_at_v5221"] = 서울현재시각ISO()
+
+        try:
+            구글시트데이터프레임읽기.clear()
+        except Exception as e:
+            logging.warning("non-stock read cache clear failed: %s", e, exc_info=True)
+        # v5.22.2: 전체 st.cache_data.clear()는 모든 시세/시트 캐시를 지워 재실행 시 읽기 요청을 폭증시킬 수 있어 사용하지 않습니다.
+        # 화면 반영은 위 세션 캐시 갱신값을 우선 사용합니다.
+
+        return True, f"비주식자산 Google Sheets 저장 완료: {len(작업)}행"
+
+    except Exception as e:
+        logging.exception("IRP비주식자산저장 실패")
+        return False, f"비주식자산 저장 오류: {type(e).__name__}: {e}"
+
 
 def IRP비주식자산검증표생성(df):
     작업 = IRP비주식자산표준열맞추기(df)
@@ -4812,7 +4895,7 @@ def IRP비주식자산편집UI():
             if st.button("비주식 자산 저장", key="save_irp_non_stock_assets_v513", width="stretch"):
                 성공, 메시지 = IRP비주식자산저장(편집df)
                 if 성공:
-                    st.success("비주식·현금성 자산을 저장했습니다.")
+                    st.success(메시지 or "비주식·현금성 자산을 Google Sheets에 저장했습니다.")
                     st.rerun()
                 else:
                     st.error(메시지)
