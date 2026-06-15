@@ -81,7 +81,6 @@ ASSET_MASTER_V518 = {
     "009150": {"name": "삼성전기", "kind": "주식", "industry": "전자부품", "aliases": ["009150", "삼성전기"]},
     "278470": {"name": "에이피알", "kind": "주식", "industry": "화장품", "aliases": ["278470", "에이피알", "APR"]},
     "005380": {"name": "현대차", "kind": "주식", "industry": "자동차", "aliases": ["005380", "현대차", "현대자동차"]},
-    "005380": {"name": "현대차", "kind": "주식", "industry": "자동차", "aliases": ["005380", "현대차", "현대자동차"]},
     "069500": {"name": "KODEX 200", "kind": "ETF", "industry": "국내대형 ETF", "aliases": ["069500", "KODEX 200", "KODEX200"]},
     "0148J0": {
         "name": "TIGER 코리아휴머노이드로봇산업",
@@ -285,14 +284,6 @@ ASSET_MASTER_V51715 = {
         "주산업": "전자부품",
         "보조태그": ["MLCC", "IT부품", "전장"],
         "aliases": ["009150", "삼성전기"],
-    },
-    "005380": {
-        "표시명": "현대차",
-        "정규명": "현대차",
-        "구분": "주식",
-        "주산업": "자동차",
-        "보조태그": ["자동차", "전기차", "로봇"],
-        "aliases": ["005380", "현대차", "현대자동차"],
     },
     "278470": {
         "표시명": "에이피알",
@@ -722,7 +713,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.21.4-asset-change-log-restored"
+APP_VERSION = "v5.21.5-ui-completion-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -768,6 +759,13 @@ ASSET_METADATA = {
         "industry": "전자부품",
         "tags": ["MLCC", "전장", "IT부품"],
         "comment": "전자부품 및 전장 수요와 연결된 종목",
+        "pressure": "중립",
+        "source": "보유종목 메타데이터",
+    },
+    "현대차": {
+        "industry": "자동차",
+        "tags": ["자동차", "수출", "대형주"],
+        "comment": "자동차·전기차·로봇 협력 이슈와 연결된 국내 대형주",
         "pressure": "중립",
         "source": "보유종목 메타데이터",
     },
@@ -882,7 +880,7 @@ def v51833_safe_markdown_html(html_text):
         st.caption(f"HTML 표시 오류: {type(e).__name__}: {e}")
 
 
-st.set_page_config(page_title=f"나의 포트폴리오 관리 시스템 {APP_VERSION}", layout="wide")
+st.set_page_config(page_title=f"자산관리 시스템 {APP_VERSION}", layout="wide")
 
 # -----------------------------------
 # v5.13.7 안정화 스타일 세트
@@ -1199,10 +1197,10 @@ def 모바일여부():
     return 모바일모드
 
 if 모바일여부():
-    st.title("📈 나의 포트폴리오 관리 시스템")
+    st.title("📈 자산관리 시스템")
     st.caption("모바일 조회용 간소화 화면")
 else:
-    st.title("📈 나의 포트폴리오 관리 시스템")
+    st.title("📈 자산관리 시스템")
 
 
     
@@ -2534,41 +2532,34 @@ def 자산변화원금사유자동추정(미리보기행=None, 로그df=None, �
 
 
 
-def 자산이동설명카드표시(이동후보=None, 제목="최근 거래 기반 자산 변화 해석"):
-    """최근 거래이력과 현금성자산 변동을 사용자가 이해하기 쉬운 문장으로 표시합니다.
-    원금변화가 0원이어도, 현금성자산 → 주식/ETF 매수 또는 주식/ETF 매도 → 예수금 흐름은
-    자산 변화 설명에 표시되어야 합니다.
-    """
+def 자산이동설명카드표시(이동후보, 제목="최근 자산 변화"):
+    """최근 거래 기반 자산 이동을 짧고 읽기 쉬운 카드로 표시합니다."""
     try:
         이동후보 = 이동후보 or {}
         if not 이동후보:
             return
 
-        사유 = 이동후보.get("추천사유", "자산 이동") or "자산 이동"
         금액 = float(이동후보.get("확인금액", 0) or 0)
         설명 = str(이동후보.get("설명", "")).strip()
-        자동분석 = str(이동후보.get("자동분석", "")).strip()
         거래일자 = str(이동후보.get("거래일자", "")).strip()
-        종목명 = str(이동후보.get("종목명", "")).strip()
-        거래구분 = str(이동후보.get("거래구분", "")).strip()
+        자동분석 = str(이동후보.get("자동분석", "")).strip() or "원금변화 없음 · 자산군 이동"
 
-        if not 설명 and not 자동분석:
+        if not 설명:
             return
 
         st.markdown(f"#### {제목}")
-        st.success(f"{사유}: {설명} · {원화정수포맷(금액)}")
-        if 자동분석:
-            st.caption(자동분석)
-
-        표시 = pd.DataFrame([
-            {"항목": "거래일자", "내용": 거래일자 or "확인 필요"},
-            {"항목": "거래", "내용": f"{종목명} {거래구분}".strip() or "확인 필요"},
-            {"항목": "변화유형", "내용": 사유},
-            {"항목": "확인금액", "내용": 원화정수포맷(금액)},
-            {"항목": "상세설명", "내용": 설명},
-            {"항목": "원금해석", "내용": "외부 입금·생활비 인출이 아니라 현금성자산과 주식/ETF 사이의 내부 이동입니다."},
-        ])
-        표데이터프레임(표시, width="stretch", hide_index=True)
+        with st.container(border=True):
+            st.markdown(f"**{거래일자 or '최근 거래'} · 자산 이동**")
+            st.markdown(f"### {설명}")
+            st.caption(f"{원화정수포맷(금액)}")
+            st.markdown(
+                f"""
+                <div style="padding:0.75rem 0.9rem;border-radius:10px;background:rgba(59,130,246,0.14);color:#93c5fd;font-weight:520;">
+                    {자동분석}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     except Exception as e:
         st.caption(f"자산이동 설명 표시 오류: {type(e).__name__}: {e}")
 
@@ -2580,7 +2571,7 @@ def 자산변화최근거래기반이동후보(로그df=None, 기준일수=14):
     - 생활비 인출, 외부 입금처럼 실제 원금이 바뀐 경우와 구분하기 위한 보조 엔진입니다.
     """
     try:
-        거래 = 거래이력불러오기()
+        거래 = 현재거래이력가져오기()
         거래 = normalize_asset_dataframe_v518(pd.DataFrame(거래).copy())
         if 거래 is None or 거래.empty:
             return {}
@@ -2802,6 +2793,8 @@ def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
     비주식자산df = IRP비주식자산불러오기()
     현재스냅샷 = 자산스냅샷행생성(계산포트폴리오, 보유계산포트폴리오, 비주식자산df)
     로그df = 자산변화로그읽기()
+    # v5.21.5: 최근 거래 기반 자산이동 후보를 먼저 계산해 원금변화 사유 UI에 전달합니다.
+    이동후보 = 자산변화최근거래기반이동후보(로그df)
     미리보기행 = 자산변화로그행보정(현재스냅샷, 로그df)
     계좌요약, 자산군요약, 통합구성표 = 자산변화현재구성요약생성(보유계산포트폴리오, 비주식자산df)
 
@@ -9060,7 +9053,7 @@ def 최근거래자산이동목록생성(거래df, 최근일수=90):
         price_col = _v5214_first_col(df, ['거래단가','단가','체결단가','가격'])
         name_col = _v5214_first_col(df, ['종목명','상품명','자산명','name'])
         code_col = _v5214_first_col(df, ['종목코드','코드','ticker','symbol'])
-        acct_col = _v5214_first_col(df, ['계좌','계좌명','증권사'])
+        acct_col = _v5214_first_col(df, ['계좌','계좌명','증권사','운용사','증권계좌','금융기관'])
         if not all([date_col, type_col, qty_col, price_col]):
             return pd.DataFrame(columns=['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','변화유형','상세설명','자동분석'])
 
@@ -9093,10 +9086,10 @@ def 최근거래자산이동목록생성(거래df, 최근일수=90):
             현금명 = _v5214_cash_source(계좌)
             if 구분 == '매수':
                 상세 = f"{현금명} → {종목명} {자산유형} 매수"
-                자동 = f"{현금명} {금액:,.0f}원이 {종목명} {자산유형} 매수에 사용되었습니다. 외부 인출이 아니라 현금성자산에서 {자산유형}으로 이동한 거래입니다."
+                자동 = f"원금변화 없음 · {현금명}에서 {자산유형}으로 이동"
             else:
                 상세 = f"{종목명} {자산유형} 매도 → {현금명}"
-                자동 = f"{종목명} {자산유형} 매도로 {금액:,.0f}원이 {현금명}으로 이동했습니다. 외부 입금이 아니라 보유자산이 현금성자산으로 전환된 거래입니다."
+                자동 = f"원금변화 없음 · {자산유형}에서 {현금명}으로 이동"
             rows.append({
                 '날짜': r.get(date_col).strftime('%Y-%m-%d'),
                 '계좌': 계좌,
@@ -9117,24 +9110,42 @@ def 최근거래자산이동목록생성(거래df, 최근일수=90):
 
 
 def 최근자산변화카드표시(거래df, 최대표시=5):
-    """자산 변화 탭에 '왜 변했는지'를 카드/표로 표시합니다."""
+    """자산 변화 탭에 최근 자산 이동을 간결한 카드와 표로 표시합니다."""
     이동df = 최근거래자산이동목록생성(거래df)
-    st.markdown('#### 🔎 최근 자산 변화 해석')
+    st.markdown("#### 🔎 최근 자산 변화")
     if 이동df.empty:
-        st.caption('최근 거래이력에서 자산이동으로 해석할 매수·매도 내역을 찾지 못했습니다.')
+        st.caption("최근 거래이력에서 자산이동으로 해석할 매수·매도 내역을 찾지 못했습니다.")
         return 이동df
+
     for _, row in 이동df.head(최대표시).iterrows():
+        날짜 = str(row.get("날짜", "")).strip()
+        상세 = str(row.get("상세설명", "")).strip()
+        금액 = _v5214_num(row.get("금액", 0))
+        계좌 = str(row.get("계좌", "")).strip()
+        자동 = str(row.get("자동분석", "")).strip() or "원금변화 없음 · 자산군 이동"
+
         with st.container(border=True):
-            st.markdown(f"**{row['날짜']} · {row['변화유형']}**")
-            st.markdown(f"### {row['상세설명']}")
-            st.caption(f"금액: {row['금액']:,.0f}원 · 계좌: {row['계좌'] or '확인 필요'}")
-            st.info(row['자동분석'])
-    with st.expander('최근 자산 변화 목록 보기', expanded=False):
-        표시 = 이동df[['날짜','계좌','변화유형','상세설명','금액','자동분석']].copy()
+            st.markdown(f"**{날짜} · 자산 이동**")
+            st.markdown(f"### {상세}")
+            보조 = f"{금액:,.0f}원"
+            if 계좌:
+                보조 += f" · {계좌}"
+            st.caption(보조)
+            st.markdown(
+                f"""
+                <div style="padding:0.75rem 0.9rem;border-radius:10px;background:rgba(59,130,246,0.14);color:#93c5fd;font-weight:520;">
+                    {자동}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("전체 자산 변화 목록 보기", expanded=False):
+        표시 = 이동df[["날짜", "변화유형", "상세설명", "금액", "계좌"]].copy()
         try:
-            표데이터프레임(표시.style.format({'금액': 원화정수포맷}), width='stretch', hide_index=True)
+            표데이터프레임(표시.style.format({"금액": 원화정수포맷}), width="stretch", hide_index=True)
         except Exception:
-            표데이터프레임(표시, width='stretch', hide_index=True)
+            표데이터프레임(표시, width="stretch", hide_index=True)
     return 이동df
 
 
@@ -12409,7 +12420,9 @@ if 섹터선택키 not in st.session_state or st.session_state.get(섹터선택�
 
 선택섹터 = st.session_state[섹터선택키]
 
-버튼칸 = st.columns(len(섹터목록), gap="small")
+# v5.21.5: 상단 2개 버튼은 화면 전체를 채우지 않고 중앙에 보기 좋게 배치합니다.
+_버튼왼쪽여백, _버튼칸1, _버튼칸2, _버튼오른쪽여백 = st.columns([1.7, 1.0, 1.0, 1.7], gap="medium")
+버튼칸 = [_버튼칸1, _버튼칸2]
 for idx, 섹터명 in enumerate(섹터목록):
     with 버튼칸[idx]:
         if st.button(
@@ -12974,3 +12987,16 @@ def v5195_안정화점검표시():
 # ============================================================
 # /v5.19.5 stabilization refactor phase2
 # ============================================================
+
+
+# ============================================================
+# v5.21.5 footer
+# ============================================================
+st.markdown(
+    """
+    <div style="margin-top:3rem;padding:1.15rem 0;border-top:1px solid rgba(148,163,184,0.25);text-align:center;color:#9ca3af;font-size:0.92rem;">
+        개발자 조현웅&nbsp;&nbsp;|&nbsp;&nbsp;hwvcho@me.com
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
