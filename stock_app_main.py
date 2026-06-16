@@ -713,7 +713,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.3-stable-table-ui"
+APP_VERSION = "v5.22.3-stable-table-ui-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -949,6 +949,10 @@ def 최근자산변화표스타일_v5223():
 
 
 def 최근자산변화표시_v5223(이동df, 최대표시=8):
+    """최근 자산변화를 요약 카드 + HTML 표로 표시합니다.
+    핵심 수정: st.markdown의 HTML 블록 중간에 빈 줄이 들어가면 일부 <tr>이 코드처럼 노출될 수 있어
+    모든 행 HTML을 한 줄 문자열로 조립합니다.
+    """
     try:
         이동df = pd.DataFrame(이동df).copy()
         최근자산변화표스타일_v5223()
@@ -956,6 +960,7 @@ def 최근자산변화표시_v5223(이동df, 최대표시=8):
         if 이동df.empty:
             st.caption("최근 거래이력에서 자산이동으로 해석할 매수·매도 내역을 찾지 못했습니다.")
             return 이동df
+
         이동df["금액"] = pd.to_numeric(이동df.get("금액", 0), errors="coerce").fillna(0)
         총건수 = len(이동df)
         총금액 = 이동df["금액"].abs().sum()
@@ -968,14 +973,17 @@ def 최근자산변화표시_v5223(이동df, 최대표시=8):
         기간 = "최근 내역" if 날짜들.empty else f"{날짜들.min().strftime('%Y-%m-%d')} ~ {날짜들.max().strftime('%Y-%m-%d')}"
         비율 = (원금변화없음 / 총건수 * 100) if 총건수 else 0
         조회일수 = min(30, max(1, (날짜들.max() - 날짜들.min()).days + 1 if not 날짜들.empty else 30))
-        st.markdown(f"""
-        <div class="asset-kpi-box">
-          <div class="asset-kpi"><div class="asset-kpi-label">총 이동 건수</div><div class="asset-kpi-value">{총건수:,}건</div><div class="asset-kpi-note">표시 기준 전체</div></div>
-          <div class="asset-kpi"><div class="asset-kpi-label">총 이동 금액</div><div class="asset-kpi-value">{원화정수포맷(총금액)}</div><div class="asset-kpi-note">매수 {매수건수:,}건 / 매도 {매도건수:,}건</div></div>
-          <div class="asset-kpi"><div class="asset-kpi-label">원금 변화 없는 이동</div><div class="asset-kpi-value">{원금변화없음:,}건</div><div class="asset-kpi-note">전체의 {비율:.0f}%</div></div>
-          <div class="asset-kpi"><div class="asset-kpi-label">조회 기간</div><div class="asset-kpi-value">최근 {조회일수}일</div><div class="asset-kpi-note">{_html_escape_v5223(기간)}</div></div>
-        </div>
-        """, unsafe_allow_html=True)
+
+        kpi_html = (
+            '<div class="asset-kpi-box">'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">총 이동 건수</div><div class="asset-kpi-value">{총건수:,}건</div><div class="asset-kpi-note">표시 기준 전체</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">총 이동 금액</div><div class="asset-kpi-value">{원화정수포맷(총금액)}</div><div class="asset-kpi-note">매수 {매수건수:,}건 / 매도 {매도건수:,}건</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">원금 변화 없는 이동</div><div class="asset-kpi-value">{원금변화없음:,}건</div><div class="asset-kpi-note">전체의 {비율:.0f}%</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">조회 기간</div><div class="asset-kpi-value">최근 {조회일수}일</div><div class="asset-kpi-note">{_html_escape_v5223(기간)}</div></div>'
+            '</div>'
+        )
+        st.markdown(kpi_html, unsafe_allow_html=True)
+
         rows_html = []
         for _, row in 이동df.head(최대표시).iterrows():
             날짜 = _html_escape_v5223(row.get("날짜", ""))
@@ -990,36 +998,41 @@ def 최근자산변화표시_v5223(이동df, 최대표시=8):
                 구분표시, badge = "매수", "badge-buy"
             else:
                 구분표시, badge = 구분원본 or "자산이동", "badge-move"
+
             상세 = str(row.get("상세설명", "")).replace("  ", " ").strip()
             계좌 = str(row.get("계좌", "")).strip()
             종목명 = str(row.get("종목명", "")).strip()
             보조 = 계좌
             if 종목명 and 종목명 not in 상세:
                 보조 = (보조 + " → " if 보조 else "") + 종목명
+
             금액 = float(row.get("금액", 0) or 0)
             signed_amount = -abs(금액) if "매도" in 구분원본 and "원금변화 없음" not in 자동 else abs(금액)
             amount_cls = "amount-neg" if signed_amount < 0 else "amount-pos"
             원금변화 = "없음" if "원금변화 없음" in 자동 or not 자동 else "확인"
             time_html = f'<div class="date-sub">{시간}</div>' if 시간 else ''
-            rows_html.append(f"""
-              <tr>
-                <td><div class="date-main">{날짜}</div>{time_html}</td>
-                <td><span class="badge {badge}">{_html_escape_v5223(구분표시)}</span></td>
-                <td><div class="move-main">{_html_escape_v5223(상세)}</div><div class="move-sub">{_html_escape_v5223(보조)}</div></td>
-                <td class="{amount_cls}">{원화정수포맷(signed_amount)}</td>
-                <td><span class="principal-pill">{_html_escape_v5223(원금변화)}</span></td>
-              </tr>
-            """)
-        table_html = f"""
-        <div class="asset-change-wrap">
-          <table class="asset-change-table">
-            <thead><tr><th style="width:13%">날짜</th><th style="width:13%">구분</th><th>이동내용</th><th style="width:15%;text-align:right">금액</th><th style="width:12%">원금변화</th></tr></thead>
-            <tbody>{''.join(rows_html)}</tbody>
-          </table>
-          <div class="asset-change-foot">ⓘ 원금변화는 입금·출금·배당·평가손익처럼 총 투자원금 자체가 변했는지를 구분합니다. 현금성자산에서 ETF·주식으로 옮긴 경우는 보통 '없음'으로 표시됩니다.</div>
-        </div>
-        """
+
+            rows_html.append(
+                '<tr>'
+                f'<td><div class="date-main">{날짜}</div>{time_html}</td>'
+                f'<td><span class="badge {badge}">{_html_escape_v5223(구분표시)}</span></td>'
+                f'<td><div class="move-main">{_html_escape_v5223(상세)}</div><div class="move-sub">{_html_escape_v5223(보조)}</div></td>'
+                f'<td class="{amount_cls}">{원화정수포맷(signed_amount)}</td>'
+                f'<td><span class="principal-pill">{_html_escape_v5223(원금변화)}</span></td>'
+                '</tr>'
+            )
+
+        table_html = (
+            '<div class="asset-change-wrap">'
+            '<table class="asset-change-table">'
+            '<thead><tr><th style="width:13%">날짜</th><th style="width:13%">구분</th><th>이동내용</th><th style="width:15%;text-align:right">금액</th><th style="width:12%">원금변화</th></tr></thead>'
+            f'<tbody>{"".join(rows_html)}</tbody>'
+            '</table>'
+            '<div class="asset-change-foot">ⓘ 원금변화는 입금·출금·배당·평가손익처럼 총 투자원금 자체가 변했는지를 구분합니다. 현금성자산에서 ETF·주식으로 옮긴 경우는 보통 \'없음\'으로 표시됩니다.</div>'
+            '</div>'
+        )
         st.markdown(table_html, unsafe_allow_html=True)
+
         if len(이동df) > 최대표시:
             with st.expander(f"전체 자산 변화 목록 보기 · {len(이동df):,}건", expanded=False):
                 표시 = 이동df[[c for c in ["날짜", "구분", "상세설명", "금액", "계좌", "자동분석"] if c in 이동df.columns]].copy()
@@ -1034,6 +1047,7 @@ def 최근자산변화표시_v5223(이동df, 최대표시=8):
             return 이동df
         except Exception:
             return pd.DataFrame()
+
 
 # ============================================================
 # /v5.18.3 UI 안정화 + 데이터 구조 정리
