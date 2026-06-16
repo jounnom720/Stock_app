@@ -713,7 +713,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.4-stable-ui"
+APP_VERSION = "v5.22.5-stable-ui"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -9602,9 +9602,176 @@ def 최근거래자산이동목록생성(거래df, 최근일수=90):
         return pd.DataFrame(columns=['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','변화유형','상세설명','자동분석'])
 
 
-def 최근자산변화카드표시(거래df, 최대표시=8):
-    """자산 변화 탭에 최근 자산 이동을 요약 카드 + 표 중심 UI로 표시합니다."""
-    이동df = 최근거래자산이동목록생성(거래df)
+
+# ============================================================
+# v5.22.5 비주식자산 변경 기반 최근 자산변화 보강
+# - 거래이력에 없는 TDF 매도 → 현금성 대기자산 이동을 비주식자산 시트에서 추정 표시합니다.
+# - 예: TDF2035 원금/평가금액을 0으로 만들고, 현금성 대기자산 비고에
+#   "TDF2035 매도 후 현금성자산 확보"라고 입력하면 최근 자산변화에 표시됩니다.
+# ============================================================
+def _v5225_parse_money_from_text(text, keywords):
+    try:
+        text = str(text or '')
+        for kw in keywords:
+            m = re.search(rf'{kw}\s*[:=]?\s*([+-]?[0-9,]+)\s*원?', text)
+            if m:
+                return float(str(m.group(1)).replace(',', ''))
+        return None
+    except Exception:
+        return None
+
+
+def _v5225_extract_tdf_name(text):
+    try:
+        text = str(text or '').upper().replace(' ', '')
+        m = re.search(r'TDF\d{4}', text)
+        if m:
+            return m.group(0)
+        if 'TDF' in text:
+            return 'TDF'
+        return ''
+    except Exception:
+        return ''
+
+
+def _v5225_safe_date(value, fallback=''):
+    try:
+        dt = pd.to_datetime(value, errors='coerce')
+        if not pd.isna(dt):
+            return dt.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return str(fallback or '').strip()
+
+
+def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
+    """비주식자산 시트의 반영일자/비고를 근거로 최근 자산 이동을 생성합니다.
+
+    현재 거래이력에는 주식·ETF 매수/매도만 들어가고, TDF 매도처럼 비주식자산
+    시트에서 직접 수정한 내용은 최근 자산변화에 빠질 수 있습니다. 이 함수는
+    비주식자산의 '비고'와 '반영일자'를 읽어 TDF 매도 → 현금성자산 이동을 보강합니다.
+    """
+    표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
+    try:
+        df = IRP비주식자산표준열맞추기(비주식자산df)
+        if df.empty:
+            return pd.DataFrame(columns=표준열)
+
+        # 최근일수 필터. 반영일자가 없으면 후보에서 제외하지 않고 뒤쪽에서 처리합니다.
+        today = 서울현재시각().replace(tzinfo=None)
+        기준일 = today - timedelta(days=int(최근일수))
+        df['_date'] = pd.to_datetime(df['반영일자'], errors='coerce')
+        최근마스크 = df['_date'].isna() | (df['_date'] >= pd.Timestamp(기준일))
+        df = df[최근마스크].copy()
+        if df.empty:
+            return pd.DataFrame(columns=표준열)
+
+        현금마스크 = (
+            df['자산군'].astype(str).str.contains('현금|예수금|대기|CMA', case=False, na=False)
+            | df['상품명'].astype(str).str.contains('현금|예수금|대기|CMA', case=False, na=False)
+        )
+        매도원천 = df[
+            df['비고'].astype(str).str.contains('매도|해지|현금성.*확보|현금성자산.*확보', case=False, na=False)
+            | df['상품명'].astype(str).str.contains('TDF', case=False, na=False)
+        ].copy()
+        현금후보 = df[현금마스크 & df['비고'].astype(str).str.contains('매도|해지|확보|TDF', case=False, na=False)].copy()
+
+        rows = []
+        used = set()
+        for _, cash in 현금후보.iterrows():
+            note = str(cash.get('비고', '') or '')
+            cash_name = str(cash.get('상품명', '') or '현금성 대기자산')
+            account = str(cash.get('계좌', '') or '')
+            amount = max(abs(_v5214_num(cash.get('평가금액', 0))), abs(_v5214_num(cash.get('원금', 0))))
+            if amount <= 0:
+                continue
+
+            source_name = _v5225_extract_tdf_name(note)
+            source_row = None
+            if source_name:
+                후보 = 매도원천[매도원천['상품명'].astype(str).str.upper().str.replace(' ', '', regex=False).str.contains(source_name, na=False)]
+                if not 후보.empty:
+                    source_row = 후보.iloc[0]
+            if source_row is None:
+                # 0원 처리된 TDF가 있으면 원천으로 추정
+                후보 = 매도원천[
+                    매도원천['상품명'].astype(str).str.contains('TDF', case=False, na=False)
+                    & (pd.to_numeric(매도원천['원금'], errors='coerce').fillna(0).abs() <= 0)
+                    & (pd.to_numeric(매도원천['평가금액'], errors='coerce').fillna(0).abs() <= 0)
+                ]
+                if not 후보.empty:
+                    source_row = 후보.iloc[0]
+                    source_name = str(source_row.get('상품명', '') or 'TDF')
+            if not source_name:
+                source_name = 'TDF'
+
+            # 매도일은 원천 TDF 반영일자가 있으면 우선 사용합니다. 없으면 현금성자산 반영일자를 사용합니다.
+            date_value = cash.get('반영일자', '')
+            if source_row is not None and str(source_row.get('반영일자', '') or '').strip():
+                date_value = source_row.get('반영일자', '')
+            date_text = _v5225_safe_date(date_value, cash.get('반영일자', ''))
+
+            원금부분 = _v5225_parse_money_from_text(note, ['원금', '투자원금', '매입금액'])
+            손익부분 = _v5225_parse_money_from_text(note, ['수익', '손익', '실현손익', '평가손익'])
+            if 원금부분 is None:
+                원금부분 = amount
+            if 손익부분 is None:
+                손익부분 = amount - float(원금부분 or 0)
+                if abs(손익부분) < 1:
+                    손익부분 = 0.0
+
+            key = (date_text, account, source_name, round(amount))
+            if key in used:
+                continue
+            used.add(key)
+            rows.append({
+                '날짜': date_text,
+                '계좌': account,
+                '구분': '매도',
+                '종목명': source_name,
+                '자산유형': 'TDF',
+                '수량': 0,
+                '단가': 0,
+                '금액': round(amount),
+                '원금부분': round(float(원금부분 or 0)),
+                '수익손실부분': round(float(손익부분 or 0)),
+                '변화유형': '자산 이동',
+                '상세설명': f'{source_name} 매도 → {cash_name}',
+                '자동분석': f'원금변화 없음 · {source_name} 매도금 {원화정수포맷(amount)}이 {cash_name}으로 이동',
+                '출처': '비주식자산',
+            })
+        return pd.DataFrame(rows, columns=표준열)
+    except Exception as e:
+        logging.warning('non-stock recent movement build failed: %s', e, exc_info=True)
+        return pd.DataFrame(columns=표준열)
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        거래이동 = 최근거래자산이동목록생성(거래df, 최근일수=최근일수)
+    except Exception:
+        거래이동 = pd.DataFrame()
+    try:
+        비주식이동 = 비주식자산최근이동목록생성(비주식자산df, 최근일수=최근일수)
+    except Exception:
+        비주식이동 = pd.DataFrame()
+    통합 = pd.concat([거래이동, 비주식이동], ignore_index=True, sort=False)
+    if 통합.empty:
+        return 통합
+    for col in ['날짜','계좌','상세설명','금액']:
+        if col not in 통합.columns:
+            통합[col] = '' if col != '금액' else 0
+    통합['금액'] = pd.to_numeric(통합['금액'], errors='coerce').fillna(0)
+    통합['_date_sort'] = pd.to_datetime(통합['날짜'], errors='coerce')
+    통합['_key'] = 통합.apply(lambda r: (str(r.get('날짜','')), str(r.get('계좌','')), str(r.get('상세설명','')), round(float(r.get('금액',0) or 0))), axis=1)
+    통합 = 통합.drop_duplicates('_key', keep='first').sort_values(['_date_sort','금액'], ascending=[False, False]).drop(columns=['_date_sort','_key'])
+    return 통합.reset_index(drop=True)
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    """자산 변화 탭에 최근 자산 이동을 요약 카드 + 표 중심 UI로 표시합니다.
+    v5.22.5부터 거래이력뿐 아니라 비주식자산 시트의 TDF 매도→현금성자산 이동도 함께 반영합니다.
+    """
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
     return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
@@ -9664,7 +9831,7 @@ def 자산변화로그최근거래저장(거래df, 통합자산표=None):
         logging.warning('recent asset movement log save failed: %s', e, exc_info=True)
         return False, f'자산변화로그 저장 오류: {type(e).__name__}: {e}', 0
 
-def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None):
+def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None, 비주식자산df=None):
     """포트폴리오 자산 변동 추이 — 스냅샷 + 시각화"""
     st.markdown("### 📈 자산 변동 추이")
 
@@ -9683,7 +9850,7 @@ def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None):
     st.markdown("---")
 
     # 최근 거래 기반 자산변화 해석
-    최근자산변화카드표시(거래df)
+    최근자산변화카드표시(거래df, 비주식자산df)
 
     st.markdown("---")
 
@@ -13324,7 +13491,7 @@ if 선택섹터 == "포트폴리오 현황":
 
         # ③ 자산 변동 추이 — 위에서 계산된 통합자산표 재사용 (중복 호출 없음)
         with st.expander("📈 자산 변동 추이", expanded=True):
-            자산변동추이UI(수정포트폴리오, 계산포트폴리오, 통합자산표)
+            자산변동추이UI(수정포트폴리오, 계산포트폴리오, 통합자산표, IRP비주식자산df)
 
         st.markdown("---")
 
