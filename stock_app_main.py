@@ -713,7 +713,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.3-stable"
+APP_VERSION = "v5.22.3-stable-table-ui"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -825,6 +825,216 @@ def 데이터프레임빈값아님_v5223(df):
     except Exception:
         return False
 
+
+# ============================================================
+# v5.22.3-table-ui 공통 정렬·최근 자산변화 표 UI 패치
+# ============================================================
+ETF_CODE_ORDER_V5223_TABLE = {"069500": 10, "102110": 20, "0148J0": 30}
+ETF_NAME_ORDER_V5223_TABLE = {
+    "KODEX200": 10, "KODEX 200": 10,
+    "TIGER200": 20, "TIGER 200": 20,
+    "TIGER코리아휴머노이드로봇산업": 30, "TIGER 코리아휴머노이드로봇산업": 30, "휴머노이드": 30,
+}
+
+
+def _html_escape_v5223(value):
+    try:
+        return html.escape(str(value if value is not None else ""))
+    except Exception:
+        return str(value if value is not None else "")
+
+
+def _asset_code_name_v5223(row):
+    try:
+        if not hasattr(row, "get"):
+            return "", str(row or "")
+        code = row.get("종목코드", row.get("코드", row.get("ticker", row.get("symbol", row.get("Code", "")))))
+        name = (row.get("종목명", "") or row.get("상품명", "") or row.get("자산명", "") or row.get("보유종목", "") or row.get("name", "") or row.get("Name", "") or row.get("이름", "") or row.get("표시명", "") or row.get("title", ""))
+        code = normalize_asset_code_v518(code, name) if "normalize_asset_code_v518" in globals() else str(code or "")
+        return str(code or ""), str(name or "")
+    except Exception:
+        return "", ""
+
+
+def _asset_invest_amount_v5223(row):
+    try:
+        if not hasattr(row, "get"):
+            return 0.0
+        for col in ["투자원금", "원금", "매입금액", "매수금액", "평가금액", "평가액"]:
+            if col in row:
+                return float(str(row.get(col, 0)).replace(",", "") or 0)
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _asset_kind_for_sort_v5223(row):
+    try:
+        code, name = _asset_code_name_v5223(row)
+        asset_group = row.get("자산군", "") if hasattr(row, "get") else ""
+        text = f"{code} {name} {asset_group}".upper().replace(" ", "")
+        if code in ETF_CODE_ORDER_V5223_TABLE or any(k.replace(" ", "").upper() in text for k in ETF_NAME_ORDER_V5223_TABLE):
+            return "ETF"
+        if "TDF" in text:
+            return "TDF"
+        if any(x in text for x in ["현금", "예수금", "대기자산", "CMA", "MMF"]):
+            return "현금성자산"
+        kind = asset_kind_v518(code, name) if "asset_kind_v518" in globals() else ""
+        if kind == "ETF":
+            return "ETF"
+        if kind == "주식" or (code and code.isdigit() and len(code) == 6):
+            return "주식"
+    except Exception:
+        pass
+    return "기타"
+
+
+def 자산공통정렬키_v5223(row):
+    """ETF 고정 순서 → 개별주 투자원금 내림차순 → TDF → 현금성자산."""
+    try:
+        code, name = _asset_code_name_v5223(row)
+        compact = f"{code} {name}".upper().replace(" ", "")
+        kind = _asset_kind_for_sort_v5223(row)
+        amount = _asset_invest_amount_v5223(row)
+        if kind == "ETF":
+            rank = ETF_CODE_ORDER_V5223_TABLE.get(code)
+            if rank is None:
+                rank = 90
+                for k, v in ETF_NAME_ORDER_V5223_TABLE.items():
+                    if k.upper().replace(" ", "") in compact:
+                        rank = v
+                        break
+            return (1, rank, 0, name)
+        if kind == "주식":
+            return (2, 0, -amount, name)
+        if kind == "TDF":
+            return (3, 0, -amount, name)
+        if kind == "현금성자산":
+            cash_order = 1 if "예수" in compact else 2 if "대기" in compact else 3
+            return (4, cash_order, -amount, name)
+        return (9, 0, -amount, name)
+    except Exception:
+        return (99, 0, 0, "")
+
+
+def 자산표공통정렬_v5223(df):
+    try:
+        작업 = pd.DataFrame(df).copy()
+        if 작업.empty:
+            return 작업
+        작업["_sort_key_v5223"] = 작업.apply(자산공통정렬키_v5223, axis=1)
+        작업 = 작업.sort_values("_sort_key_v5223", kind="mergesort").drop(columns=["_sort_key_v5223"])
+        return 작업.reset_index(drop=True)
+    except Exception:
+        return df
+
+
+def 최근자산변화표스타일_v5223():
+    st.markdown("""
+        <style>
+        .asset-change-wrap{border:1px solid rgba(148,163,184,.20);border-radius:16px;background:linear-gradient(180deg,rgba(15,23,42,.70),rgba(2,6,23,.42));overflow:hidden;margin-top:.85rem;}
+        .asset-change-head{display:flex;justify-content:space-between;align-items:flex-end;gap:1rem;margin:.2rem 0 .8rem 0;}
+        .asset-change-title{font-size:1.45rem;font-weight:720;letter-spacing:-.03em;color:#f8fafc;margin:0;}
+        .asset-change-sub{font-size:.92rem;color:#94a3b8;margin-left:.55rem;font-weight:500;}
+        .asset-kpi-box{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border:1px solid rgba(148,163,184,.20);border-radius:16px;background:rgba(15,23,42,.55);margin:.7rem 0 1rem 0;overflow:hidden;}
+        .asset-kpi{padding:1rem 1.15rem;border-right:1px solid rgba(148,163,184,.18);}.asset-kpi:last-child{border-right:0;}
+        .asset-kpi-label{font-size:.82rem;color:#94a3b8;font-weight:600;margin-bottom:.25rem;}.asset-kpi-value{font-size:1.35rem;color:#f8fafc;font-weight:750;letter-spacing:-.025em;}.asset-kpi-note{font-size:.78rem;color:#94a3b8;margin-top:.15rem;}
+        table.asset-change-table{width:100%;border-collapse:collapse;font-size:.94rem;}table.asset-change-table th{background:rgba(15,23,42,.86);color:#e5e7eb;font-weight:650;text-align:left;padding:.82rem .9rem;border-bottom:1px solid rgba(148,163,184,.22);}table.asset-change-table td{padding:.86rem .9rem;border-bottom:1px solid rgba(148,163,184,.13);vertical-align:middle;color:#f8fafc;}table.asset-change-table tr:hover td{background:rgba(59,130,246,.08);}
+        .date-main{font-weight:650;color:#e2e8f0;}.date-sub{font-size:.78rem;color:#94a3b8;margin-top:.12rem;}.move-main{font-weight:720;letter-spacing:-.02em;color:#f8fafc;}.move-sub{font-size:.82rem;color:#94a3b8;margin-top:.22rem;line-height:1.35;}
+        .badge{display:inline-flex;align-items:center;gap:.28rem;border-radius:9px;padding:.38rem .62rem;font-weight:700;font-size:.82rem;white-space:nowrap;}.badge-move{background:rgba(37,99,235,.30);color:#bfdbfe;border:1px solid rgba(96,165,250,.28);}.badge-buy{background:rgba(22,163,74,.25);color:#bbf7d0;border:1px solid rgba(74,222,128,.25);}.badge-sell{background:rgba(220,38,38,.25);color:#fecaca;border:1px solid rgba(248,113,113,.25);}
+        .amount-pos{font-weight:760;color:#38bdf8;text-align:right;white-space:nowrap;}.amount-neg{font-weight:760;color:#f87171;text-align:right;white-space:nowrap;}.principal-pill{display:inline-block;border-radius:9px;background:rgba(30,41,59,.95);color:#f8fafc;padding:.35rem .65rem;font-weight:700;font-size:.82rem;}.asset-change-foot{padding:.72rem .9rem;color:#94a3b8;font-size:.82rem;border-top:1px solid rgba(148,163,184,.14);background:rgba(15,23,42,.35);}
+        @media(max-width:900px){.asset-kpi-box{grid-template-columns:repeat(2,minmax(0,1fr));}.asset-change-sub{display:block;margin:.25rem 0 0 0;}table.asset-change-table{font-size:.86rem;}table.asset-change-table th,table.asset-change-table td{padding:.7rem .55rem;}}
+        </style>
+        """, unsafe_allow_html=True)
+
+
+def 최근자산변화표시_v5223(이동df, 최대표시=8):
+    try:
+        이동df = pd.DataFrame(이동df).copy()
+        최근자산변화표스타일_v5223()
+        st.markdown('<div class="asset-change-head"><div><span class="asset-change-title">🔎 최근 자산변화</span><span class="asset-change-sub">최근 거래이력 기준 자산 이동 내역</span></div></div>', unsafe_allow_html=True)
+        if 이동df.empty:
+            st.caption("최근 거래이력에서 자산이동으로 해석할 매수·매도 내역을 찾지 못했습니다.")
+            return 이동df
+        이동df["금액"] = pd.to_numeric(이동df.get("금액", 0), errors="coerce").fillna(0)
+        총건수 = len(이동df)
+        총금액 = 이동df["금액"].abs().sum()
+        구분시리즈 = 이동df["구분"].astype(str) if "구분" in 이동df.columns else pd.Series([], dtype=str)
+        매수건수 = int(구분시리즈.str.contains("매수", na=False).sum()) if len(구분시리즈) else 0
+        매도건수 = int(구분시리즈.str.contains("매도", na=False).sum()) if len(구분시리즈) else 0
+        자동시리즈 = 이동df["자동분석"].astype(str) if "자동분석" in 이동df.columns else pd.Series([], dtype=str)
+        원금변화없음 = int(자동시리즈.str.contains("원금변화 없음", na=False).sum()) if len(자동시리즈) else 총건수
+        날짜들 = pd.to_datetime(이동df.get("날짜", pd.Series([], dtype=str)), errors="coerce").dropna()
+        기간 = "최근 내역" if 날짜들.empty else f"{날짜들.min().strftime('%Y-%m-%d')} ~ {날짜들.max().strftime('%Y-%m-%d')}"
+        비율 = (원금변화없음 / 총건수 * 100) if 총건수 else 0
+        조회일수 = min(30, max(1, (날짜들.max() - 날짜들.min()).days + 1 if not 날짜들.empty else 30))
+        st.markdown(f"""
+        <div class="asset-kpi-box">
+          <div class="asset-kpi"><div class="asset-kpi-label">총 이동 건수</div><div class="asset-kpi-value">{총건수:,}건</div><div class="asset-kpi-note">표시 기준 전체</div></div>
+          <div class="asset-kpi"><div class="asset-kpi-label">총 이동 금액</div><div class="asset-kpi-value">{원화정수포맷(총금액)}</div><div class="asset-kpi-note">매수 {매수건수:,}건 / 매도 {매도건수:,}건</div></div>
+          <div class="asset-kpi"><div class="asset-kpi-label">원금 변화 없는 이동</div><div class="asset-kpi-value">{원금변화없음:,}건</div><div class="asset-kpi-note">전체의 {비율:.0f}%</div></div>
+          <div class="asset-kpi"><div class="asset-kpi-label">조회 기간</div><div class="asset-kpi-value">최근 {조회일수}일</div><div class="asset-kpi-note">{_html_escape_v5223(기간)}</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+        rows_html = []
+        for _, row in 이동df.head(최대표시).iterrows():
+            날짜 = _html_escape_v5223(row.get("날짜", ""))
+            시간 = _html_escape_v5223(row.get("시간", "")) if "시간" in 이동df.columns else ""
+            구분원본 = str(row.get("구분", "자산이동"))
+            자동 = str(row.get("자동분석", ""))
+            if "원금변화 없음" in 자동:
+                구분표시, badge = "↔ 자산이동", "badge-move"
+            elif "매도" in 구분원본:
+                구분표시, badge = "매도", "badge-sell"
+            elif "매수" in 구분원본:
+                구분표시, badge = "매수", "badge-buy"
+            else:
+                구분표시, badge = 구분원본 or "자산이동", "badge-move"
+            상세 = str(row.get("상세설명", "")).replace("  ", " ").strip()
+            계좌 = str(row.get("계좌", "")).strip()
+            종목명 = str(row.get("종목명", "")).strip()
+            보조 = 계좌
+            if 종목명 and 종목명 not in 상세:
+                보조 = (보조 + " → " if 보조 else "") + 종목명
+            금액 = float(row.get("금액", 0) or 0)
+            signed_amount = -abs(금액) if "매도" in 구분원본 and "원금변화 없음" not in 자동 else abs(금액)
+            amount_cls = "amount-neg" if signed_amount < 0 else "amount-pos"
+            원금변화 = "없음" if "원금변화 없음" in 자동 or not 자동 else "확인"
+            time_html = f'<div class="date-sub">{시간}</div>' if 시간 else ''
+            rows_html.append(f"""
+              <tr>
+                <td><div class="date-main">{날짜}</div>{time_html}</td>
+                <td><span class="badge {badge}">{_html_escape_v5223(구분표시)}</span></td>
+                <td><div class="move-main">{_html_escape_v5223(상세)}</div><div class="move-sub">{_html_escape_v5223(보조)}</div></td>
+                <td class="{amount_cls}">{원화정수포맷(signed_amount)}</td>
+                <td><span class="principal-pill">{_html_escape_v5223(원금변화)}</span></td>
+              </tr>
+            """)
+        table_html = f"""
+        <div class="asset-change-wrap">
+          <table class="asset-change-table">
+            <thead><tr><th style="width:13%">날짜</th><th style="width:13%">구분</th><th>이동내용</th><th style="width:15%;text-align:right">금액</th><th style="width:12%">원금변화</th></tr></thead>
+            <tbody>{''.join(rows_html)}</tbody>
+          </table>
+          <div class="asset-change-foot">ⓘ 원금변화는 입금·출금·배당·평가손익처럼 총 투자원금 자체가 변했는지를 구분합니다. 현금성자산에서 ETF·주식으로 옮긴 경우는 보통 '없음'으로 표시됩니다.</div>
+        </div>
+        """
+        st.markdown(table_html, unsafe_allow_html=True)
+        if len(이동df) > 최대표시:
+            with st.expander(f"전체 자산 변화 목록 보기 · {len(이동df):,}건", expanded=False):
+                표시 = 이동df[[c for c in ["날짜", "구분", "상세설명", "금액", "계좌", "자동분석"] if c in 이동df.columns]].copy()
+                try:
+                    표데이터프레임(표시.style.format({"금액": 원화정수포맷}), width="stretch", hide_index=True)
+                except Exception:
+                    표데이터프레임(표시, width="stretch", hide_index=True)
+        return 이동df
+    except Exception as e:
+        st.caption(f"최근 자산변화 표 표시 오류: {type(e).__name__}: {e}")
+        try:
+            return 이동df
+        except Exception:
+            return pd.DataFrame()
+
 # ============================================================
 # /v5.18.3 UI 안정화 + 데이터 구조 정리
 # ============================================================
@@ -836,44 +1046,21 @@ def 데이터프레임빈값아님_v5223(df):
 # v5.18.3.3 주요 모니터링 정렬 보조 함수
 # ============================================================
 def v51833_monitor_sort_key(item):
-    """
-    코스피 → 코스닥 → ETF → 개별주 순서로 정렬하기 위한 보조 함수입니다.
-    dict, Series, 문자열 모두 처리합니다.
-    """
+    """주요 모니터링 공통 정렬: 지수 → ETF 고정순 → 개별주 투자원금순."""
     try:
         if hasattr(item, "get"):
-            name = (
-                item.get("종목명", "")
-                or item.get("자산명", "")
-                or item.get("name", "")
-                or item.get("표시명", "")
-                or item.get("title", "")
-            )
+            name = (item.get("종목명", "") or item.get("자산명", "") or item.get("name", "") or item.get("표시명", "") or item.get("title", "") or item.get("이름", ""))
+            code = item.get("종목코드", item.get("코드", ""))
         else:
-            name = str(item)
+            name, code = str(item), ""
         name = str(name)
-
-        order = {
-            "코스피": 10,
-            "KOSPI": 10,
-            "코스닥": 20,
-            "KOSDAQ": 20,
-            "KODEX 200": 30,
-            "KODEX200": 30,
-            "TIGER 코리아휴머노이드로봇산업": 40,
-            "TIGER 휴머노이드": 40,
-            "삼성전자": 50,
-            "SK하이닉스": 60,
-            "에이피알": 70,
-            "삼성전기": 80,
-        }
-
-        for key, rank in order.items():
-            if key in name:
-                return rank
-        return 999
+        if "코스피" in name or "KOSPI" in name:
+            return (0, 10, 0, name)
+        if "코스닥" in name or "KOSDAQ" in name:
+            return (0, 20, 0, name)
+        return 자산공통정렬키_v5223({"종목코드": code, "종목명": name, "투자원금": _asset_invest_amount_v5223(item) if hasattr(item, "get") else 0})
     except Exception:
-        return 999
+        return (99, 0, 0, "")
 
 
 # -----------------------------------
@@ -2943,7 +3130,9 @@ def 자산변화로그UI(계산포트폴리오, 보유계산포트폴리오):
         else:
             자산군순서 = 자산군정렬순서_v5223()
             표시상세["자산군정렬"] = 표시상세["자산군"].map(자산군순서).fillna(99)
-            표시상세 = 표시상세.sort_values(["자산군정렬", "계좌", "평가금액"], ascending=[True, True, False]).drop(columns=["자산군정렬"]).reset_index(drop=True)
+            표시상세 = 자산표공통정렬_v5223(표시상세).reset_index(drop=True)
+            if "자산군정렬" in 표시상세.columns:
+                표시상세 = 표시상세.drop(columns=["자산군정렬"])
             표시상세 = index_1부터(표시상세)
             표시열 = [c for c in ["No", "계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "전체비중", "비고"] if c in 표시상세.columns]
             표시상세 = 표시상세[표시열]
@@ -5127,6 +5316,10 @@ def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
     통합["수익률"] = np.where(통합["원금"] != 0, 통합["평가손익"] / 통합["원금"] * 100, 0)
     총평가 = 통합["평가금액"].sum()
     통합["전체비중"] = np.where(총평가 != 0, 통합["평가금액"] / 총평가 * 100, 0)
+    try:
+        통합 = 자산표공통정렬_v5223(통합)
+    except Exception:
+        pass
     return 통합
 
 
@@ -5153,7 +5346,7 @@ def 통합자산현황UI(보유포트폴리오, irp_df, cash_df=None):
     st.caption("자산군별 요약")
     표데이터프레임(index_1부터(자산군요약.copy()).style.format(숫자서식).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]), width="stretch")
     with st.expander("통합 자산 상세 보기", expanded=False):
-        상세표시 = 통합표.sort_values(["계좌", "자산군", "평가금액"], ascending=[True, True, False]).reset_index(drop=True)
+        상세표시 = 자산표공통정렬_v5223(통합표).reset_index(drop=True)
         표데이터프레임(index_1부터(상세표시).style.format(숫자서식).map(손익색상, subset=["평가손익"]).map(수익률색상, subset=["수익률"]), width="stretch")
     return 통합표
 
@@ -9271,44 +9464,10 @@ def 최근거래자산이동목록생성(거래df, 최근일수=90):
         return pd.DataFrame(columns=['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','변화유형','상세설명','자동분석'])
 
 
-def 최근자산변화카드표시(거래df, 최대표시=5):
-    """자산 변화 탭에 최근 자산 이동을 간결한 카드와 표로 표시합니다."""
+def 최근자산변화카드표시(거래df, 최대표시=8):
+    """자산 변화 탭에 최근 자산 이동을 요약 카드 + 표 중심 UI로 표시합니다."""
     이동df = 최근거래자산이동목록생성(거래df)
-    st.markdown("#### 🔎 최근 자산 변화")
-    if 이동df.empty:
-        st.caption("최근 거래이력에서 자산이동으로 해석할 매수·매도 내역을 찾지 못했습니다.")
-        return 이동df
-
-    for _, row in 이동df.head(최대표시).iterrows():
-        날짜 = str(row.get("날짜", "")).strip()
-        상세 = str(row.get("상세설명", "")).strip()
-        금액 = _v5214_num(row.get("금액", 0))
-        계좌 = str(row.get("계좌", "")).strip()
-        자동 = str(row.get("자동분석", "")).strip() or "원금변화 없음 · 자산군 이동"
-
-        with st.container(border=True):
-            st.markdown(f"**{날짜} · 자산 이동**")
-            st.markdown(f"### {상세}")
-            보조 = f"{금액:,.0f}원"
-            if 계좌:
-                보조 += f" · {계좌}"
-            st.caption(보조)
-            st.markdown(
-                f"""
-                <div style="padding:0.75rem 0.9rem;border-radius:10px;background:rgba(59,130,246,0.14);color:#93c5fd;font-weight:520;">
-                    {자동}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    with st.expander("전체 자산 변화 목록 보기", expanded=False):
-        표시 = 이동df[["날짜", "변화유형", "상세설명", "금액", "계좌"]].copy()
-        try:
-            표데이터프레임(표시.style.format({"금액": 원화정수포맷}), width="stretch", hide_index=True)
-        except Exception:
-            표데이터프레임(표시, width="stretch", hide_index=True)
-    return 이동df
+    return 최근자산변화표시_v5223(이동df, 최대표시=최대표시)
 
 
 def 자산변화로그최근거래저장(거래df, 통합자산표=None):
@@ -10535,22 +10694,13 @@ def 주요모니터자산구성(거래df):
             투자원금 = float(행.get("투자원금", 0) or 0)
             보유항목.append({"코드": 코드, "이름": 이름, "구분": 구분, "투자원금": 투자원금})
 
-    # v5.18.3.1: 주요 모니터링 표시 순서를 고정합니다.
-    # 목표: 코스피 → 코스닥 → ETF(KODEX200, TIGER 휴머노이드) → 개별주(삼성전자, SK하이닉스, 에이피알, 삼성전기)
-    표시우선순위 = {
-        "069500": 10,  # KODEX 200
-        "0148J0": 20,  # TIGER 코리아휴머노이드로봇산업
-        "005930": 30,  # 삼성전자
-        "000660": 40,  # SK하이닉스
-        "278470": 50,  # 에이피알
-        "009150": 60,  # 삼성전기
-    }
-
+    # v5.22.3-table-ui: 주요 모니터링 표시 순서 통일
+    # ETF: KODEX 200 → TIGER 200 → TIGER 코리아휴머노이드 / 개별주: 투자원금 내림차순
     def _v5183_monitor_sort_key(item):
         코드 = normalize_asset_code_v518(item.get("코드", ""), item.get("이름", ""))
-        구분 = item.get("구분", "")
-        기본 = 100 if 구분 == "etf" else 200
-        return (표시우선순위.get(코드, 기본), item.get("이름", ""))
+        이름 = item.get("이름", "")
+        투자원금 = float(item.get("투자원금", 0) or 0)
+        return 자산공통정렬키_v5223({"종목코드": 코드, "종목명": 이름, "투자원금": 투자원금})
 
     etf목록 = sorted([x for x in 보유항목 if x.get("구분") == "etf"], key=_v5183_monitor_sort_key)
     주식목록 = sorted([x for x in 보유항목 if x.get("구분") != "etf"], key=_v5183_monitor_sort_key)
