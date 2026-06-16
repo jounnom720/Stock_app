@@ -689,11 +689,9 @@ except Exception:
     BeautifulSoup = None
     BS4_AVAILABLE = False
 
-try:
-    from streamlit_plotly_events import plotly_events
-    PLOTLY_CLICK_AVAILABLE = True
-except Exception:
-    PLOTLY_CLICK_AVAILABLE = False
+# v5.22.7: 미사용 선택 라이브러리 import 제거
+plotly_events = None
+PLOTLY_CLICK_AVAILABLE = False
 
 try:
     from docx import Document
@@ -713,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.5-stable-ui"
+APP_VERSION = "v5.22.7-stable-ui-polish"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1144,6 +1142,208 @@ def 최근자산변화표시_v5224(이동df, 최대표시=10):
 
 # 기존 호출 호환
 최근자산변화표시_v5223 = 최근자산변화표시_v5224
+
+
+# ============================================================
+# v5.22.7-stable-ui-polish 최근 자산변화 압축형 UI 최종 패치
+# - 기본표에서는 날짜/구분/이동내용/금액/계좌 중심으로 압축 표시합니다.
+# - 원금부분·수익/손실은 실현손익이 있는 행에서만 배지로 강조합니다.
+# - 전체 상세 목록에서는 원금부분·수익손실부분을 유지합니다.
+# ============================================================
+def 최근자산변화표스타일_v5226():
+    st.markdown("""
+        <style>
+        .asset-change-head{display:flex;justify-content:space-between;align-items:flex-end;gap:1rem;margin:.15rem 0 .65rem 0;}
+        .asset-change-title{font-size:1.35rem;font-weight:720;letter-spacing:-.03em;color:#f8fafc;margin:0;}
+        .asset-change-sub{font-size:.88rem;color:#93a4bd;margin-left:.5rem;font-weight:500;}
+        .asset-kpi-box{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border:1px solid rgba(148,163,184,.20);border-radius:15px;background:rgba(15,23,42,.50);margin:.65rem 0 .9rem 0;overflow:hidden;}
+        .asset-kpi{padding:.78rem .95rem;border-right:1px solid rgba(148,163,184,.16);}.asset-kpi:last-child{border-right:0;}
+        .asset-kpi-label{font-size:.76rem;color:#94a3b8;font-weight:650;margin-bottom:.18rem;}.asset-kpi-value{font-size:1.18rem;color:#f8fafc;font-weight:760;letter-spacing:-.025em;}.asset-kpi-note{font-size:.73rem;color:#94a3b8;margin-top:.12rem;}
+        .asset-change-wrap{border:1px solid rgba(148,163,184,.20);border-radius:15px;background:linear-gradient(180deg,rgba(15,23,42,.68),rgba(2,6,23,.42));overflow:hidden;margin-top:.75rem;}
+        table.asset-change-table{width:100%;border-collapse:collapse;font-size:.88rem;}
+        table.asset-change-table th{background:rgba(15,23,42,.88);color:#dbeafe;font-weight:700;text-align:left;padding:.62rem .72rem;border-bottom:1px solid rgba(148,163,184,.22);}
+        table.asset-change-table td{padding:.60rem .72rem;border-bottom:1px solid rgba(148,163,184,.12);vertical-align:middle;color:#f8fafc;line-height:1.35;}
+        table.asset-change-table tr:hover td{background:rgba(59,130,246,.08);}
+        .date-main{font-weight:720;color:#e2e8f0;white-space:nowrap;}.date-sub{font-size:.72rem;color:#94a3b8;margin-top:.05rem;}
+        .move-main{font-weight:750;letter-spacing:-.02em;color:#f8fafc;white-space:normal;}.move-sub{font-size:.76rem;color:#94a3b8;margin-top:.10rem;line-height:1.30;}
+        .badge{display:inline-flex;align-items:center;gap:.25rem;border-radius:8px;padding:.26rem .48rem;font-weight:760;font-size:.74rem;white-space:nowrap;}
+        .badge-move{background:rgba(37,99,235,.28);color:#bfdbfe;border:1px solid rgba(96,165,250,.24);}.badge-buy{background:rgba(22,163,74,.23);color:#bbf7d0;border:1px solid rgba(74,222,128,.24);}.badge-sell{background:rgba(220,38,38,.23);color:#fecaca;border:1px solid rgba(248,113,113,.24);}.badge-tdf{background:rgba(168,85,247,.23);color:#e9d5ff;border:1px solid rgba(216,180,254,.24);}
+        .amount-main{font-weight:780;color:#38bdf8;text-align:right;white-space:nowrap;}.account-pill{display:inline-flex;border-radius:999px;background:rgba(148,163,184,.10);border:1px solid rgba(148,163,184,.16);padding:.18rem .45rem;color:#cbd5e1;font-size:.74rem;white-space:nowrap;}
+        .profit-pill-pos{display:inline-flex;margin-left:.35rem;border-radius:999px;background:rgba(34,197,94,.16);border:1px solid rgba(34,197,94,.26);color:#86efac;padding:.12rem .42rem;font-size:.72rem;font-weight:750;}
+        .profit-pill-neg{display:inline-flex;margin-left:.35rem;border-radius:999px;background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.26);color:#fca5a5;padding:.12rem .42rem;font-size:.72rem;font-weight:750;}
+        .analysis-card{border:1px solid rgba(148,163,184,.18);border-radius:14px;background:rgba(15,23,42,.43);padding:.74rem .9rem;margin-top:.75rem;color:#cbd5e1;line-height:1.50;font-size:.86rem;}
+        .analysis-title{font-weight:760;color:#f8fafc;margin-bottom:.25rem;}.analysis-inline{display:flex;flex-wrap:wrap;gap:.45rem 1.05rem;}.analysis-inline span{color:#bfdbfe;font-weight:650;}
+        .asset-change-foot{padding:.56rem .75rem;color:#94a3b8;font-size:.76rem;border-top:1px solid rgba(148,163,184,.13);background:rgba(15,23,42,.32);}
+        @media(max-width:900px){.asset-kpi-box{grid-template-columns:repeat(2,minmax(0,1fr));}.asset-change-sub{display:block;margin:.18rem 0 0 0;}table.asset-change-table{font-size:.80rem;}table.asset-change-table th,table.asset-change-table td{padding:.52rem .42rem;}.hide-mobile{display:none;}}
+        </style>
+        """, unsafe_allow_html=True)
+
+
+def _거래요약날짜_v5226(value):
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.notna(ts):
+            return ts.strftime("%m-%d"), ts.strftime("%Y")
+    except Exception:
+        pass
+    s = str(value or "")
+    return s[-5:] if len(s) >= 5 else s, ""
+
+
+def _계좌짧게_v5226(value):
+    s = str(value or "").strip()
+    if not s:
+        return "-"
+    return (s.replace("신한은행 IRP", "신한IRP")
+             .replace("미래에셋/증권계좌", "미래에셋")
+             .replace("미래에셋증권", "미래에셋")
+             .replace("증권계좌", ""))
+
+
+def 최근자산변화표시_v5226(이동df, 최대표시=12):
+    """최근 자산변화를 자산원장형 압축 UI로 표시합니다."""
+    try:
+        이동df = pd.DataFrame(이동df).copy()
+        최근자산변화표스타일_v5226()
+        st.markdown('<div class="asset-change-head"><div><span class="asset-change-title">🔎 최근 자산변화</span><span class="asset-change-sub">자산 이동·신규 편입·실현손익을 한눈에 보는 자산원장</span></div></div>', unsafe_allow_html=True)
+        if 이동df.empty:
+            st.caption("최근 거래이력에서 자산이동으로 해석할 내역을 찾지 못했습니다.")
+            return 이동df
+
+        이동df["금액"] = pd.to_numeric(이동df.get("금액", 0), errors="coerce").fillna(0)
+        if "원금부분" not in 이동df.columns or "수익손실부분" not in 이동df.columns:
+            계산값 = 이동df.apply(_자산변화원금손익계산_v5224, axis=1)
+            이동df["이동금액"] = [v[0] for v in 계산값]
+            이동df["원금부분"] = [v[1] for v in 계산값]
+            이동df["수익손실부분"] = [v[2] for v in 계산값]
+        else:
+            이동df["이동금액"] = pd.to_numeric(이동df.get("이동금액", 이동df["금액"].abs()), errors="coerce").fillna(이동df["금액"].abs())
+            이동df["원금부분"] = pd.to_numeric(이동df["원금부분"], errors="coerce").fillna(0)
+            이동df["수익손실부분"] = pd.to_numeric(이동df["수익손실부분"], errors="coerce").fillna(0)
+
+        총건수 = len(이동df)
+        총금액 = 이동df["이동금액"].abs().sum()
+        총손익 = 이동df["수익손실부분"].sum()
+        날짜시리즈 = pd.to_datetime(이동df.get("날짜", pd.Series([], dtype=object)), errors="coerce").dropna()
+        if not 날짜시리즈.empty:
+            조회기간표시 = f"{날짜시리즈.min().strftime('%Y-%m-%d')} ~ {날짜시리즈.max().strftime('%Y-%m-%d')}"
+            조회일수표시 = f"{max(1, (날짜시리즈.max() - 날짜시리즈.min()).days + 1):,}일"
+        else:
+            조회기간표시 = "최근 내역"
+            조회일수표시 = "-"
+        구분시리즈 = 이동df["구분"].astype(str) if "구분" in 이동df.columns else pd.Series([], dtype=str)
+        매수건수 = int(구분시리즈.str.contains("매수", na=False).sum()) if len(구분시리즈) else 0
+        매도건수 = int(구분시리즈.str.contains("매도", na=False).sum()) if len(구분시리즈) else 0
+        신규편입 = []
+        try:
+            후보 = 이동df[구분시리즈.str.contains("매수", na=False)] if len(구분시리즈) else 이동df
+            for col in ["종목명", "상품명", "자산명"]:
+                if col in 후보.columns:
+                    신규편입 = [x for x in 후보[col].dropna().astype(str).unique().tolist() if x and x.lower() != "nan"][:5]
+                    if 신규편입:
+                        break
+        except Exception:
+            신규편입 = []
+        손익클래스 = "profit-pill-pos" if 총손익 > 0 else "profit-pill-neg" if 총손익 < 0 else ""
+        손익표시 = 원화정수포맷(총손익) if abs(총손익) >= 1 else "0원"
+        신규표시 = f"{len(신규편입):,}종목" if 신규편입 else "-"
+
+        kpi_html = (
+            '<div class="asset-kpi-box">'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">거래</div><div class="asset-kpi-value">{총건수:,}건</div><div class="asset-kpi-note">매수 {매수건수:,} / 매도 {매도건수:,} · {조회일수표시}</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">이동금액</div><div class="asset-kpi-value">{원화정수포맷(총금액)}</div><div class="asset-kpi-note">조회기간 {조회기간표시}</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">신규편입</div><div class="asset-kpi-value">{_html_escape_v5224(신규표시)}</div><div class="asset-kpi-note">최근 매수 기준</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">실현손익</div><div class="asset-kpi-value">{손익표시}</div><div class="asset-kpi-note">TDF·매도 손익만 별도 인식</div></div>'
+            '</div>'
+        )
+        st.markdown(kpi_html, unsafe_allow_html=True)
+
+        rows_html = []
+        for _, row in 이동df.head(최대표시).iterrows():
+            날짜메인, 날짜서브 = _거래요약날짜_v5226(row.get("날짜", ""))
+            구분원본 = str(row.get("구분", "자산이동"))
+            자산유형 = str(row.get("자산유형", ""))
+            if "TDF" in 자산유형.upper() or "TDF" in str(row.get("상세설명", "")).upper():
+                구분표시, badge = "TDF", "badge-tdf"
+            elif "매도" in 구분원본:
+                구분표시, badge = "매도", "badge-sell"
+            elif "매수" in 구분원본:
+                구분표시, badge = "매수", "badge-buy"
+            else:
+                구분표시, badge = "이동", "badge-move"
+
+            상세 = str(row.get("상세설명", "")).replace("  ", " ").strip()
+            자동 = str(row.get("자동분석", "")).strip()
+            계좌 = _계좌짧게_v5226(row.get("계좌", ""))
+            이동금액 = abs(_num_v5224(row.get("이동금액", row.get("금액", 0))))
+            원금부분 = abs(_num_v5224(row.get("원금부분", 이동금액)))
+            손익부분 = _num_v5224(row.get("수익손실부분", 0))
+            손익배지 = ""
+            if 손익부분 > 0:
+                손익배지 = f'<span class="profit-pill-pos">수익 {원화정수포맷(손익부분)}</span>'
+            elif 손익부분 < 0:
+                손익배지 = f'<span class="profit-pill-neg">손실 {원화정수포맷(손익부분)}</span>'
+            원금힌트 = ""
+            if abs(손익부분) >= 1 and abs(원금부분 - 이동금액) >= 1:
+                원금힌트 = f' · 원금 {원화정수포맷(원금부분)}'
+            sub = 자동 if 자동 else "자산군 이동"
+            if 원금힌트:
+                sub = f"{sub}{원금힌트}"
+
+            rows_html.append(
+                '<tr>'
+                f'<td><div class="date-main">{_html_escape_v5224(날짜메인)}</div><div class="date-sub hide-mobile">{_html_escape_v5224(날짜서브)}</div></td>'
+                f'<td><span class="badge {badge}">{_html_escape_v5224(구분표시)}</span></td>'
+                f'<td><div class="move-main">{_html_escape_v5224(상세)}{손익배지}</div><div class="move-sub">{_html_escape_v5224(sub)}</div></td>'
+                f'<td class="amount-main">{원화정수포맷(이동금액)}</td>'
+                f'<td class="hide-mobile"><span class="account-pill">{_html_escape_v5224(계좌)}</span></td>'
+                '</tr>'
+            )
+
+        table_html = (
+            '<div class="asset-change-wrap">'
+            '<table class="asset-change-table">'
+            '<thead><tr><th style="width:9%">날짜</th><th style="width:8%">구분</th><th>이동내용</th><th style="width:15%;text-align:right">금액</th><th class="hide-mobile" style="width:11%">계좌</th></tr></thead>'
+            f'<tbody>{"".join(rows_html)}</tbody>'
+            '</table>'
+            '<div class="asset-change-foot">ⓘ 원금과 수익/손실은 기본표에서 반복 표시하지 않고, TDF 매도·손익 실현 거래에서만 배지로 강조합니다.</div>'
+            '</div>'
+        )
+        st.markdown(table_html, unsafe_allow_html=True)
+
+        분석문장 = []
+        if 신규편입:
+            분석문장.append(f'<span>신규편입</span> {", ".join(_html_escape_v5224(x) for x in 신규편입[:4])}')
+        if 총손익 > 0:
+            분석문장.append(f'<span>실현수익</span> {원화정수포맷(총손익)}')
+        elif 총손익 < 0:
+            분석문장.append(f'<span>실현손실</span> {원화정수포맷(총손익)}')
+        분석문장.append('<span>해석</span> 현금성자산↔ETF·주식 이동은 외부 입금이 아닌 자산군 이동으로 봅니다.')
+        analysis_html = '<div class="analysis-card"><div class="analysis-title">최근 흐름 해석</div><div class="analysis-inline">' + ''.join(f'<div>{x}</div>' for x in 분석문장) + '</div></div>'
+        st.markdown(analysis_html, unsafe_allow_html=True)
+
+        if len(이동df) > 최대표시:
+            with st.expander(f"전체 자산 변화 목록 보기 · {len(이동df):,}건", expanded=False):
+                표시열 = [c for c in ["날짜", "구분", "상세설명", "금액", "원금부분", "수익손실부분", "계좌", "자동분석"] if c in 이동df.columns]
+                표시 = 이동df[표시열].copy()
+                try:
+                    숫자포맷 = {c: 원화정수포맷 for c in ["금액", "원금부분", "수익손실부분"] if c in 표시.columns}
+                    표데이터프레임(표시.style.format(숫자포맷), width="stretch", hide_index=True)
+                except Exception:
+                    표데이터프레임(표시, width="stretch", hide_index=True)
+        return 이동df
+    except Exception as e:
+        st.caption(f"최근 자산변화 압축 표 표시 오류: {type(e).__name__}: {e}")
+        try:
+            return 이동df
+        except Exception:
+            return pd.DataFrame()
+
+# 실제 호출명을 최신 UI로 재지정합니다.
+최근자산변화표스타일_v5224 = 최근자산변화표스타일_v5226
+최근자산변화표시_v5224 = 최근자산변화표시_v5226
+최근자산변화표스타일_v5223 = 최근자산변화표스타일_v5226
+최근자산변화표시_v5223 = 최근자산변화표시_v5226
 # ============================================================
 # /v5.18.3 UI 안정화 + 데이터 구조 정리
 # ============================================================
