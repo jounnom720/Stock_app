@@ -17185,3 +17185,240 @@ except Exception as e:
 # ============================================================
 # end v5.23.3 exact TDF cashflow order patch
 # ============================================================
+
+
+# ============================================================
+# v5.23.5 자산원장 최근순 표시 최종 보정
+# - v5.23.3/5.23.4의 사용자 지정 4개 흐름 우선 고정 정렬을 폐기합니다.
+# - 최근자산변화는 전체 거래이력을 보존하고, 최신 사건이 위로 오도록 표시합니다.
+# - 2026-06-17 TDF2035 관련 흐름은 사용자가 확인한 실제 진행 순서의 역순으로 표시합니다.
+#   최신순: 한화오션 매수 후 예수금 잔액 → 신한IRP 현금성 대기자산 잔액 → 예수금 이체 → TDF2035 전량매도
+# ============================================================
+APP_VERSION = "v5.23.5-asset-ledger-recent-first-full-history"
+
+
+def _v5235_text(value):
+    try:
+        if value is None:
+            return ""
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _v5235_money(value):
+    try:
+        if value is None:
+            return 0
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return 0
+        return int(round(float(value)))
+    except Exception:
+        return 0
+
+
+def _v5235_norm_date(value):
+    try:
+        if value is None or str(value).strip() == '':
+            return ''
+        if isinstance(value, (int, float)) and value > 20000:
+            return (pd.Timestamp('1899-12-30') + pd.to_timedelta(int(value), unit='D')).strftime('%Y-%m-%d')
+        # 문자열 숫자 형태의 Google Sheets 날짜 일련번호도 보정합니다.
+        s = str(value).strip()
+        if re.fullmatch(r"\d+(\.0)?", s):
+            n = float(s)
+            if n > 20000:
+                return (pd.Timestamp('1899-12-30') + pd.to_timedelta(int(n), unit='D')).strftime('%Y-%m-%d')
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+        return s
+    except Exception:
+        return str(value or '').strip()
+
+
+def _v5235_forced_tdf_rows():
+    """누락되면 안 되는 TDF2035 자금흐름 4개를 표시용 원장 행으로 복구합니다."""
+    return [
+        {
+            '날짜': '2026-06-16', '계좌': '신한은행 IRP', '구분': '수익실현', '종목명': 'TDF2035',
+            '자산유형': 'TDF', '수량': 0, '단가': 0, '금액': 44592176, '이동금액': 44592176,
+            '원금부분': 40901249, '수익손실부분': 3690927, '변화유형': '수익실현',
+            '상세설명': 'TDF2035 전량 매도',
+            '자동분석': 'TDF2035 전량매도로 원금 40,901,249원을 회수하고 실현수익 3,690,927원을 확정했습니다. 총 회수금액은 44,592,176원입니다.',
+            '출처': '사용자지정복구_v5235',
+        },
+        {
+            '날짜': '2026-06-17', '계좌': '신한IRP → 미래에셋', '구분': '자금이체', '종목명': '예수금',
+            '자산유형': '현금성자산', '수량': 0, '단가': 0, '금액': 49244653, '이동금액': 49244653,
+            '원금부분': 49244653, '수익손실부분': 0, '변화유형': '자금이체',
+            '상세설명': 'TDF2035 매도대금 → 미래에셋 예수금 이체',
+            '자동분석': 'TDF2035 매도 후 현금성 대기자산에 보관된 자금을 미래에셋증권 계좌 예수금으로 이체한 흐름입니다. 현재 잔액과 별도 이력으로 보존합니다.',
+            '출처': '사용자지정복구_v5235',
+        },
+        {
+            '날짜': '2026-06-17', '계좌': '신한IRP', '구분': '현금대기', '종목명': '현금성 대기자산',
+            '자산유형': '현금성자산', '수량': 0, '단가': 0, '금액': 20728, '이동금액': 20728,
+            '원금부분': 20728, '수익손실부분': 0, '변화유형': '현금대기',
+            '상세설명': 'TDF2035 매도 후 신한IRP 현금성 대기자산 잔액',
+            '자동분석': '신한은행 IRP에 남아 있는 현금성 대기자산 잔액입니다. 매도대금·계좌이체액·실현손익으로 중복 계산하지 않습니다.',
+            '출처': '사용자지정복구_v5235',
+        },
+        {
+            '날짜': '2026-06-17', '계좌': '미래에셋', '구분': '현금대기', '종목명': '예수금',
+            '자산유형': '현금성자산', '수량': 0, '단가': 0, '금액': 35892653, '이동금액': 35892653,
+            '원금부분': 35892653, '수익손실부분': 0, '변화유형': '현금대기',
+            '상세설명': '한화오션 매수 후 미래에셋 예수금 잔액',
+            '자동분석': '49,244,653원 이체 후 한화오션 매수 13,350,000원을 반영한 미래에셋 예수금 잔액입니다. 매수금액이나 실현손익으로 중복 계산하지 않습니다.',
+            '출처': '사용자지정복구_v5235',
+        },
+    ]
+
+
+def _v5235_flow_key(row):
+    desc = _v5235_text(row.get('상세설명', ''))
+    typ = _v5235_text(row.get('구분', ''))
+    acct = _v5235_text(row.get('계좌', ''))
+    name = _v5235_text(row.get('종목명', ''))
+    auto = _v5235_text(row.get('자동분석', ''))
+    merged = f"{desc} {typ} {acct} {name} {auto}"
+    amt = _v5235_money(row.get('금액', 0))
+
+    if 'TDF2035' in merged and ('전량 매도' in merged or '전량매도' in merged or typ == '수익실현') and abs(amt - 44592176) <= 10:
+        return 'TDF2035_SELL_44592176'
+    if 'TDF2035 매도대금' in merged and '예수금' in merged and ('이체' in merged or typ == '자금이체'):
+        return 'TDF2035_TO_MIRAE_49244653'
+    if abs(amt - 49244653) <= 10 and '예수금' in merged and ('이체' in merged or '보관' in merged):
+        return 'TDF2035_TO_MIRAE_49244653'
+    if 'TDF2035 매도 후' in merged and '현금성 대기자산' in merged and ('잔액' in merged or typ == '현금대기'):
+        return 'IRP_CASH_REMAIN_20728'
+    if abs(amt - 20728) <= 10 and ('현금성 대기자산' in merged or '신한' in acct or 'IRP' in acct):
+        return 'IRP_CASH_REMAIN_20728'
+    if '한화오션 매수 후' in merged and '예수금' in merged and ('잔액' in merged or typ == '현금대기'):
+        return 'MIRAE_CASH_AFTER_HANWHA_35892653'
+    if abs(amt - 35892653) <= 10 and '예수금' in merged:
+        return 'MIRAE_CASH_AFTER_HANWHA_35892653'
+    return '|'.join([_v5235_norm_date(row.get('날짜','')), acct, typ, desc, str(amt)])
+
+
+def _v5235_event_order_recent_first(row):
+    """같은 날짜 안에서 최신 자금흐름이 위로 오도록 순서를 부여합니다."""
+    key = _v5235_flow_key(row)
+    desc = _v5235_text(row.get('상세설명', ''))
+    typ = _v5235_text(row.get('구분', ''))
+    acct = _v5235_text(row.get('계좌', ''))
+    name = _v5235_text(row.get('종목명', ''))
+    merged = f"{desc} {typ} {acct} {name}"
+    amt = _v5235_money(row.get('금액', 0))
+
+    # 2026-06-17 TDF2035 이후 현금흐름 최신순
+    if key == 'MIRAE_CASH_AFTER_HANWHA_35892653':
+        return 10
+    # 실제 한화오션 매수는 예수금 잔액 직후에 표시해 자금 사용 흐름을 놓치지 않게 합니다.
+    if ('한화오션' in merged and '매수' in merged) or abs(amt - 13350000) <= 10:
+        return 15
+    if key == 'IRP_CASH_REMAIN_20728':
+        return 20
+    if key == 'TDF2035_TO_MIRAE_49244653':
+        return 30
+    if key == 'TDF2035_SELL_44592176':
+        return 40
+
+    # 일반 거래는 같은 날짜 안에서 매수/매도 중심으로 자연스럽게 표시합니다.
+    if typ == '매수':
+        return 100
+    if typ == '매도':
+        return 110
+    if typ == '수익실현':
+        return 120
+    if typ == '자금이체':
+        return 130
+    if typ == '현금대기':
+        return 140
+    return 200
+
+
+def _v5235_merge_and_sort_ledger(df):
+    try:
+        base = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    except Exception:
+        base = pd.DataFrame()
+    forced = pd.DataFrame(_v5235_forced_tdf_rows())
+    out = pd.concat([base, forced], ignore_index=True, sort=False)
+    if out.empty:
+        return out
+
+    for col in ['날짜','계좌','구분','종목명','자산유형','상세설명','자동분석','변화유형','출처']:
+        if col not in out.columns:
+            out[col] = ''
+    for col in ['금액','이동금액','원금부분','수익손실부분','수량','단가']:
+        if col not in out.columns:
+            out[col] = 0
+        out[col] = pd.to_numeric(out[col], errors='coerce').fillna(0)
+
+    out['날짜'] = out['날짜'].apply(_v5235_norm_date)
+    out['_flow_key_v5235'] = out.apply(_v5235_flow_key, axis=1)
+    # 복구 행은 동일 흐름 중 우선 보존하되, 일반 거래이력은 절대 삭제하지 않습니다.
+    out['_source_rank_v5235'] = out['출처'].astype(str).apply(lambda x: 0 if '사용자지정복구_v5235' in x else 5)
+    out = out.sort_values(['_flow_key_v5235','_source_rank_v5235'], ascending=[True, True], kind='mergesort')
+    out = out.drop_duplicates('_flow_key_v5235', keep='first')
+
+    out['_date_v5235'] = pd.to_datetime(out['날짜'], errors='coerce')
+    out['_event_order_v5235'] = out.apply(_v5235_event_order_recent_first, axis=1)
+    out['_amount_v5235'] = pd.to_numeric(out['금액'], errors='coerce').fillna(0).abs()
+
+    # 전체 최근순: 날짜 최신순 → 같은 날짜 안에서는 자금흐름 최신순 → 금액 큰 순.
+    out = out.sort_values(
+        ['_date_v5235','_event_order_v5235','_amount_v5235'],
+        ascending=[False, True, False],
+        kind='mergesort'
+    )
+    return out.drop(columns=['_flow_key_v5235','_source_rank_v5235','_date_v5235','_event_order_v5235','_amount_v5235'], errors='ignore').reset_index(drop=True)
+
+
+# 원본 거래이력까지 모두 살리기 위해, v5.23.4 래퍼가 아닌 그 이전 기본 생성 함수를 우선 사용합니다.
+def _v5235_build_full_movement_base(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        if '_자산이동목록통합_v5234_base' in globals() and callable(_자산이동목록통합_v5234_base):
+            return _자산이동목록통합_v5234_base(거래df, 비주식자산df, 최근일수=최근일수)
+    except Exception as e:
+        logging.warning('v5235 v5234 base movement failed: %s', e, exc_info=True)
+    try:
+        if '_자산이동목록통합_v52217_base' in globals() and callable(_자산이동목록통합_v52217_base):
+            return _자산이동목록통합_v52217_base(거래df, 비주식자산df, 최근일수=최근일수)
+    except Exception as e:
+        logging.warning('v5235 v52217 base movement failed: %s', e, exc_info=True)
+    try:
+        # 마지막 보루: 현재 함수가 래퍼여도 전체 거래 일부는 돌려줄 수 있으므로 사용합니다.
+        return 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=최근일수)
+    except Exception as e:
+        logging.warning('v5235 current movement failed: %s', e, exc_info=True)
+        return pd.DataFrame()
+
+
+# 최종 표시 함수 재연결: 전체 거래이력 복구 + 최근순 정렬 + 표시 개수 확대.
+try:
+    _최근자산변화표시_v5235_base = _최근자산변화표시_v5234_base if '_최근자산변화표시_v5234_base' in globals() else 최근자산변화표시_v5224
+except Exception:
+    _최근자산변화표시_v5235_base = 최근자산변화표시_v5224
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=50):
+    df = _v5235_merge_and_sort_ledger(이동df)
+    return _최근자산변화표시_v5235_base(df, 최대표시=max(최대표시, 50))
+
+
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=50):
+    이동df = _v5235_build_full_movement_base(거래df, 비주식자산df, 최근일수=90)
+    이동df = _v5235_merge_and_sort_ledger(이동df)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 50))
+
+# ============================================================
+# end v5.23.5 asset ledger recent-first full history patch
+# ============================================================
