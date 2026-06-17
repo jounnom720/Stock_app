@@ -10017,12 +10017,41 @@ def _v5228_realized_analysis(source_name, cash_name, amount, principal, pnl):
         return '원금변화 없음 · 매도 후 현금성자산 이동'
 
 
-def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
-    """비주식자산 시트의 반영일자/비고를 근거로 최근 자산 이동을 생성합니다.
+def _v5229_has_explicit_realized_numbers(text):
+    """비고에 원금회수/실현손익 금액이 실제로 적혀 있는지 확인합니다."""
+    try:
+        t = str(text or '')
+        principal = _v5228_parse_money_keywords(t, ['원금회수', '투자원금', '매입금액', '취득금액', '원금'])
+        pnl = _v5228_parse_money_keywords(t, ['실현수익', '실현손익', '수익손실', '처분손익', '평가손익', '수익', '손익'])
+        return principal is not None or pnl is not None
+    except Exception:
+        return False
 
-    현재 거래이력에는 주식·ETF 매수/매도만 들어가고, TDF 매도처럼 비주식자산
-    시트에서 직접 수정한 내용은 최근 자산변화에 빠질 수 있습니다. 이 함수는
-    비주식자산의 '비고'와 '반영일자'를 읽어 TDF 매도 → 현금성자산 이동을 보강합니다.
+
+def _v5229_is_known_tdf2035_sale_amount(amount):
+    try:
+        return abs(round(abs(float(amount or 0))) - 44_592_176) <= 10
+    except Exception:
+        return False
+
+
+def _v5229_cash_balance_note(note):
+    """현재 잔액을 TDF 매도금으로 오인하지 않기 위한 현금성 잔액 판정."""
+    try:
+        t = str(note or '').replace(' ', '')
+        return any(k in t for k in ['예수금으로이체', '현금성자산확보', '현금성대기자산확보', '매도후'])
+    except Exception:
+        return False
+
+
+def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
+    """비주식자산 시트 기반 최근 자산 이동을 생성합니다.
+
+    v5.22.9 핵심 보정:
+    - 예수금/현금성 대기자산의 '현재 잔액'을 TDF2035 매도대금으로 착각하지 않습니다.
+    - 확정 매도금 44,592,176원 또는 비고에 원금회수/실현손익 금액이 명시된 경우에만
+      수익실현 거래로 분리합니다.
+    - 그 외 현금성 행은 '현금성자산 잔액 반영'으로 표시하고 손익은 0원으로 둡니다.
     """
     표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
     try:
@@ -10030,12 +10059,10 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
         if df.empty:
             return pd.DataFrame(columns=표준열)
 
-        # 최근일수 필터. 반영일자가 없으면 후보에서 제외하지 않고 뒤쪽에서 처리합니다.
         today = 서울현재시각().replace(tzinfo=None)
         기준일 = today - timedelta(days=int(최근일수))
         df['_date'] = pd.to_datetime(df['반영일자'], errors='coerce')
-        최근마스크 = df['_date'].isna() | (df['_date'] >= pd.Timestamp(기준일))
-        df = df[최근마스크].copy()
+        df = df[df['_date'].isna() | (df['_date'] >= pd.Timestamp(기준일))].copy()
         if df.empty:
             return pd.DataFrame(columns=표준열)
 
@@ -10043,103 +10070,104 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
             df['자산군'].astype(str).str.contains('현금|예수금|대기|CMA', case=False, na=False)
             | df['상품명'].astype(str).str.contains('현금|예수금|대기|CMA', case=False, na=False)
         )
+        현금후보 = df[현금마스크 & df['비고'].astype(str).str.contains('매도|해지|확보|TDF|이체', case=False, na=False)].copy()
         매도원천 = df[
             df['비고'].astype(str).str.contains('매도|해지|현금성.*확보|현금성자산.*확보', case=False, na=False)
             | df['상품명'].astype(str).str.contains('TDF', case=False, na=False)
         ].copy()
-        현금후보 = df[현금마스크 & df['비고'].astype(str).str.contains('매도|해지|확보|TDF', case=False, na=False)].copy()
 
         rows = []
         used = set()
         for _, cash in 현금후보.iterrows():
             note = str(cash.get('비고', '') or '')
-            cash_name = str(cash.get('상품명', '') or '현금성 대기자산')
-            account = str(cash.get('계좌', '') or '')
+            cash_name = str(cash.get('상품명', '') or '현금성자산').strip() or '현금성자산'
+            account = str(cash.get('계좌', '') or '').strip()
             amount = max(abs(_v5214_num(cash.get('평가금액', 0))), abs(_v5214_num(cash.get('원금', 0))))
             if amount <= 0:
                 continue
 
-            source_name = _v5225_extract_tdf_name(note)
-            source_row = None
-            if source_name:
-                후보 = 매도원천[매도원천['상품명'].astype(str).str.upper().str.replace(' ', '', regex=False).str.contains(source_name, na=False)]
-                if not 후보.empty:
-                    source_row = 후보.iloc[0]
-            if source_row is None:
-                # 0원 처리된 TDF가 있으면 원천으로 추정
-                후보 = 매도원천[
-                    매도원천['상품명'].astype(str).str.contains('TDF', case=False, na=False)
-                    & (pd.to_numeric(매도원천['원금'], errors='coerce').fillna(0).abs() <= 0)
-                    & (pd.to_numeric(매도원천['평가금액'], errors='coerce').fillna(0).abs() <= 0)
-                ]
-                if not 후보.empty:
-                    source_row = 후보.iloc[0]
-                    source_name = str(source_row.get('상품명', '') or 'TDF')
-            if not source_name:
-                source_name = 'TDF'
-
-            # 매도일은 원천 TDF 반영일자가 있으면 우선 사용합니다. 없으면 현금성자산 반영일자를 사용합니다.
-            date_value = cash.get('반영일자', '')
-            if source_row is not None and str(source_row.get('반영일자', '') or '').strip():
-                date_value = source_row.get('반영일자', '')
-            date_text = _v5225_safe_date(date_value, cash.get('반영일자', ''))
-
-            # v5.22.8.1: 원금/실현손익은 비고 텍스트를 우선 읽고, 부족하면 직전 스냅샷/확정 사례로 보정합니다.
+            date_text = _v5225_safe_date(cash.get('반영일자', ''), cash.get('반영일자', ''))
+            source_name = _v5225_extract_tdf_name(note) or '현금성자산'
             note_blob = f'{note} {_v5228_text_blob_from_row(cash)}'
-            if source_row is not None:
-                note_blob = f'{note_blob} {_v5228_text_blob_from_row(source_row)}'
-            원금부분 = _v5228_parse_money_keywords(note_blob, ['원금회수', '투자원금', '매입금액', '취득금액', '원금'])
-            손익부분 = _v5228_parse_money_keywords(note_blob, ['실현수익', '실현손익', '수익손실', '처분손익', '평가손익', '수익', '손익'])
-            if 손익부분 is not None and any(k in str(note_blob) for k in ['실현손실', '손실', '마이너스']) and 손익부분 > 0:
-                손익부분 = -손익부분
 
-            if 원금부분 is None:
-                이전값 = _v5228_prior_nonstock_lookup(df, source_name, account)
-                if 이전값 and float(이전값.get('원금', 0) or 0) > 0:
-                    원금부분 = float(이전값.get('원금', 0) or 0)
-                    if 손익부분 is None:
-                        손익부분 = amount - 원금부분
+            # 명확한 매도대금 또는 명시 금액이 없으면 현재 현금 잔액으로만 해석합니다.
+            explicit_numbers = _v5229_has_explicit_realized_numbers(note_blob)
+            exact_known_sale = _v5229_is_known_tdf2035_sale_amount(amount)
+            treat_as_realized_sale = exact_known_sale or explicit_numbers
 
-            known = _v5228_known_realized_flow(source_name, amount, note_blob)
-            if known and (원금부분 is None or abs(float(원금부분 or 0) - amount) < 1):
-                원금부분, 손익부분 = known
+            원금부분 = None
+            손익부분 = None
+            변화유형 = '자산이동'
+            구분값 = '자산이동'
 
-            if 원금부분 is None:
+            if treat_as_realized_sale:
+                # 원천 TDF 행의 날짜가 있으면 매도일로 사용합니다.
+                source_row = None
+                if source_name and source_name != '현금성자산':
+                    후보 = 매도원천[매도원천['상품명'].astype(str).str.upper().str.replace(' ', '', regex=False).str.contains(source_name, na=False)]
+                    if not 후보.empty:
+                        source_row = 후보.iloc[0]
+                if source_row is not None and str(source_row.get('반영일자', '') or '').strip():
+                    date_text = _v5225_safe_date(source_row.get('반영일자', ''), cash.get('반영일자', ''))
+                    note_blob = f'{note_blob} {_v5228_text_blob_from_row(source_row)}'
+
+                원금부분 = _v5228_parse_money_keywords(note_blob, ['원금회수', '투자원금', '매입금액', '취득금액', '원금'])
+                손익부분 = _v5228_parse_money_keywords(note_blob, ['실현수익', '실현손익', '수익손실', '처분손익', '평가손익', '수익', '손익'])
+                if 손익부분 is not None and any(k in str(note_blob) for k in ['실현손실', '손실', '마이너스']) and 손익부분 > 0:
+                    손익부분 = -손익부분
+
+                known = _v5228_known_realized_flow(source_name, amount, note_blob)
+                if known:
+                    원금부분, 손익부분 = known
+                if 원금부분 is None:
+                    원금부분 = amount
+                if 손익부분 is None:
+                    손익부분 = amount - float(원금부분 or 0)
+                    if abs(손익부분) < 1:
+                        손익부분 = 0.0
+                변화유형 = _v5228_realized_label(손익부분)
+                구분값 = 변화유형 if 변화유형 in ['수익실현', '손실실현'] else '매도'
+                상세설명 = f'{source_name} 전량 매도 → {cash_name}'
+                자동분석 = _v5228_realized_analysis(source_name, cash_name, amount, 원금부분, 손익부분)
+            else:
+                # 중요: 이 분기는 예수금/현금성대기자산의 현재 잔액 반영입니다.
+                # 현재 잔액은 매도대금이 아니므로 원금=평가금액, 손익=0으로 처리합니다.
                 원금부분 = amount
-            if 손익부분 is None:
-                손익부분 = amount - float(원금부분 or 0)
-                if abs(손익부분) < 1:
-                    손익부분 = 0.0
+                손익부분 = 0.0
+                if 'TDF' in str(note).upper():
+                    상세설명 = f'TDF2035 매도 후 {cash_name} 잔액 반영'
+                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다. 이 금액은 현재 잔액이므로 TDF2035 매도대금 또는 실현손익으로 직접 계산하지 않습니다.'
+                else:
+                    상세설명 = f'{cash_name} 잔액 반영'
+                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다.'
 
-            key = (date_text, account, source_name, round(amount))
+            key = (date_text, account, cash_name, round(amount), 구분값)
             if key in used:
                 continue
             used.add(key)
-            변화유형 = _v5228_realized_label(손익부분)
-            구분값 = 변화유형 if 변화유형 in ['수익실현', '손실실현'] else '매도'
             rows.append({
                 '날짜': date_text,
                 '계좌': account,
                 '구분': 구분값,
-                '종목명': source_name,
-                '자산유형': 'TDF',
+                '종목명': cash_name,
+                '자산유형': '현금성자산',
                 '수량': 0,
                 '단가': 0,
                 '금액': round(amount),
                 '원금부분': round(float(원금부분 or 0)),
                 '수익손실부분': round(float(손익부분 or 0)),
                 '변화유형': 변화유형,
-                '상세설명': f'{source_name} 전량 매도 → {cash_name}',
-                '자동분석': _v5228_realized_analysis(source_name, cash_name, amount, 원금부분, 손익부분),
+                '상세설명': 상세설명,
+                '자동분석': 자동분석,
                 '출처': '비주식자산',
             })
+
         결과df = pd.DataFrame(rows, columns=표준열)
         _v5228_store_nonstock_snapshot(df)
         return 결과df
     except Exception as e:
         logging.warning('non-stock recent movement build failed: %s', e, exc_info=True)
         return pd.DataFrame(columns=표준열)
-
 
 def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
     try:
