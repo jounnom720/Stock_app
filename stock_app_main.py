@@ -16617,9 +16617,47 @@ def _v52222_merge_forced_cashflow(df):
     rank_map = {'강제복구_v52222':0, '현금흐름강제복구':1, '현금흐름복구':2, '현금흐름복원':3, '비주식자산변동이력':4}
     out['_rank_v52222'] = out['출처'].astype(str).map(lambda x: rank_map.get(x, 9))
     out['_date_v52222'] = pd.to_datetime(out['날짜'], errors='coerce')
-    out = out.sort_values(['_date_v52222','_rank_v52222','금액'], ascending=[False, True, False])
+
+    # v5.23.1: 같은 날짜 안의 자산원장 흐름 순서를 금액순이 아니라 사건 순서로 고정합니다.
+    # 2026-06-17 사례는 반드시
+    # ① TDF2035 매도대금 → 미래에셋 예수금 이체
+    # ② 예수금 → 한화오션 주식 매수
+    # ③ 한화오션 매수 후 예수금 잔액
+    # 순서로 보여야 자금의 원천과 사용, 남은 대기자금이 자연스럽게 연결됩니다.
+    def _ledger_event_order_v5231(row):
+        try:
+            desc = str(row.get('상세설명', '') or '')
+            typ = str(row.get('구분', '') or '')
+            amt = _v52222_norm_money(row.get('금액', 0))
+            if 'TDF2035 매도대금' in desc and '예수금' in desc:
+                return 10
+            if '한화오션' in desc and '매수' in desc:
+                return 20
+            if '한화오션 매수 후' in desc and '예수금' in desc:
+                return 30
+            if '현금성 대기자산 잔액' in desc:
+                return 40
+            if typ == '수익실현':
+                return 50
+            if typ == '자금이체':
+                return 60
+            if typ == '매수':
+                return 70
+            if typ == '매도':
+                return 80
+            if typ == '현금대기':
+                return 90
+            return 100
+        except Exception:
+            return 100
+
+    out['_event_order_v5231'] = out.apply(_ledger_event_order_v5231, axis=1)
+    out = out.sort_values(
+        ['_date_v52222', '_event_order_v5231', '_rank_v52222', '금액'],
+        ascending=[False, True, True, False]
+    )
     out = out.drop_duplicates('_key_v52222', keep='first')
-    return out.drop(columns=['_key_v52222','_rank_v52222','_date_v52222'], errors='ignore').reset_index(drop=True)
+    return out.drop(columns=['_key_v52222','_rank_v52222','_date_v52222','_event_order_v5231'], errors='ignore').reset_index(drop=True)
 
 
 # 통합 목록 생성 경로 보정
@@ -16661,3 +16699,9 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
     이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
     return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
+
+
+# ============================================================
+# v5.23.1 자산원장 동일날짜 표시순서 보정
+# ============================================================
+APP_VERSION = "v5.23.1-asset-ledger-event-order-fix"
