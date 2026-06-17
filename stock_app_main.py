@@ -6679,6 +6679,11 @@ def 보유포트폴리오필터(df):
     결과 = 결과[결과["보유수량"] > 0].copy()
     if 결과.empty:
         return 결과
+    try:
+        if "보유포트폴리오정렬_v52215" in globals():
+            return 보유포트폴리오정렬_v52215(결과).reset_index(drop=True)
+    except Exception as e:
+        logging.warning("holding sort v52215 fallback: %s", e, exc_info=True)
     if "평가금액" in 결과.columns:
         결과 = 결과.sort_values(["평가금액", "종목명"], ascending=[False, True])
     else:
@@ -13392,6 +13397,442 @@ def 시세관련캐시초기화():
 
 
 
+
+
+# ============================================================
+# v5.22.14 cash-buy deduction integrity patch
+# 목적
+# - 예수금/현금성 대기자산은 현재 잔액 기준으로 관리합니다.
+# - 주식 매수를 거래이력에 반영했는데 비주식자산의 예수금 잔액이 매수 전 금액으로 남아 있으면
+#   통합자산 원금이 매수금액만큼 중복 증가합니다.
+# - 비고에 "예수금 계좌에서 ○○ 주식 매수"처럼 명확히 적힌 경우에만 같은 날짜 거래이력 매수금액을
+#   예수금 현재 잔액에서 자동 차감하여 저장/계산합니다.
+# - Google Sheets 저장 시 원 단위 금액이 111.0처럼 보이지 않도록 정수 문자열로 저장합니다.
+# ============================================================
+
+_CASH_BUY_DEDUCTION_MARK_V52214 = "매수금액 차감반영"
+
+
+def _v52214_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        try:
+            if pd.isna(value):
+                return default
+        except Exception:
+            pass
+        s = str(value).strip()
+        if s in ["", "nan", "NaT", "None", "<NA>"]:
+            return default
+        s = s.replace(",", "").replace("원", "").replace("₩", "").replace("%", "").replace(" ", "")
+        if s in ["", "-", "+"]:
+            return default
+        return float(s)
+    except Exception:
+        return default
+
+
+def _v52214_money_str(value):
+    try:
+        v = _v52214_num(value, 0.0)
+        if abs(v - round(v)) < 1e-6:
+            return str(int(round(v)))
+        return str(v)
+    except Exception:
+        return "0"
+
+
+def _v52214_date_str(value):
+    try:
+        return 날짜값_YYYYMMDD문자열(value)
+    except Exception:
+        return str(value or "")[:10]
+
+
+def _v52214_account_match(cash_account, trade_account):
+    ca = str(cash_account or "").replace(" ", "")
+    ta = str(trade_account or "").replace(" ", "")
+    if not ca or not ta:
+        return True
+    aliases = {
+        "미래에셋/증권계좌": ["미래에셋", "미래에셋증권", "증권계좌"],
+        "미래에셋증권": ["미래에셋", "미래에셋/증권계좌", "증권계좌"],
+        "신한은행IRP": ["신한IRP", "신한은행", "IRP"],
+        "신한은행 IRP": ["신한IRP", "신한은행", "IRP"],
+    }
+    if ca in ta or ta in ca:
+        return True
+    for k, vals in aliases.items():
+        kk = k.replace(" ", "")
+        if ca == kk or kk in ca:
+            return any(v.replace(" ", "") in ta for v in vals)
+    return False
+
+
+def _v52214_trade_buy_rows_for_cash_note(거래df, cash_row):
+    """현금성자산 행의 비고와 같은 날짜·계좌·종목으로 보이는 매수 거래를 찾습니다."""
+    try:
+        t = pd.DataFrame() if 거래df is None else pd.DataFrame(거래df).copy()
+        if t.empty:
+            return pd.DataFrame()
+        note = str(cash_row.get("비고", "") or "")
+        if not ("매수" in note and any(x in note for x in ["예수금", "현금", "대기자산", "계좌"])):
+            return pd.DataFrame()
+        if _CASH_BUY_DEDUCTION_MARK_V52214 in note or "차감완료" in note or "매수 후 잔액" in note:
+            return pd.DataFrame()
+
+        date_col = _v5214_first_col(t, ["거래일자", "거래일", "날짜", "일자"])
+        type_col = _v5214_first_col(t, ["거래구분", "구분", "매매구분"])
+        qty_col = _v5214_first_col(t, ["거래수량", "수량", "체결수량"])
+        price_col = _v5214_first_col(t, ["거래단가", "단가", "체결단가", "가격"])
+        amount_col = _v5214_first_col(t, ["거래금액", "금액", "체결금액", "매수금액"])
+        name_col = _v5214_first_col(t, ["종목명", "상품명", "자산명", "name"])
+        acct_col = _v5214_first_col(t, ["계좌", "계좌명", "증권사", "운용사", "증권계좌", "금융기관"])
+        if not date_col or not type_col:
+            return pd.DataFrame()
+
+        t[date_col] = pd.to_datetime(t[date_col], errors="coerce")
+        row_date = pd.to_datetime(cash_row.get("반영일자", ""), errors="coerce")
+        t = t[t[type_col].astype(str).str.contains("매수", na=False)].copy()
+        if pd.notna(row_date):
+            t = t[t[date_col].dt.strftime("%Y-%m-%d") == row_date.strftime("%Y-%m-%d")].copy()
+        if t.empty:
+            return t
+
+        cash_account = str(cash_row.get("계좌", "") or "")
+        if acct_col:
+            t = t[t[acct_col].apply(lambda x: _v52214_account_match(cash_account, x))].copy()
+        if t.empty:
+            return t
+
+        # 비고에 종목명이 들어 있으면 그 종목만 차감합니다. 없으면 같은 날짜·계좌의 매수 전체를 후보로 봅니다.
+        if name_col:
+            name_mask = t[name_col].astype(str).apply(lambda x: str(x).strip() and str(x).strip() in note)
+            if name_mask.any():
+                t = t[name_mask].copy()
+
+        def _amount(r):
+            if amount_col and _v52214_num(r.get(amount_col, 0)) != 0:
+                return abs(_v52214_num(r.get(amount_col, 0)))
+            q = _v52214_num(r.get(qty_col, 0)) if qty_col else 0
+            p = _v52214_num(r.get(price_col, 0)) if price_col else 0
+            return abs(q * p)
+        t["_v52214_buy_amount"] = t.apply(_amount, axis=1)
+        t = t[t["_v52214_buy_amount"] > 0].copy()
+        return t
+    except Exception as e:
+        logging.warning("cash note matching buy rows failed: %s", e, exc_info=True)
+        return pd.DataFrame()
+
+
+def _v52214_apply_cash_buy_deduction(irp_df, 거래df=None, 화면표시=False):
+    """비고에 명시된 예수금 사용 매수금액을 현금성자산 현재 잔액에서 차감합니다."""
+    try:
+        작업 = IRP비주식자산표준열맞추기(irp_df).copy()
+        if 작업.empty:
+            return 작업
+        if 거래df is None:
+            try:
+                거래df = 현재거래이력가져오기()
+            except Exception:
+                거래df = pd.DataFrame()
+        조정메모 = []
+        for idx, row in 작업.iterrows():
+            자산텍스트 = f"{row.get('자산군','')} {row.get('상품명','')} {row.get('비고','')}"
+            if not any(k in 자산텍스트 for k in ["예수금", "현금성", "현금", "대기자산"]):
+                continue
+            후보 = _v52214_trade_buy_rows_for_cash_note(거래df, row)
+            if 후보.empty:
+                continue
+            buy_amount = float(후보["_v52214_buy_amount"].sum())
+            현재잔액 = max(_v52214_num(row.get("평가금액", 0)), _v52214_num(row.get("원금", 0)))
+            if buy_amount <= 0 or 현재잔액 < buy_amount:
+                continue
+            조정후 = 현재잔액 - buy_amount
+            작업.at[idx, "원금"] = 조정후
+            작업.at[idx, "평가금액"] = 조정후
+            기존비고 = str(작업.at[idx, "비고"] or "").strip()
+            추가비고 = f"{_CASH_BUY_DEDUCTION_MARK_V52214} {원화정수포맷(buy_amount)}"
+            if 추가비고 not in 기존비고:
+                작업.at[idx, "비고"] = (기존비고 + " · " + 추가비고).strip(" ·")
+            종목명목록 = []
+            name_col = _v5214_first_col(후보, ["종목명", "상품명", "자산명", "name"])
+            if name_col:
+                종목명목록 = [x for x in 후보[name_col].astype(str).dropna().unique().tolist() if x]
+            조정메모.append(f"{row.get('상품명','현금성자산')} {원화정수포맷(현재잔액)} → {원화정수포맷(조정후)} ({', '.join(종목명목록) or '매수'} {원화정수포맷(buy_amount)} 차감)")
+        if 화면표시 and 조정메모:
+            st.info("현금성자산 현재잔액 보정: " + " / ".join(조정메모))
+        return 작업.reset_index(drop=True)
+    except Exception as e:
+        logging.warning("cash buy deduction apply failed: %s", e, exc_info=True)
+        return IRP비주식자산표준열맞추기(irp_df)
+
+
+# 기존 요약 함수 보정: 통합자산 계산 단계에서 매수금액 중복을 방지합니다.
+_IRP비주식자산요약행생성_v52214_base = IRP비주식자산요약행생성
+
+def IRP비주식자산요약행생성(irp_df):
+    try:
+        조정df = _v52214_apply_cash_buy_deduction(irp_df, 거래df=None, 화면표시=False)
+        return _IRP비주식자산요약행생성_v52214_base(조정df)
+    except Exception as e:
+        logging.warning("non-stock summary cash-buy correction failed: %s", e, exc_info=True)
+        return _IRP비주식자산요약행생성_v52214_base(irp_df)
+
+
+# 기존 저장 함수 보정: Google Sheets에 저장될 때도 현재 잔액과 정수 표시를 함께 정리합니다.
+def IRP비주식자산저장(df):
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨:
+        return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
+
+    try:
+        try:
+            거래df = 현재거래이력가져오기()
+        except Exception:
+            거래df = pd.DataFrame()
+        작업 = IRP비주식자산표준열맞추기(df)
+        # v5.22.15: 시스템 직접 입력/수정 저장 시 사용자가 입력한 현재 잔액을 그대로 저장합니다.
+        # 예수금 비고의 "주식 매수" 문구만으로 자동 차감하면 이미 차감 입력된 잔액이 다시 줄어드는 중복 차감 오류가 발생합니다.
+        # 중복 여부는 통합 계산/점검에서 안내하되, 저장 단계에서는 원본 입력값을 훼손하지 않습니다.
+        표준열 = ["계좌", "자산군", "상품명", "원금", "평가금액", "예상연수익률", "만기일", "반영일자", "비고"]
+        작업 = 작업[표준열].copy()
+
+        for 열 in ["계좌", "자산군", "상품명", "만기일", "반영일자", "비고"]:
+            작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
+            작업[열] = 작업[열].replace({"nan": "", "NaT": "", "None": "", "<NA>": ""})
+        for 열 in ["만기일", "반영일자"]:
+            작업[열] = 작업[열].apply(_v52214_date_str)
+        for 열 in ["원금", "평가금액", "예상연수익률"]:
+            작업[열] = 작업[열].apply(_v52214_num)
+
+        작업 = 작업[
+            (작업["계좌"].astype(str).str.strip() != "")
+            | (작업["자산군"].astype(str).str.strip() != "")
+            | (작업["상품명"].astype(str).str.strip() != "")
+            | (작업["원금"].abs() > 0)
+            | (작업["평가금액"].abs() > 0)
+            | (작업["비고"].astype(str).str.strip() != "")
+        ].copy()
+
+        try:
+            구버전기준일 = 작업["반영일자"].astype(str).str.contains("2026-04-30", na=False).sum()
+            구버전금액패턴 = 작업["평가금액"].astype(float).isin([51873538, 31443846, 27499444, 5030813, 17188280]).sum()
+            if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
+                return False, "저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다."
+        except Exception as e:
+            logging.warning("non-stock legacy sample guard skipped: %s", e, exc_info=True)
+
+        spreadsheet, 연결정보 = 구글시트문서연결()
+        if spreadsheet is None:
+            return False, f"Google Sheets 미연결: {연결정보.get('메시지', '')}"
+
+        ws = 구글시트워크시트확보(
+            spreadsheet,
+            GOOGLE_SHEETS_NON_STOCK_SHEET,
+            rows=max(100, len(작업) + 20),
+            cols=len(표준열) + 2,
+        )
+
+        저장작업 = 작업.copy()
+        for 열 in ["원금", "평가금액"]:
+            저장작업[열] = 저장작업[열].apply(_v52214_money_str)
+        저장작업["예상연수익률"] = 저장작업["예상연수익률"].apply(lambda v: f"{_v52214_num(v):.2f}")
+        저장작업 = 저장작업.replace({pd.NA: "", np.nan: "", None: ""}).fillna("")
+        저장값 = [표준열] + 저장작업[표준열].astype(str).values.tolist()
+
+        try:
+            자동백업저장(비주식_df=작업)
+        except Exception as e:
+            logging.warning("non-stock pre-save backup failed: %s", e, exc_info=True)
+
+        ws.clear()
+        구글시트워크시트포맷적용(ws, 저장작업)
+        # RAW + 정수 문자열 저장으로 111.0 표시를 방지합니다.
+        ws.update("A1", 저장값, value_input_option="RAW")
+
+        st.session_state["irp_non_stock_assets_df_v512"] = 작업.copy()
+        st.session_state["irp_non_stock_assets_last_saved_rows_v5221"] = len(작업)
+        st.session_state["irp_non_stock_assets_last_saved_at_v5221"] = 서울현재시각ISO()
+        try:
+            구글시트데이터프레임읽기.clear()
+        except Exception as e:
+            logging.warning("non-stock read cache clear failed: %s", e, exc_info=True)
+        return True, f"비주식자산 Google Sheets 저장 완료: {len(작업)}행"
+    except Exception as e:
+        logging.exception("IRP비주식자산저장 실패")
+        return False, f"비주식자산 저장 오류: {type(e).__name__}: {e}"
+
+
+
+
+# ============================================================
+# v5.22.15 direct-edit + display-order integrity patch
+# 목적
+# 1) 시스템 직접 입력/수정 시 예수금 현재 잔액을 자동 차감해 Google Sheets에 덮어쓰는 오류를 막습니다.
+# 2) 보유자산 표시 순서를 ETF → 주식종목(투자원금 내림차순) → TDF → 현금성자산으로 통일합니다.
+# 3) Google Sheets 저장 금액은 원 단위 정수 문자열로 저장해 111.0 같은 소수 표시를 방지합니다.
+# ============================================================
+
+ETF_CODE_ORDER_V52215 = {"069500": 10, "102110": 20, "0148J0": 30}
+ETF_NAME_ORDER_V52215 = {
+    "KODEX200": 10, "KODEX 200": 10,
+    "TIGER200": 20, "TIGER 200": 20,
+    "TIGER코리아휴머노이드로봇산업": 30, "TIGER 코리아휴머노이드로봇산업": 30, "휴머노이드": 30,
+}
+
+
+def _v52215_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _v52215_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        try:
+            if pd.isna(value):
+                return default
+        except Exception:
+            pass
+        s = str(value).replace(',', '').replace('원', '').replace('₩', '').replace('%', '').strip()
+        if s == '' or s.lower() in ['nan', 'none', 'nat', '<na>']:
+            return default
+        return float(s)
+    except Exception:
+        return default
+
+
+def _v52215_asset_identity(row):
+    try:
+        if not hasattr(row, 'get'):
+            return '', str(row or '')
+        code = row.get('종목코드', row.get('코드', row.get('ticker', row.get('symbol', ''))))
+        name = row.get('종목명', row.get('상품명', row.get('자산명', row.get('보유종목', ''))))
+        code = normalize_asset_code_v518(code, name) if 'normalize_asset_code_v518' in globals() else _v52215_text(code)
+        name = _v52215_text(name)
+        return _v52215_text(code), name
+    except Exception:
+        return '', ''
+
+
+def _v52215_invest_amount(row):
+    if not hasattr(row, 'get'):
+        return 0.0
+    for col in ['투자원금', '원금', '매입금액', '매수금액', '평가금액', '평가액']:
+        if col in row:
+            val = _v52215_num(row.get(col), 0.0)
+            if val != 0:
+                return val
+    return 0.0
+
+
+def _v52215_is_etf(code, name, group=''):
+    compact = f"{code} {name} {group}".upper().replace(' ', '')
+    if code in ETF_CODE_ORDER_V52215:
+        return True
+    if any(k.upper().replace(' ', '') in compact for k in ETF_NAME_ORDER_V52215):
+        return True
+    try:
+        return asset_kind_v518(code, name) == 'ETF'
+    except Exception:
+        return False
+
+
+def _v52215_asset_kind(row):
+    try:
+        code, name = _v52215_asset_identity(row)
+        group = _v52215_text(row.get('자산군', '')) if hasattr(row, 'get') else ''
+        text = f"{code} {name} {group}".upper().replace(' ', '')
+        if _v52215_is_etf(code, name, group):
+            return 'ETF'
+        if 'TDF' in text or 'TARGETDATE' in text or '타겟데이트' in text:
+            return 'TDF'
+        if any(x in text for x in ['예수금', '현금성자산', '현금성', '현금대기', '대기자산', 'CMA', 'MMF']):
+            return '현금성자산'
+        # 통합자산 상세표에서는 자산군이 주식형자산이면 ETF를 제외하고 개별주로 봅니다.
+        if '주식형자산' in group or '주식' in group:
+            return '주식'
+        if code and code.isdigit() and len(code) == 6:
+            return '주식'
+        try:
+            if asset_kind_v518(code, name) == '주식':
+                return '주식'
+        except Exception:
+            pass
+        return '기타'
+    except Exception:
+        return '기타'
+
+
+def 자산공통정렬키_v52215(row):
+    """ETF → 주식종목(투자원금 내림차순) → TDF → 현금성자산."""
+    try:
+        code, name = _v52215_asset_identity(row)
+        group = _v52215_text(row.get('자산군', '')) if hasattr(row, 'get') else ''
+        kind = _v52215_asset_kind(row)
+        amount = _v52215_invest_amount(row)
+        compact = f"{code} {name}".upper().replace(' ', '')
+        if kind == 'ETF':
+            rank = ETF_CODE_ORDER_V52215.get(code, 90)
+            for k, v in ETF_NAME_ORDER_V52215.items():
+                if k.upper().replace(' ', '') in compact:
+                    rank = min(rank, v)
+            return (1, rank, -amount, name)
+        if kind == '주식':
+            return (2, 0, -amount, name)
+        if kind == 'TDF':
+            return (3, 0, -amount, name)
+        if kind == '현금성자산':
+            cash_order = 1 if '예수' in compact else 2 if ('대기' in compact or '현금성' in compact) else 3
+            return (4, cash_order, -amount, name)
+        return (9, 0, -amount, name)
+    except Exception:
+        return (99, 0, 0, '')
+
+
+def 자산표공통정렬_v52215(df):
+    try:
+        작업 = pd.DataFrame(df).copy()
+        if 작업.empty:
+            return 작업
+        작업['_sort_key_v52215'] = 작업.apply(자산공통정렬키_v52215, axis=1)
+        작업 = 작업.sort_values('_sort_key_v52215', kind='mergesort').drop(columns=['_sort_key_v52215'])
+        return 작업.reset_index(drop=True)
+    except Exception as e:
+        logging.warning('asset common sort v52215 failed: %s', e, exc_info=True)
+        return df
+
+
+# 기존 호출 호환: 통합자산 상세표와 자산군 표시에 모두 새 정렬 기준을 적용합니다.
+자산공통정렬키_v5224 = 자산공통정렬키_v52215
+자산공통정렬키_v5223 = 자산공통정렬키_v52215
+자산표공통정렬_v5224 = 자산표공통정렬_v52215
+자산표공통정렬_v5223 = 자산표공통정렬_v52215
+
+
+def 보유포트폴리오정렬_v52215(df):
+    """포트폴리오 현황의 보유종목도 동일한 순서로 표시합니다."""
+    try:
+        작업 = pd.DataFrame(df).copy()
+        if 작업.empty:
+            return 작업
+        if '자산군' not in 작업.columns:
+            작업['자산군'] = 작업.apply(
+                lambda r: 'ETF' if _v52215_is_etf(_v52215_text(r.get('종목코드', '')), _v52215_text(r.get('종목명', ''))) else '주식형자산',
+                axis=1,
+            )
+        return 자산표공통정렬_v52215(작업)
+    except Exception as e:
+        logging.warning('portfolio holding sort v52215 failed: %s', e, exc_info=True)
+        return df
+
 # ============================================================
 # v5.19.2 포트폴리오 핵심상태 메인 UI 통합
 # 목적:
@@ -14116,6 +14557,10 @@ if 선택섹터 == "포트폴리오 현황":
         포트폴리오표시 = 표시대상포트폴리오[["종목코드", "종목명", "최초매수일자", "최근거래일자", "총매수수량", "총매도수량", "보유수량", "매입평균단가", "현재가", "투자원금", "평가금액", "평가손익", "실현손익", "수익률", "현재비중", "과잉매도수량", "데이터상태"]].copy()
         포트폴리오표시 = 포트폴리오표시.rename(columns={"매입평균단가": "매입 평균단가", "총매수수량": "총 매수수량", "총매도수량": "총 매도수량", "최초매수일자": "최초 매수일자", "최근거래일자": "최근 거래일자", "과잉매도수량": "과잉 매도수량"})
         포트폴리오표시 = 포트폴리오표_컬럼선택(포트폴리오표시)
+        try:
+            포트폴리오표시 = 보유포트폴리오정렬_v52215(포트폴리오표시)
+        except Exception as e:
+            logging.warning("portfolio display sort v52215 skipped: %s", e, exc_info=True)
         포트폴리오표시 = index_1부터(포트폴리오표시)
 
         if 모바일여부():
