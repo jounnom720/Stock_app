@@ -16791,3 +16791,152 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
     이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
     이동df = _v5232_resort_asset_ledger(이동df)
     return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
+# ============================================================
+# v5.23.3 TDF2035 자금흐름 지정 순서 고정
+# 사용자 지정 순서:
+# 1) 2026-06-16 TDF2035 전량 매도
+# 2) 2026-06-17 TDF2035 매도대금 → 미래에셋 예수금 이체
+# 3) 2026-06-17 TDF2035 매도 후 신한IRP 현금성 대기자산 잔액
+# 4) 2026-06-17 한화오션 매수 후 미래에셋 예수금 잔액
+# ============================================================
+APP_VERSION = "v5.23.3-tdf-cashflow-exact-order"
+
+
+def _v5233_text(value):
+    try:
+        if value is None:
+            return ""
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _v5233_money(value):
+    try:
+        if '_v52222_norm_money' in globals():
+            return _v52222_norm_money(value)
+        if value is None:
+            return 0
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').strip()
+            if value == '':
+                return 0
+        return int(round(float(value)))
+    except Exception:
+        return 0
+
+
+def _v5233_date_value(value):
+    try:
+        if '_v52222_norm_date' in globals():
+            value = _v52222_norm_date(value)
+        return pd.to_datetime(value, errors='coerce')
+    except Exception:
+        return pd.NaT
+
+
+def _v5233_tdf_flow_exact_order(row):
+    """TDF2035 매도 이후 자금흐름은 날짜 역순/금액순이 아니라 사용자가 지정한 원장 순서로 고정합니다."""
+    try:
+        desc = _v5233_text(row.get('상세설명', ''))
+        typ = _v5233_text(row.get('구분', ''))
+        acct = _v5233_text(row.get('계좌', ''))
+        name = _v5233_text(row.get('종목명', ''))
+        auto = _v5233_text(row.get('자동분석', ''))
+        merged = f"{desc} {typ} {acct} {name} {auto}"
+        amt = _v5233_money(row.get('금액', 0))
+
+        # 1. 2026-06-16 TDF2035 전량 매도
+        if 'TDF2035' in merged and ('전량 매도' in merged or '전량매도' in merged or typ == '수익실현') and amt == 44592176:
+            return 10
+
+        # 2. 2026-06-17 TDF2035 매도대금 → 미래에셋 예수금 이체
+        if 'TDF2035 매도대금' in merged and '예수금' in merged and ('이체' in merged or typ == '자금이체'):
+            return 20
+        if amt == 49244653 and '예수금' in merged and ('이체' in merged or '보관' in merged):
+            return 20
+
+        # 3. 2026-06-17 TDF2035 매도 후 신한IRP 현금성 대기자산 잔액
+        if 'TDF2035 매도 후' in merged and '현금성 대기자산' in merged and ('잔액' in merged or typ == '현금대기'):
+            return 30
+        if amt == 20728 and ('현금성 대기자산' in merged or '신한' in acct or 'IRP' in acct):
+            return 30
+
+        # 4. 2026-06-17 한화오션 매수 후 미래에셋 예수금 잔액
+        if '한화오션 매수 후' in merged and '예수금' in merged and ('잔액' in merged or typ == '현금대기'):
+            return 40
+        if amt == 35892653 and '예수금' in merged:
+            return 40
+
+        # 실제 한화오션 매수 거래는 지정 원장 블록 다음에 둡니다.
+        if ('한화오션' in merged and '매수' in merged) or (amt == 13350000 and '미래' in acct):
+            return 50
+
+        return 1000
+    except Exception:
+        return 1000
+
+
+def _v5233_resort_asset_ledger(df):
+    try:
+        out = pd.DataFrame(df).copy()
+        if out.empty or '날짜' not in out.columns:
+            return out
+        out['_exact_order_v5233'] = out.apply(_v5233_tdf_flow_exact_order, axis=1)
+        out['_is_forced_block_v5233'] = (out['_exact_order_v5233'] < 1000).astype(int)
+        out['_date_v5233'] = out['날짜'].apply(_v5233_date_value)
+        out['_amount_v5233'] = pd.to_numeric(out.get('금액', 0), errors='coerce').fillna(0).abs()
+
+        # 지정 자금흐름 블록은 1→4 순서로 먼저 표시하고,
+        # 나머지 일반 거래는 기존 최근순으로 표시합니다.
+        out = out.sort_values(
+            ['_is_forced_block_v5233', '_exact_order_v5233', '_date_v5233', '_amount_v5233'],
+            ascending=[False, True, False, False],
+            kind='mergesort'
+        )
+        return out.drop(columns=['_exact_order_v5233','_is_forced_block_v5233','_date_v5233','_amount_v5233'], errors='ignore').reset_index(drop=True)
+    except Exception as e:
+        logging.warning('v5233 exact flow order failed: %s', e, exc_info=True)
+        return df
+
+
+# 병합 직후와 화면 표시 직전, 두 위치 모두에 정렬을 적용합니다.
+try:
+    _v52222_merge_forced_cashflow_v5233_base = _v52222_merge_forced_cashflow
+    def _v52222_merge_forced_cashflow(df):
+        return _v5233_resort_asset_ledger(_v52222_merge_forced_cashflow_v5233_base(df))
+except Exception as e:
+    logging.warning('v5233 merge hook failed: %s', e, exc_info=True)
+
+try:
+    _최근자산변화표시_v5224_v5233_base = 최근자산변화표시_v5224
+    def 최근자산변화표시_v5224(이동df, 최대표시=12):
+        return _최근자산변화표시_v5224_v5233_base(_v5233_resort_asset_ledger(이동df), 최대표시=최대표시)
+except Exception as e:
+    logging.warning('v5233 display hook failed: %s', e, exc_info=True)
+
+try:
+    _최근자산변화표시_v5226_v5233_base = 최근자산변화표시_v5226
+    def 최근자산변화표시_v5226(이동df, 최대표시=12):
+        return _최근자산변화표시_v5226_v5233_base(_v5233_resort_asset_ledger(이동df), 최대표시=최대표시)
+except Exception as e:
+    logging.warning('v5233 display v5226 hook failed: %s', e, exc_info=True)
+
+try:
+    최근자산변화표시_v5223 = 최근자산변화표시_v5224
+except Exception:
+    pass
+
+try:
+    def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+        이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+        이동df = _v5233_resort_asset_ledger(이동df)
+        return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+except Exception as e:
+    logging.warning('v5233 card display hook failed: %s', e, exc_info=True)
+
+# ============================================================
+# end v5.23.3 exact TDF cashflow order patch
+# ============================================================
