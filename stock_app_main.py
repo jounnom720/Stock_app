@@ -15119,3 +15119,329 @@ st.markdown(
     ''',
     unsafe_allow_html=True,
 )
+
+
+# ============================================================
+# v5.22.18 현금성 자산 거래흐름 복원·누락 방지 패치
+# - Google Sheets를 직접 수정한 경우에도 비주식자산 현재값의 변화가 누락되지 않도록
+#   세션의 직전 상태와 현재 상태를 비교해 비주식자산변동이력에 자동 누적합니다.
+# - 미래에셋 예수금 → 한화오션 매수 흐름은 현재 예수금 잔액과 거래이력을 연결해
+#   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
+# - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
+# ============================================================
+APP_VERSION = "v5.22.18-cash-flow-history-recovery"
+
+try:
+    _v52218_prev_date_str = _v52217_date_str
+except Exception:
+    _v52218_prev_date_str = None
+
+
+def _v52218_date_str(value):
+    """Google Sheets 날짜, 문자열 날짜, 엑셀/시트 일련번호를 모두 YYYY-MM-DD로 정규화합니다."""
+    try:
+        if value is None:
+            return ""
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            if 30000 <= float(value) <= 70000:
+                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(int(round(float(value))), unit="D")).strftime("%Y-%m-%d")
+        s = str(value).strip()
+        if s == "" or s.lower() in ["nan", "none", "nat", "<na>"]:
+            return ""
+        # 숫자 문자열 날짜 일련번호 보정
+        if re.fullmatch(r"\d+(\.0+)?", s):
+            n = float(s)
+            if 30000 <= n <= 70000:
+                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(int(round(n)), unit="D")).strftime("%Y-%m-%d")
+        ts = pd.to_datetime(s, errors="coerce")
+        if pd.notna(ts):
+            return ts.strftime("%Y-%m-%d")
+        return s[:10]
+    except Exception:
+        try:
+            return _v52218_prev_date_str(value) if _v52218_prev_date_str else ""
+        except Exception:
+            return ""
+
+# 기존 날짜 정규화 함수를 교체합니다.
+_v52217_date_str = _v52218_date_str
+
+
+def _v52218_norm_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _v52218_nonstock_df(df):
+    try:
+        out = IRP비주식자산표준열맞추기(df).copy()
+    except Exception:
+        out = pd.DataFrame()
+    if out.empty:
+        return out
+    for c in ["원금", "평가금액"]:
+        if c in out.columns:
+            out[c] = out[c].apply(_v52217_money_int)
+    for c in ["반영일자", "만기일"]:
+        if c in out.columns:
+            out[c] = out[c].apply(_v52218_date_str)
+    for c in ["계좌", "자산군", "상품명", "비고"]:
+        if c in out.columns:
+            out[c] = out[c].apply(_v52218_norm_text)
+    return out
+
+
+def _v52218_nonstock_state_signature(df):
+    try:
+        작업 = _v52218_nonstock_df(df)
+        if 작업.empty:
+            return ""
+        cols = [c for c in ["계좌", "자산군", "상품명", "원금", "평가금액", "반영일자", "비고"] if c in 작업.columns]
+        작업 = 작업[cols].sort_values(["계좌", "자산군", "상품명"], kind="mergesort").reset_index(drop=True)
+        return 작업.astype(str).to_json(orient="records", force_ascii=False)
+    except Exception:
+        return ""
+
+
+def _v52218_append_nonstock_history_from_state_change(현재df):
+    """앱 저장 버튼을 누르지 않고 Google Sheets에서 직접 수정한 변화도 세션 기준으로 포착합니다."""
+    try:
+        현재 = _v52218_nonstock_df(현재df)
+        if 현재.empty:
+            return False
+        sig = _v52218_nonstock_state_signature(현재)
+        prev_sig = st.session_state.get("nonstock_state_signature_v52218", "")
+        prev_df = st.session_state.get("nonstock_state_df_v52218")
+        # 최초 로딩은 기준값만 저장합니다. 이후 새로고침부터 변화 이력을 누적합니다.
+        if not prev_sig or prev_df is None:
+            st.session_state["nonstock_state_signature_v52218"] = sig
+            st.session_state["nonstock_state_df_v52218"] = 현재.copy()
+            return False
+        if sig == prev_sig:
+            return False
+        신규 = 비주식자산변동행생성_v52217(prev_df, 현재)
+        if 신규 is not None and not 신규.empty:
+            기존 = 비주식자산변동이력읽기_v52217()
+            합본 = pd.concat([기존, 신규], ignore_index=True, sort=False)
+            합본["_dedup"] = 합본.apply(lambda r: "|".join(str(r.get(c, "")) for c in ["반영일자", "변화유형", "계좌", "자산군", "상품명", "이전원금", "현재원금", "이전평가금액", "현재평가금액", "비고"]), axis=1)
+            합본 = 합본.drop_duplicates("_dedup", keep="last").drop(columns=["_dedup"])
+            비주식자산변동이력저장_v52217(합본)
+        st.session_state["nonstock_state_signature_v52218"] = sig
+        st.session_state["nonstock_state_df_v52218"] = 현재.copy()
+        return True
+    except Exception as e:
+        logging.warning("v52218 nonstock state history append failed: %s", e, exc_info=True)
+        return False
+
+
+def _v52218_trade_date(row):
+    for c in ["날짜", "거래일자", "매수일", "매도일", "체결일", "일자"]:
+        if hasattr(row, "get") and c in row:
+            d = _v52218_date_str(row.get(c, ""))
+            if d:
+                return d
+    return ""
+
+
+def _v52218_trade_amount(row):
+    # 거래금액성 컬럼을 우선 사용하고, 없으면 수량*단가를 사용합니다.
+    for c in ["금액", "거래금액", "매수금액", "매입금액", "체결금액", "투자원금"]:
+        if hasattr(row, "get") and c in row:
+            v = _v52217_money_int(row.get(c, 0))
+            if v:
+                return abs(v)
+    qty = 0; price = 0
+    for c in ["수량", "매수수량", "체결수량", "보유수량"]:
+        if hasattr(row, "get") and c in row:
+            qty = _v52217_money_int(row.get(c, 0)); break
+    for c in ["단가", "매수가", "체결가", "현재가"]:
+        if hasattr(row, "get") and c in row:
+            price = _v52217_money_int(row.get(c, 0)); break
+    return abs(qty * price)
+
+
+def _v52218_is_buy_trade(row):
+    text = " ".join(_v52218_norm_text(row.get(c, "")) for c in ["구분", "거래구분", "매매구분", "비고", "메모", "종목명", "상품명"] if hasattr(row, "get"))
+    return "매수" in text
+
+
+def _v52218_trade_name(row):
+    for c in ["종목명", "상품명", "자산명", "보유종목", "name", "Name"]:
+        if hasattr(row, "get") and c in row:
+            s = _v52218_norm_text(row.get(c, ""))
+            if s:
+                return s
+    return ""
+
+
+def _v52218_trade_account(row):
+    for c in ["계좌", "계좌명", "증권사", "보관기관"]:
+        if hasattr(row, "get") and c in row:
+            s = _v52218_norm_text(row.get(c, ""))
+            if s:
+                return s
+    return ""
+
+
+def _v52218_recent_buy_rows(거래df, 계좌힌트="", 날짜힌트=""):
+    rows = []
+    try:
+        df = pd.DataFrame(거래df).copy()
+        if df.empty:
+            return rows
+        for _, r in df.iterrows():
+            if not _v52218_is_buy_trade(r):
+                continue
+            name = _v52218_trade_name(r)
+            amount = _v52218_trade_amount(r)
+            if amount <= 0:
+                continue
+            d = _v52218_trade_date(r)
+            acct = _v52218_trade_account(r)
+            if 날짜힌트 and d and d != 날짜힌트:
+                continue
+            if 계좌힌트 and acct and ("미래에셋" in 계좌힌트) and ("미래" not in acct and "미래에셋" not in acct):
+                continue
+            rows.append({"날짜": d or 날짜힌트, "계좌": acct or 계좌힌트, "종목명": name, "금액": amount})
+    except Exception as e:
+        logging.warning("v52218 recent buy rows failed: %s", e, exc_info=True)
+    return rows
+
+
+def _v52218_cash_flow_recovery_movements(거래df=None, 비주식자산df=None):
+    """현재 비주식자산과 거래이력을 연결해 누락되기 쉬운 예수금 흐름을 보강합니다."""
+    표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
+    rows = []
+    try:
+        ns = _v52218_nonstock_df(비주식자산df)
+        if ns.empty:
+            return pd.DataFrame(columns=표준열)
+        for _, r in ns.iterrows():
+            계좌 = _v52218_norm_text(r.get("계좌", ""))
+            자산군 = _v52218_norm_text(r.get("자산군", ""))
+            상품명 = _v52218_norm_text(r.get("상품명", ""))
+            비고 = _v52218_norm_text(r.get("비고", ""))
+            날짜 = _v52218_date_str(r.get("반영일자", ""))
+            현재금액 = _v52217_money_int(r.get("평가금액", r.get("원금", 0)))
+            if 현재금액 <= 0:
+                continue
+            text = f"{계좌} {자산군} {상품명} {비고}"
+            # 현재 예수금 잔액이 주식 매수 후 잔액인 경우: 매수 전 예수금 보관금액을 복원 표시합니다.
+            if "예수금" in text and "한화오션" in text and "매수" in text:
+                buys = [b for b in _v52218_recent_buy_rows(거래df, 계좌힌트=계좌, 날짜힌트=날짜) if "한화오션" in str(b.get("종목명", ""))]
+                buy_sum = sum(int(b.get("금액", 0) or 0) for b in buys)
+                # 수수료·제세금 등으로 거래원금과 예수금 차감액이 1~수천 원 차이 날 수 있어
+                # 현재 잔액 + 매수원금은 '매수 전 예수금 최소 추정액'으로만 사용합니다.
+                before_cash = 현재금액 + buy_sum if buy_sum > 0 else 현재금액
+                rows.append({'날짜':날짜,'계좌':계좌,'구분':'자금이체','종목명':상품명,'자산유형':'현금성자산','수량':0,'단가':0,'금액':before_cash,'원금부분':before_cash,'수익손실부분':0,'변화유형':'자금이체','상세설명':'TDF2035 매도대금 → 미래에셋 예수금 이체','자동분석':f'한화오션 매수 전 예수금 보관액을 현재 예수금 {원화정수포맷(현재금액)} + 확인된 한화오션 매수원금 {원화정수포맷(buy_sum)} 기준으로 복원 표시합니다. 실제 수수료·세금 차이는 비고로 별도 확인합니다.','출처':'현금흐름복원'})
+                for b in buys:
+                    amt = int(b.get("금액", 0) or 0)
+                    rows.append({'날짜':날짜,'계좌':계좌,'구분':'매수','종목명':b.get('종목명','한화오션'),'자산유형':'주식형자산','수량':0,'단가':0,'금액':amt,'원금부분':amt,'수익손실부분':0,'변화유형':'매수','상세설명':f"예수금 → {b.get('종목명','한화오션')} 주식 매수",'자동분석':f'미래에셋 예수금에서 {b.get("종목명","한화오션")} 매수금액 {원화정수포맷(amt)}이 주식형자산으로 이동했습니다.','출처':'현금흐름복원'})
+                rows.append({'날짜':날짜,'계좌':계좌,'구분':'현금대기','종목명':상품명,'자산유형':'현금성자산','수량':0,'단가':0,'금액':현재금액,'원금부분':현재금액,'수익손실부분':0,'변화유형':'현금대기','상세설명':'한화오션 매수 후 예수금 잔액','자동분석':f'한화오션 매수 후 남은 예수금 {원화정수포맷(현재금액)}은 재투자 대기자금입니다.','출처':'현금흐름복원'})
+            elif "현금성" in text and "대기" in text and 현재금액 > 0:
+                rows.append({'날짜':날짜,'계좌':계좌,'구분':'현금대기','종목명':상품명,'자산유형':'현금성자산','수량':0,'단가':0,'금액':현재금액,'원금부분':현재금액,'수익손실부분':0,'변화유형':'현금대기','상세설명':'TDF2035 매도 후 현금성 대기자산 잔액','자동분석':f'현금성 대기자산 잔액 {원화정수포맷(현재금액)}은 매도대금이나 실현손익으로 중복 계산하지 않는 대기자금입니다.','출처':'현금흐름복원'})
+    except Exception as e:
+        logging.warning("v52218 cash flow recovery movement failed: %s", e, exc_info=True)
+    return pd.DataFrame(rows, columns=표준열)
+
+
+# v5.22.18: 비주식자산 변동이력 변환을 더 자연스러운 용어로 보정합니다.
+def _v52217_history_to_asset_movements(hist_df, 최근일수=90):
+    표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
+    try:
+        hist = 비주식자산변동이력표준화_v52217(hist_df)
+        if hist.empty:
+            return pd.DataFrame(columns=표준열)
+        today = 서울현재시각().replace(tzinfo=None) if '서울현재시각' in globals() else datetime.now()
+        기준일 = today - timedelta(days=int(최근일수))
+        hist['반영일자'] = hist['반영일자'].apply(_v52218_date_str)
+        hist['_date'] = pd.to_datetime(hist['반영일자'], errors='coerce')
+        hist = hist[hist['_date'].isna() | (hist['_date'] >= pd.Timestamp(기준일))].copy()
+        rows=[]
+        for _, r in hist.iterrows():
+            typ=str(r.get('변화유형','') or '')
+            상품명=str(r.get('상품명','') or '')
+            계좌=str(r.get('계좌','') or '')
+            note=str(r.get('비고','') or '')
+            amount_delta=_v52217_money_int(r.get('평가금액변화',0))
+            current_amt=_v52217_money_int(r.get('현재평가금액',0))
+            amount = abs(amount_delta) if amount_delta != 0 and typ in ['현금사용','현금증가','잔액감소','잔액변경'] else abs(current_amt)
+            if amount<=0:
+                continue
+            if typ=='현금사용':
+                구분='현금사용'; detail='예수금 → 한화오션 주식 매수' if '한화오션' in note else f'{상품명} 사용'
+            elif typ in ['예수금이체', '현금증가'] and ('예수금' in 상품명 or '미래에셋' in 계좌):
+                구분='자금이체'; detail=f'TDF2035 매도대금 → {상품명} 이체' if 'TDF' in note.upper() else f'{상품명} 이체/보관'
+            elif typ=='현금대기' or ('현금성' in 상품명 and '대기' in 상품명):
+                구분='현금대기'; detail=f'{상품명} 잔액'
+            elif typ=='해지/매도반영':
+                구분='매도반영'; detail=f'{상품명} 매도/해지 반영'
+            else:
+                구분=typ or '잔액변경'; detail=f'{상품명} {구분}'
+            rows.append({'날짜':str(r.get('반영일자','') or ''),'계좌':계좌,'구분':구분,'종목명':상품명,'자산유형':str(r.get('자산군','') or '현금성자산'),'수량':0,'단가':0,'금액':amount,'원금부분':amount,'수익손실부분':0,'변화유형':구분,'상세설명':detail,'자동분석':str(r.get('자동분석','') or ''),'출처':'비주식자산변동이력'})
+        return pd.DataFrame(rows, columns=표준열)
+    except Exception as e:
+        logging.warning('v52218 history to movement failed: %s', e, exc_info=True)
+        return pd.DataFrame(columns=표준열)
+
+
+try:
+    _자산이동목록통합_v52218_base = _자산이동목록통합_v52217_base
+except Exception:
+    _자산이동목록통합_v52218_base = 자산이동목록통합_v5225
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        if 비주식자산df is not None:
+            _v52218_append_nonstock_history_from_state_change(비주식자산df)
+    except Exception:
+        pass
+    try:
+        base = _자산이동목록통합_v52218_base(거래df, 비주식자산df, 최근일수=최근일수)
+    except Exception:
+        base = pd.DataFrame()
+    try:
+        hist_mov = _v52217_history_to_asset_movements(비주식자산변동이력읽기_v52217(), 최근일수=최근일수)
+    except Exception:
+        hist_mov = pd.DataFrame()
+    try:
+        recovery = _v52218_cash_flow_recovery_movements(거래df, 비주식자산df)
+    except Exception:
+        recovery = pd.DataFrame()
+    통합 = pd.concat([base, hist_mov, recovery], ignore_index=True, sort=False)
+    if 통합.empty:
+        return 통합
+    for c in ['날짜','계좌','상세설명','금액','구분','출처']:
+        if c not in 통합.columns:
+            통합[c] = '' if c!='금액' else 0
+    통합['날짜'] = 통합['날짜'].apply(_v52218_date_str)
+    통합['금액'] = pd.to_numeric(통합['금액'], errors='coerce').fillna(0)
+    # 잔액 확인성 행은 KPI 이동금액을 부풀리지 않도록 표시에는 남기되 중복 행을 정리합니다.
+    통합['_date_sort']=pd.to_datetime(통합['날짜'], errors='coerce')
+    rank_map = {'비주식자산변동이력':0, '현금흐름복원':1}
+    통합['_src_rank']=통합.get('출처','').astype(str).map(lambda x:rank_map.get(x,2))
+    통합['_key']=통합.apply(lambda r:(str(r.get('날짜','')),str(r.get('계좌','')),str(r.get('구분','')),str(r.get('상세설명','')),round(float(r.get('금액',0) or 0))),axis=1)
+    통합 = 통합.sort_values(['_date_sort','_src_rank','금액'], ascending=[False,True,False]).drop_duplicates('_key',keep='first')
+    return 통합.drop(columns=['_date_sort','_src_rank','_key'],errors='ignore').reset_index(drop=True)
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df=자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
+# v5.22.18: 비주식자산 저장 시 날짜 일련번호 복원과 원 단위 정수 저장을 재보장합니다.
+_IRP비주식자산저장_v52218_base = IRP비주식자산저장
+
+def IRP비주식자산저장(df):
+    try:
+        작업 = _v52218_nonstock_df(df)
+        return _IRP비주식자산저장_v52218_base(작업)
+    except Exception as e:
+        logging.warning('v52218 save wrapper fallback: %s', e, exc_info=True)
+        return _IRP비주식자산저장_v52218_base(df)
