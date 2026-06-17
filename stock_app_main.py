@@ -10507,6 +10507,251 @@ def 자산변화로그최근거래저장(거래df, 통합자산표=None):
         logging.warning('recent asset movement log save failed: %s', e, exc_info=True)
         return False, f'자산변화로그 저장 오류: {type(e).__name__}: {e}', 0
 
+
+
+# ============================================================
+# v5.23.4 TDF2035 자금흐름 표시순서 실제 적용 패치
+# 중요: 이 패치는 자산변동추이UI가 최근자산변화카드표시를 호출하기 전에 위치해야 합니다.
+# 사용자 지정 표시 순서:
+# 1) 2026-06-16 TDF2035 전량 매도
+# 2) 2026-06-17 TDF2035 매도대금 → 미래에셋 예수금 이체
+# 3) 2026-06-17 TDF2035 매도 후 신한IRP 현금성 대기자산 잔액
+# 4) 2026-06-17 한화오션 매수 후 미래에셋 예수금 잔액
+# ============================================================
+APP_VERSION = "v5.23.4-tdf-flow-user-order-fixed"
+
+
+def _v5234_text(value):
+    try:
+        if value is None:
+            return ""
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _v5234_money(value):
+    try:
+        if value is None:
+            return 0
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return 0
+        return int(round(float(value)))
+    except Exception:
+        return 0
+
+
+def _v5234_norm_date(value):
+    """Google Sheets 일련번호, Timestamp, 문자열 날짜를 YYYY-MM-DD로 통일합니다."""
+    try:
+        if value is None or str(value).strip() == '':
+            return ''
+        if isinstance(value, (int, float)) and value > 20000:
+            return (pd.Timestamp('1899-12-30') + pd.to_timedelta(int(value), unit='D')).strftime('%Y-%m-%d')
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+        return str(value).strip()
+    except Exception:
+        return str(value or '').strip()
+
+
+def _v5234_forced_tdf_rows():
+    """누락되면 안 되는 TDF2035 자금흐름 4개 행을 명시적으로 구성합니다."""
+    return [
+        {
+            '날짜': '2026-06-16',
+            '계좌': '신한은행 IRP',
+            '구분': '수익실현',
+            '종목명': 'TDF2035',
+            '자산유형': 'TDF',
+            '수량': 0,
+            '단가': 0,
+            '금액': 44592176,
+            '이동금액': 44592176,
+            '원금부분': 40901249,
+            '수익손실부분': 3690927,
+            '변화유형': '수익실현',
+            '상세설명': 'TDF2035 전량 매도',
+            '자동분석': 'TDF2035 전량매도로 원금 40,901,249원을 회수하고 실현수익 3,690,927원을 확정했습니다. 총 회수금액은 44,592,176원입니다.',
+            '출처': '사용자지정복구_v5234',
+        },
+        {
+            '날짜': '2026-06-17',
+            '계좌': '신한IRP → 미래에셋',
+            '구분': '자금이체',
+            '종목명': '예수금',
+            '자산유형': '현금성자산',
+            '수량': 0,
+            '단가': 0,
+            '금액': 49244653,
+            '이동금액': 49244653,
+            '원금부분': 49244653,
+            '수익손실부분': 0,
+            '변화유형': '자금이체',
+            '상세설명': 'TDF2035 매도대금 → 미래에셋 예수금 이체',
+            '자동분석': 'TDF2035 매도 후 현금성 대기자산에 보관된 자금을 미래에셋증권 계좌 예수금으로 이체한 흐름입니다. 현재 잔액과 별도 이력으로 보존합니다.',
+            '출처': '사용자지정복구_v5234',
+        },
+        {
+            '날짜': '2026-06-17',
+            '계좌': '신한IRP',
+            '구분': '현금대기',
+            '종목명': '현금성 대기자산',
+            '자산유형': '현금성자산',
+            '수량': 0,
+            '단가': 0,
+            '금액': 20728,
+            '이동금액': 20728,
+            '원금부분': 20728,
+            '수익손실부분': 0,
+            '변화유형': '현금대기',
+            '상세설명': 'TDF2035 매도 후 신한IRP 현금성 대기자산 잔액',
+            '자동분석': '신한은행 IRP에 남아 있는 현금성 대기자산 잔액입니다. 매도대금·계좌이체액·실현손익으로 중복 계산하지 않습니다.',
+            '출처': '사용자지정복구_v5234',
+        },
+        {
+            '날짜': '2026-06-17',
+            '계좌': '미래에셋',
+            '구분': '현금대기',
+            '종목명': '예수금',
+            '자산유형': '현금성자산',
+            '수량': 0,
+            '단가': 0,
+            '금액': 35892653,
+            '이동금액': 35892653,
+            '원금부분': 35892653,
+            '수익손실부분': 0,
+            '변화유형': '현금대기',
+            '상세설명': '한화오션 매수 후 미래에셋 예수금 잔액',
+            '자동분석': '49,244,653원 이체 후 한화오션 매수 13,350,000원을 반영한 미래에셋 예수금 잔액입니다. 매수금액이나 실현손익으로 중복 계산하지 않습니다.',
+            '출처': '사용자지정복구_v5234',
+        },
+    ]
+
+
+def _v5234_flow_key(row):
+    desc = _v5234_text(row.get('상세설명', ''))
+    typ = _v5234_text(row.get('구분', ''))
+    acct = _v5234_text(row.get('계좌', ''))
+    name = _v5234_text(row.get('종목명', ''))
+    merged = f"{desc} {typ} {acct} {name}"
+    amt = _v5234_money(row.get('금액', 0))
+
+    if 'TDF2035' in merged and ('전량 매도' in merged or '전량매도' in merged or typ == '수익실현') and abs(amt - 44592176) <= 10:
+        return '01_TDF2035_SELL_44592176'
+    if 'TDF2035 매도대금' in merged and '예수금' in merged and ('이체' in merged or typ == '자금이체'):
+        return '02_TDF2035_TO_MIRAE_49244653'
+    if abs(amt - 49244653) <= 10 and '예수금' in merged and ('이체' in merged or '보관' in merged):
+        return '02_TDF2035_TO_MIRAE_49244653'
+    if 'TDF2035 매도 후' in merged and '현금성 대기자산' in merged and ('잔액' in merged or typ == '현금대기'):
+        return '03_IRP_CASH_REMAIN_20728'
+    if abs(amt - 20728) <= 10 and ('현금성 대기자산' in merged or '신한' in acct or 'IRP' in acct):
+        return '03_IRP_CASH_REMAIN_20728'
+    if '한화오션 매수 후' in merged and '예수금' in merged and ('잔액' in merged or typ == '현금대기'):
+        return '04_MIRAE_CASH_AFTER_HANWHA_35892653'
+    if abs(amt - 35892653) <= 10 and '예수금' in merged:
+        return '04_MIRAE_CASH_AFTER_HANWHA_35892653'
+    return '|'.join([_v5234_norm_date(row.get('날짜','')), acct, typ, desc, str(amt)])
+
+
+def _v5234_user_order(row):
+    key = _v5234_flow_key(row)
+    if key.startswith('01_'):
+        return 10
+    if key.startswith('02_'):
+        return 20
+    if key.startswith('03_'):
+        return 30
+    if key.startswith('04_'):
+        return 40
+
+    desc = _v5234_text(row.get('상세설명', ''))
+    typ = _v5234_text(row.get('구분', ''))
+    name = _v5234_text(row.get('종목명', ''))
+    merged = f"{desc} {typ} {name}"
+    amt = _v5234_money(row.get('금액', 0))
+
+    # 실제 한화오션 매수 거래는 사용자가 지정한 4개 자금흐름 다음에 둡니다.
+    if ('한화오션' in merged and '매수' in merged) or abs(amt - 13350000) <= 10:
+        return 50
+    return 1000
+
+
+def _v5234_merge_and_sort_ledger(df):
+    try:
+        base = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    except Exception:
+        base = pd.DataFrame()
+    forced = pd.DataFrame(_v5234_forced_tdf_rows())
+    out = pd.concat([base, forced], ignore_index=True, sort=False)
+    if out.empty:
+        return out
+
+    for col in ['날짜','계좌','구분','종목명','자산유형','상세설명','자동분석','변화유형','출처']:
+        if col not in out.columns:
+            out[col] = ''
+    for col in ['금액','이동금액','원금부분','수익손실부분','수량','단가']:
+        if col not in out.columns:
+            out[col] = 0
+        out[col] = pd.to_numeric(out[col], errors='coerce').fillna(0)
+
+    out['날짜'] = out['날짜'].apply(_v5234_norm_date)
+    out['_flow_key_v5234'] = out.apply(_v5234_flow_key, axis=1)
+    # 같은 흐름이 중복되면 사용자지정복구 행을 우선 보존합니다.
+    out['_source_rank_v5234'] = out['출처'].astype(str).apply(lambda x: 0 if '사용자지정복구_v5234' in x else 5)
+    out = out.sort_values(['_flow_key_v5234','_source_rank_v5234'], ascending=[True, True], kind='mergesort')
+    out = out.drop_duplicates('_flow_key_v5234', keep='first')
+
+    out['_user_order_v5234'] = out.apply(_v5234_user_order, axis=1)
+    out['_date_v5234'] = pd.to_datetime(out['날짜'], errors='coerce')
+    out['_amount_v5234'] = pd.to_numeric(out['금액'], errors='coerce').fillna(0).abs()
+    out['_is_user_flow_v5234'] = (out['_user_order_v5234'] < 1000).astype(int)
+
+    # 사용자 지정 4개 흐름은 반드시 1→2→3→4 순서로 최상단 표시.
+    # 나머지 거래는 그 아래에서 날짜 최신순·금액 큰 순으로 표시.
+    out = out.sort_values(
+        ['_is_user_flow_v5234','_user_order_v5234','_date_v5234','_amount_v5234'],
+        ascending=[False, True, False, False],
+        kind='mergesort'
+    )
+    return out.drop(columns=['_flow_key_v5234','_source_rank_v5234','_user_order_v5234','_date_v5234','_amount_v5234','_is_user_flow_v5234'], errors='ignore').reset_index(drop=True)
+
+
+# 기존 최근자산변화 생성 경로를 실제 UI 호출 전에 재연결합니다.
+try:
+    _자산이동목록통합_v5234_base = 자산이동목록통합_v5225
+    def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+        try:
+            base = _자산이동목록통합_v5234_base(거래df, 비주식자산df, 최근일수=최근일수)
+        except Exception as e:
+            logging.warning('v5234 base movement failed: %s', e, exc_info=True)
+            base = pd.DataFrame()
+        return _v5234_merge_and_sort_ledger(base)
+except Exception as e:
+    logging.warning('v5234 movement hook failed: %s', e, exc_info=True)
+
+try:
+    _최근자산변화표시_v5234_base = 최근자산변화표시_v5224
+    def 최근자산변화표시_v5224(이동df, 최대표시=12):
+        return _최근자산변화표시_v5234_base(_v5234_merge_and_sort_ledger(이동df), 최대표시=max(최대표시, 12))
+    최근자산변화표시_v5223 = 최근자산변화표시_v5224
+    최근자산변화표시_v5226 = 최근자산변화표시_v5224
+except Exception as e:
+    logging.warning('v5234 display hook failed: %s', e, exc_info=True)
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=12):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    이동df = _v5234_merge_and_sort_ledger(이동df)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 12))
+
+# ============================================================
+# end v5.23.4 TDF2035 자금흐름 표시순서 실제 적용 패치
+# ============================================================
+
 def 자산변동추이UI(거래df, 계산포트폴리오, 통합자산표=None, 비주식자산df=None):
     """포트폴리오 자산 변동 추이 — 스냅샷 + 시각화"""
     st.markdown("### 📈 자산 변동 추이")
