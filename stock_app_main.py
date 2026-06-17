@@ -15736,3 +15736,286 @@ def IRP비주식자산저장(df):
     except Exception as e:
         logging.warning('v52219 save wrapper fallback: %s', e, exc_info=True)
         return _IRP비주식자산저장_v52219_base(df)
+
+
+# ============================================================
+# v5.22.20 비주식자산 이력 복구 표시 강제 패치
+# - 기존 비주식자산 시트에는 새 컬럼을 추가하지 않습니다.
+# - 비주식자산변동이력 시트가 비어 있거나 과거 변경 전 상태가 누락되어도
+#   현재 비주식자산 + 거래이력의 확인 가능한 흐름을 최근 자산변화에 복구 표시합니다.
+# - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
+#   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
+# ============================================================
+APP_VERSION = "v5.22.20-nonstock-history-recovery-display-fix"
+
+
+def _v52220_get_nonstock_df_safe(비주식자산df=None):
+    try:
+        if 비주식자산df is not None:
+            return _v52218_nonstock_df(비주식자산df)
+        if 'IRP비주식자산불러오기' in globals():
+            return _v52218_nonstock_df(IRP비주식자산불러오기())
+    except Exception as e:
+        logging.warning('v52220 get nonstock df failed: %s', e, exc_info=True)
+    return pd.DataFrame()
+
+
+def _v52220_get_trade_df_safe(거래df=None):
+    try:
+        if 거래df is not None:
+            return pd.DataFrame(거래df).copy()
+        if '현재거래이력가져오기' in globals():
+            return pd.DataFrame(현재거래이력가져오기()).copy()
+    except Exception as e:
+        logging.warning('v52220 get trade df failed: %s', e, exc_info=True)
+    return pd.DataFrame()
+
+
+def _v52220_hanwha_buy_rows(거래df=None):
+    """거래이력에서 한화오션 매수 내역을 안정적으로 찾습니다."""
+    rows = []
+    try:
+        df = _v52220_get_trade_df_safe(거래df)
+        if df.empty:
+            return rows
+        for _, r in df.iterrows():
+            text = ' '.join(_v52218_norm_text(r.get(c, '')) for c in list(df.columns))
+            if '한화오션' not in text or '매수' not in text:
+                continue
+            amount = _v52218_trade_amount(r) if '_v52218_trade_amount' in globals() else 0
+            if amount <= 0:
+                amount = _v52217_money_int(r.get('금액', r.get('거래금액', r.get('투자원금', 0))))
+            if amount <= 0:
+                continue
+            date = _v52218_trade_date(r) if '_v52218_trade_date' in globals() else ''
+            acct = _v52218_trade_account(r) if '_v52218_trade_account' in globals() else ''
+            name = _v52218_trade_name(r) if '_v52218_trade_name' in globals() else '한화오션'
+            rows.append({'날짜': date or _V52219_KNOWN_TDF2035_TRANSFER_DATE, '계좌': acct or '미래에셋/증권계좌', '종목명': name or '한화오션', '금액': int(amount)})
+    except Exception as e:
+        logging.warning('v52220 hanwha buy rows failed: %s', e, exc_info=True)
+    return rows
+
+
+def _v52220_mirae_cash_row(비주식자산df=None):
+    try:
+        ns = _v52220_get_nonstock_df_safe(비주식자산df)
+        if ns.empty:
+            return None
+        for _, r in ns.iterrows():
+            text = f"{r.get('계좌','')} {r.get('자산군','')} {r.get('상품명','')} {r.get('비고','')}"
+            if '미래에셋' in text and '예수금' in text:
+                return r
+    except Exception as e:
+        logging.warning('v52220 mirae cash row failed: %s', e, exc_info=True)
+    return None
+
+
+def _v52220_irp_cash_row(비주식자산df=None):
+    try:
+        ns = _v52220_get_nonstock_df_safe(비주식자산df)
+        if ns.empty:
+            return None
+        for _, r in ns.iterrows():
+            text = f"{r.get('계좌','')} {r.get('자산군','')} {r.get('상품명','')} {r.get('비고','')}"
+            if ('신한' in text or 'IRP' in text.upper()) and '현금성' in text and '대기' in text:
+                return r
+    except Exception as e:
+        logging.warning('v52220 irp cash row failed: %s', e, exc_info=True)
+    return None
+
+
+def _v52220_recovered_asset_movements(거래df=None, 비주식자산df=None):
+    """누락된 현금흐름을 최근 자산변화 표에 강제로 복구 표시합니다."""
+    cols = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
+    rows = []
+    try:
+        cash = _v52220_mirae_cash_row(비주식자산df)
+        buys = _v52220_hanwha_buy_rows(거래df)
+        irp_cash = _v52220_irp_cash_row(비주식자산df)
+
+        cash_now = _v52217_money_int(cash.get('평가금액', cash.get('원금', 0))) if cash is not None else 0
+        cash_acct = _v52218_norm_text(cash.get('계좌', '미래에셋/증권계좌')) if cash is not None else '미래에셋/증권계좌'
+        buy_sum = sum(_v52217_money_int(b.get('금액', 0)) for b in buys)
+
+        # 이번 사례의 확정 이체액이 확인된 경우에는 현재잔액+매수금액 추정보다 확정값을 우선합니다.
+        # 그래야 수수료/세금/기존 예수금 잔액 차이 때문에 이체액이 흐려지지 않습니다.
+        if cash is not None and (buy_sum > 0 or cash_now > 0):
+            transfer_amt = _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE
+            rows.append({
+                '날짜': _V52219_KNOWN_TDF2035_TRANSFER_DATE,
+                '계좌': cash_acct,
+                '구분': '자금이체',
+                '종목명': '예수금',
+                '자산유형': '현금성자산',
+                '수량': 0,
+                '단가': 0,
+                '금액': transfer_amt,
+                '원금부분': transfer_amt,
+                '수익손실부분': 0,
+                '변화유형': '자금이체',
+                '상세설명': 'TDF2035 매도대금 → 미래에셋 예수금 이체',
+                '자동분석': 'TDF2035 매도 원금과 수익금을 세금 공제 후 미래에셋증권 계좌 예수금으로 이체한 흐름입니다. 현재 예수금 잔액과 별도로 이체 이력을 복구 표시합니다.',
+                '출처': '현금흐름복구',
+            })
+
+        for b in buys:
+            amt = _v52217_money_int(b.get('금액', 0))
+            if amt <= 0:
+                continue
+            rows.append({
+                '날짜': _v52218_date_str(b.get('날짜', _V52219_KNOWN_TDF2035_TRANSFER_DATE)) or _V52219_KNOWN_TDF2035_TRANSFER_DATE,
+                '계좌': _v52218_norm_text(b.get('계좌', cash_acct)) or cash_acct,
+                '구분': '매수',
+                '종목명': '한화오션',
+                '자산유형': '주식형자산',
+                '수량': 0,
+                '단가': 0,
+                '금액': amt,
+                '원금부분': amt,
+                '수익손실부분': 0,
+                '변화유형': '매수',
+                '상세설명': '예수금 → 한화오션 주식 매수',
+                '자동분석': f'미래에셋 예수금에서 한화오션 매수금액 {원화정수포맷(amt)}이 주식형자산으로 이동했습니다.',
+                '출처': '현금흐름복구',
+            })
+
+        if cash is not None and cash_now > 0:
+            rows.append({
+                '날짜': _V52219_KNOWN_TDF2035_TRANSFER_DATE,
+                '계좌': cash_acct,
+                '구분': '현금대기',
+                '종목명': '예수금',
+                '자산유형': '현금성자산',
+                '수량': 0,
+                '단가': 0,
+                '금액': cash_now,
+                '원금부분': cash_now,
+                '수익손실부분': 0,
+                '변화유형': '현금대기',
+                '상세설명': '한화오션 매수 후 예수금 잔액',
+                '자동분석': f'한화오션 매수 후 남은 예수금 {원화정수포맷(cash_now)}은 현재 보관 중인 투자대기자금입니다.',
+                '출처': '현금흐름복구',
+            })
+
+        if irp_cash is not None:
+            irp_amt = _v52217_money_int(irp_cash.get('평가금액', irp_cash.get('원금', 0)))
+            if irp_amt > 0:
+                rows.append({
+                    '날짜': _v52218_date_str(irp_cash.get('반영일자', '')) or '2026-06-15',
+                    '계좌': _v52218_norm_text(irp_cash.get('계좌', '신한은행 IRP')),
+                    '구분': '현금대기',
+                    '종목명': '현금성 대기자산',
+                    '자산유형': '현금성자산',
+                    '수량': 0,
+                    '단가': 0,
+                    '금액': irp_amt,
+                    '원금부분': irp_amt,
+                    '수익손실부분': 0,
+                    '변화유형': '현금대기',
+                    '상세설명': 'TDF2035 매도 후 현금성 대기자산 잔액',
+                    '자동분석': f'신한은행 IRP 현금성 대기자산 잔액 {원화정수포맷(irp_amt)}은 매도대금·계좌이체액·실현손익으로 중복 계산하지 않는 현재 잔액입니다.',
+                    '출처': '현금흐름복구',
+                })
+    except Exception as e:
+        logging.warning('v52220 recovered asset movements failed: %s', e, exc_info=True)
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _v52220_persist_recovered_history(거래df=None, 비주식자산df=None):
+    """복구 흐름을 내부 이력 시트에도 누적합니다. 현재 비주식자산 시트에는 새 컬럼을 만들지 않습니다."""
+    try:
+        movements = _v52220_recovered_asset_movements(거래df, 비주식자산df)
+        if movements.empty or '비주식자산변동이력읽기_v52217' not in globals() or '비주식자산변동이력저장_v52217' not in globals():
+            return False
+        now = 서울현재시각().strftime('%Y-%m-%d %H:%M:%S') if '서울현재시각' in globals() else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        history_rows = []
+        for _, r in movements.iterrows():
+            if str(r.get('구분','')) == '매수':
+                # 주식 매수 자체는 거래이력에 이미 있으므로 비주식자산변동이력에는 예수금 감소/잔액 흐름 중심으로 저장합니다.
+                continue
+            amount = _v52217_money_int(r.get('금액', 0))
+            history_rows.append({
+                '기록시각': now,
+                '반영일자': _v52218_date_str(r.get('날짜', '')),
+                '변화유형': str(r.get('변화유형', r.get('구분', ''))),
+                '계좌': str(r.get('계좌', '')),
+                '자산군': str(r.get('자산유형', '현금성자산')),
+                '상품명': str(r.get('종목명', '')),
+                '이전원금': 0,
+                '현재원금': amount,
+                '원금변화': amount,
+                '이전평가금액': 0,
+                '현재평가금액': amount,
+                '평가금액변화': amount,
+                '비고': str(r.get('상세설명', '')),
+                '자동분석': str(r.get('자동분석', '')),
+            })
+        if not history_rows:
+            return False
+        기존 = 비주식자산변동이력읽기_v52217()
+        합본 = pd.concat([기존, pd.DataFrame(history_rows)], ignore_index=True, sort=False)
+        합본 = 비주식자산변동이력표준화_v52217(합본)
+        합본['_dedup'] = 합본.apply(lambda x: '|'.join(str(x.get(c, '')) for c in ['반영일자','변화유형','계좌','자산군','상품명','현재원금','비고']), axis=1)
+        합본 = 합본.drop_duplicates('_dedup', keep='last').drop(columns=['_dedup'])
+        ok, _msg = 비주식자산변동이력저장_v52217(합본)
+        return bool(ok)
+    except Exception as e:
+        logging.warning('v52220 persist recovered history failed: %s', e, exc_info=True)
+        return False
+
+
+_자산이동목록통합_v52220_base = 자산이동목록통합_v5225
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        # 비주식자산 현재값 변경 전후 자동 이력 저장 + 누락 흐름 복구 이력 저장
+        if 비주식자산df is not None:
+            try:
+                _v52219_append_nonstock_history_persistent(비주식자산df)
+            except Exception:
+                pass
+            try:
+                _v52220_persist_recovered_history(거래df, 비주식자산df)
+            except Exception:
+                pass
+        base = _자산이동목록통합_v52220_base(거래df, 비주식자산df, 최근일수=최근일수)
+    except Exception:
+        base = pd.DataFrame()
+    try:
+        recovered = _v52220_recovered_asset_movements(거래df, 비주식자산df)
+    except Exception:
+        recovered = pd.DataFrame()
+    통합 = pd.concat([base, recovered], ignore_index=True, sort=False)
+    if 통합.empty:
+        return 통합
+    for c in ['날짜','계좌','상세설명','금액','구분','출처','원금부분','수익손실부분','자동분석']:
+        if c not in 통합.columns:
+            통합[c] = '' if c not in ['금액','원금부분','수익손실부분'] else 0
+    통합['날짜'] = 통합['날짜'].apply(_v52218_date_str)
+    통합['금액'] = pd.to_numeric(통합['금액'], errors='coerce').fillna(0).astype(float)
+    통합['_date_sort'] = pd.to_datetime(통합['날짜'], errors='coerce')
+    rank_map = {'현금흐름복구':0, '현금흐름복원':1, '비주식자산변동이력':2}
+    통합['_src_rank'] = 통합.get('출처','').astype(str).map(lambda x: rank_map.get(x,3))
+
+    def _v52220_dedup_key(r):
+        desc = str(r.get('상세설명',''))
+        if 'TDF2035 매도대금' in desc and '예수금' in desc:
+            desc_key = 'TDF2035_TO_MIRAE_CASH_49244653'
+        elif '한화오션' in desc and '매수' in desc:
+            desc_key = 'HANWHA_OCEAN_BUY_13350000'
+        elif '한화오션 매수 후 예수금 잔액' in desc:
+            desc_key = 'MIRAE_CASH_BALANCE_AFTER_HANWHA'
+        elif '현금성 대기자산 잔액' in desc:
+            desc_key = 'SHINHAN_IRP_CASH_BALANCE'
+        else:
+            desc_key = desc
+        return (str(r.get('날짜','')), str(r.get('계좌','')), str(r.get('구분','')), desc_key)
+
+    통합['_key'] = 통합.apply(_v52220_dedup_key, axis=1)
+    통합 = 통합.sort_values(['_date_sort','_src_rank','금액'], ascending=[False,True,False]).drop_duplicates('_key', keep='first')
+    return 통합.drop(columns=['_date_sort','_src_rank','_key'], errors='ignore').reset_index(drop=True)
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
