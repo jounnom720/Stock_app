@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.12-cash-interpretation-wording-fix"
+APP_VERSION = "v5.22.13-integrity-checked"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1246,7 +1246,7 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
         현금관리마스크 = pd.Series([False] * len(이동df), index=이동df.index)
         for _col in ["구분", "변화유형"]:
             if _col in 이동df.columns:
-                현금관리마스크 = 현금관리마스크 | 이동df[_col].astype(str).str.contains("현금대기|자금이체|예수금대기|잔액반영", na=False)
+                현금관리마스크 = 현금관리마스크 | 이동df[_col].astype(str).str.contains("현금대기|자금이체|예수금대기|기존잔액확인", na=False)
         # 현금대기/자금이체는 현재 현금 잔액 확인 성격이 강하므로 최근 자산변화의 '이동금액' KPI에서는 제외합니다.
         # 실제 이동금액은 거래이력 또는 비고에 이체금액이 명확히 적힌 경우에만 별도 거래로 집계해야 합니다.
         총금액 = 이동df.loc[~현금관리마스크, "이동금액"].abs().sum() if len(현금관리마스크) == len(이동df) else 이동df["이동금액"].abs().sum()
@@ -1296,7 +1296,7 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
                 구분표시, badge = "손실실현", "badge-sell"
             elif "자금이체" in 구분원본 or "자금이체" in str(row.get("변화유형", "")):
                 구분표시, badge = "자금이체", "badge-transfer"
-            elif any(x in 구분원본 for x in ["현금대기", "예수금대기", "잔액반영"]) or any(x in str(row.get("변화유형", "")) for x in ["현금대기", "예수금대기", "잔액반영"]):
+            elif any(x in 구분원본 for x in ["현금대기", "예수금대기", "기존잔액확인"]) or any(x in str(row.get("변화유형", "")) for x in ["현금대기", "예수금대기", "기존잔액확인"]):
                 구분표시, badge = "현금대기", "badge-cash"
             elif "TDF" in 자산유형.upper() or "TDF" in str(row.get("상세설명", "")).upper():
                 구분표시, badge = "TDF", "badge-tdf"
@@ -1321,7 +1321,7 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
             원금손익표시 = '-'
             if '자금이체' in 구분원본 or '자금이체' in str(row.get('변화유형', '')):
                 원금손익표시 = '예수금 이체·보관 / 손익계산 제외'
-            elif any(x in 구분원본 for x in ['현금대기', '예수금대기', '잔액반영']) or any(x in str(row.get('변화유형', '')) for x in ['현금대기', '예수금대기', '잔액반영']):
+            elif any(x in 구분원본 for x in ['현금대기', '예수금대기', '기존잔액확인']) or any(x in str(row.get('변화유형', '')) for x in ['현금대기', '예수금대기', '기존잔액확인']):
                 원금손익표시 = '투자대기 현금 / 손익계산 제외' 
             elif abs(손익부분) >= 1 or abs(원금부분 - 이동금액) >= 1 or 'TDF' in 자산유형.upper():
                 원금손익표시 = _v5228_principal_profit_text(원금부분, 손익부분)
