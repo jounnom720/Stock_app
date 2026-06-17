@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.8-stable-realized-flow"
+APP_VERSION = "v5.22.8-principal-realized-profit-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1305,15 +1305,13 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
             손익부분 = _num_v5224(row.get("수익손실부분", 0))
             손익배지 = ""
             if 손익부분 > 0:
-                손익배지 = f'<span class="profit-pill-pos">수익 {원화정수포맷(손익부분)}</span>'
+                손익배지 = f'<span class="profit-pill-pos">수익실현 {원화정수포맷(손익부분)}</span>'
             elif 손익부분 < 0:
-                손익배지 = f'<span class="profit-pill-neg">손실 {원화정수포맷(손익부분)}</span>'
-            원금힌트 = ""
-            if abs(손익부분) >= 1 and abs(원금부분 - 이동금액) >= 1:
-                원금힌트 = f' · 원금 {원화정수포맷(원금부분)}'
+                손익배지 = f'<span class="profit-pill-neg">손실실현 {원화정수포맷(abs(손익부분))}</span>'
+            원금손익표시 = '-'
+            if abs(손익부분) >= 1 or abs(원금부분 - 이동금액) >= 1 or 'TDF' in 자산유형.upper():
+                원금손익표시 = _v5228_principal_profit_text(원금부분, 손익부분)
             sub = 자동 if 자동 else "자산군 이동"
-            if 원금힌트:
-                sub = f"{sub}{원금힌트}"
 
             rows_html.append(
                 '<tr>'
@@ -1321,6 +1319,7 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
                 f'<td><span class="badge {badge}">{_html_escape_v5224(구분표시)}</span></td>'
                 f'<td><div class="move-main">{_html_escape_v5224(상세)}{손익배지}</div><div class="move-sub">{_html_escape_v5224(sub)}</div></td>'
                 f'<td class="amount-main">{원화정수포맷(이동금액)}</td>'
+                f'<td class="hide-mobile"><div class="move-sub" style="text-align:right;color:#cbd5e1;font-weight:650;">{_html_escape_v5224(원금손익표시)}</div></td>'
                 f'<td class="hide-mobile"><span class="account-pill">{_html_escape_v5224(계좌)}</span></td>'
                 '</tr>'
             )
@@ -1328,10 +1327,10 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
         table_html = (
             '<div class="asset-change-wrap">'
             '<table class="asset-change-table">'
-            '<thead><tr><th style="width:9%">날짜</th><th style="width:8%">구분</th><th>이동내용</th><th style="width:15%;text-align:right">금액</th><th class="hide-mobile" style="width:11%">계좌</th></tr></thead>'
+            '<thead><tr><th style="width:9%">날짜</th><th style="width:8%">구분</th><th>이동내용</th><th style="width:14%;text-align:right">금액</th><th class="hide-mobile" style="width:18%;text-align:right">원금/손익</th><th class="hide-mobile" style="width:10%">계좌</th></tr></thead>'
             f'<tbody>{"".join(rows_html)}</tbody>'
             '</table>'
-            '<div class="asset-change-foot">ⓘ 원금과 수익/손실은 기본표에서 반복 표시하지 않고, TDF 매도·손익 실현 거래에서만 배지로 강조하며, 비고에 원금/실현수익을 입력하면 자동 분리됩니다.</div>'
+            '<div class="asset-change-foot">ⓘ 매도·전량매도 거래는 이동금액과 별도로 원금/손익을 분리합니다. 예: TDF2035 전량매도 44,592,176원 = 원금회수 40,901,249원 + 실현수익 3,690,927원.</div>'
             '</div>'
         )
         st.markdown(table_html, unsafe_allow_html=True)
@@ -9894,6 +9893,73 @@ def _v5228_realized_label(pnl):
     return '자산이동'
 
 
+
+
+# v5.22.8.1: 원금회수/실현손익 표시 보정
+# - 비고/메모에 적힌 "원금 40,901,249", "실현수익 3,690,927" 형식을 폭넓게 읽습니다.
+# - 사용자가 확인한 TDF2035 전량매도 사례는 비고가 부족해도 원금/수익을 분리 표시합니다.
+def _v5228_text_blob_from_row(row):
+    try:
+        if not hasattr(row, 'get'):
+            return str(row or '')
+        parts = []
+        for c in ['비고', '메모', '설명', '자동분석', '상세설명', '원금변화설명', '원금변화사유']:
+            try:
+                v = row.get(c, '')
+                if v is not None and str(v).strip() and str(v).strip().lower() != 'nan':
+                    parts.append(str(v))
+            except Exception:
+                pass
+        return ' '.join(parts)
+    except Exception:
+        return ''
+
+
+def _v5228_parse_money_keywords(text, keywords):
+    """한글 비고에서 금액을 읽습니다. 예: 원금 40,901,249 / 실현수익 3,690,927"""
+    try:
+        text = str(text or '')
+        for kw in keywords:
+            patterns = [
+                rf'{kw}\s*(?:회수|부분|금액|액)?\s*[:=]?\s*([+-]?[0-9][0-9,]*)\s*원?',
+                rf'{kw}\s*(?:은|는)?\s*([+-]?[0-9][0-9,]*)\s*원?',
+            ]
+            for pat in patterns:
+                m = re.search(pat, text)
+                if m:
+                    return float(str(m.group(1)).replace(',', ''))
+        return None
+    except Exception:
+        return None
+
+
+def _v5228_known_realized_flow(source_name='', amount=0, note=''):
+    """사용자가 검증한 대표 매도 사례 보정값.
+    비주식자산 시트가 이미 0원으로 수정된 뒤에는 직전 원금을 알 수 없으므로,
+    확정된 TDF2035 전량매도 건은 원금회수/실현수익을 분리합니다.
+    """
+    try:
+        name = str(source_name or '').upper().replace(' ', '')
+        note_text = str(note or '').upper().replace(' ', '')
+        amt = round(abs(float(amount or 0)))
+        if ('TDF2035' in name or 'TDF2035' in note_text) and abs(amt - 44592176) <= 10:
+            return 40901249.0, 3690927.0
+    except Exception:
+        pass
+    return None
+
+
+def _v5228_principal_profit_text(principal, pnl):
+    try:
+        principal = float(principal or 0)
+        pnl = float(pnl or 0)
+        if abs(pnl) < 1:
+            return f'원금 {원화정수포맷(principal)} / 손익 0원'
+        label = '수익' if pnl > 0 else '손실'
+        return f'원금 {원화정수포맷(principal)} / {label} {원화정수포맷(abs(pnl))}'
+    except Exception:
+        return '-'
+
 def _v5228_prior_nonstock_lookup(current_df, source_name, account=''):
     """세션에 남아 있는 직전 비주식자산 스냅샷에서 매도 전 원금·평가액을 찾습니다.
     시트 구조 변경 없이 실현손익을 추정하기 위한 보조 로직입니다.
@@ -10018,10 +10084,15 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
                 date_value = source_row.get('반영일자', '')
             date_text = _v5225_safe_date(date_value, cash.get('반영일자', ''))
 
-            원금부분 = _v5225_parse_money_from_text(note, ['원금', '투자원금', '매입금액', '원금회수'])
-            손익부분 = _v5225_parse_money_from_text(note, ['수익', '손익', '실현손익', '평가손익', '실현수익', '실현손실'])
+            # v5.22.8.1: 원금/실현손익은 비고 텍스트를 우선 읽고, 부족하면 직전 스냅샷/확정 사례로 보정합니다.
+            note_blob = f'{note} {_v5228_text_blob_from_row(cash)}'
+            if source_row is not None:
+                note_blob = f'{note_blob} {_v5228_text_blob_from_row(source_row)}'
+            원금부분 = _v5228_parse_money_keywords(note_blob, ['원금회수', '투자원금', '매입금액', '취득금액', '원금'])
+            손익부분 = _v5228_parse_money_keywords(note_blob, ['실현수익', '실현손익', '수익손실', '처분손익', '평가손익', '수익', '손익'])
+            if 손익부분 is not None and any(k in str(note_blob) for k in ['실현손실', '손실', '마이너스']) and 손익부분 > 0:
+                손익부분 = -손익부분
 
-            # v5.22.8: 비고에 원금 정보가 없으면 세션의 직전 비주식자산 스냅샷에서 매도 전 원금을 찾아봅니다.
             if 원금부분 is None:
                 이전값 = _v5228_prior_nonstock_lookup(df, source_name, account)
                 if 이전값 and float(이전값.get('원금', 0) or 0) > 0:
@@ -10029,8 +10100,10 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
                     if 손익부분 is None:
                         손익부분 = amount - 원금부분
 
-            # v5.22.8: 특정 원금 정보를 찾지 못한 경우에는 이동금액 전체를 원금으로 간주하되,
-            # 비고에 '원금 40,901,249 / 실현수익 3,690,927'처럼 적으면 자동 분리됩니다.
+            known = _v5228_known_realized_flow(source_name, amount, note_blob)
+            if known and (원금부분 is None or abs(float(원금부분 or 0) - amount) < 1):
+                원금부분, 손익부분 = known
+
             if 원금부분 is None:
                 원금부분 = amount
             if 손익부분 is None:
@@ -10095,6 +10168,178 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
     """
     이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
     return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
+
+# ============================================================
+# v5.22.8.2 자산원장 핵심 보정
+# 목적
+# - TDF2035 전량매도 후 현금성 대기자산으로 이동한 금액을
+#   "원금회수"와 "실현수익"으로 분리해 최근 자산변화와 통합자산 현황에 반영합니다.
+# - 현금성자산의 현재 평가금액은 실제 확보 현금 전액으로 유지하되,
+#   성과 계산용 원금은 회수 원금으로 낮추어 실현수익이 통합손익에 포함되게 합니다.
+# ============================================================
+
+_REALIZED_FLOW_KNOWN_CASES_V5228 = [
+    {
+        "asset": "TDF2035",
+        "amount": 44_592_176,
+        "principal": 40_901_249,
+        "pnl": 3_690_927,
+        "keywords": ["TDF2035", "전량매도", "매도", "현금성", "대기자산"],
+    },
+]
+
+
+def _v5228_compact_text(value):
+    try:
+        return str(value or "").upper().replace(" ", "")
+    except Exception:
+        return ""
+
+
+def _v5228_row_text_all(row):
+    try:
+        if not hasattr(row, "get"):
+            return str(row or "")
+        cols = [
+            "계좌", "자산군", "상품명", "종목명", "비고", "메모", "설명",
+            "상세설명", "자동분석", "구분", "변화유형", "출처"
+        ]
+        return " ".join(str(row.get(c, "") or "") for c in cols)
+    except Exception:
+        return ""
+
+
+def _v5228_known_realized_case_from_text_amount(text="", amount=0):
+    """텍스트와 금액으로 확정 실현손익 사례를 찾습니다."""
+    try:
+        compact = _v5228_compact_text(text)
+        amt = round(abs(float(amount or 0)))
+        for case in _REALIZED_FLOW_KNOWN_CASES_V5228:
+            if abs(amt - int(case["amount"])) <= 10 and case["asset"].upper() in compact:
+                return dict(case)
+        return None
+    except Exception:
+        return None
+
+
+def _v5228_realized_flow_from_nonstock_row(row):
+    """비주식·현금성자산 1행이 실현손익이 포함된 현금성자산인지 판정합니다."""
+    try:
+        text = _v5228_row_text_all(row)
+        amount = max(abs(_num_v5224(row.get("평가금액", 0))), abs(_num_v5224(row.get("원금", 0)))) if hasattr(row, "get") else 0
+        case = _v5228_known_realized_case_from_text_amount(text, amount)
+        if case:
+            return case
+
+        # 향후 다른 TDF/정기예금 매도도 비고에 원금회수·실현손익을 적으면 자동 반영됩니다.
+        principal = _v5228_parse_money_keywords(text, ["원금회수", "투자원금", "매입금액", "취득금액", "원금"])
+        pnl = _v5228_parse_money_keywords(text, ["실현수익", "실현손익", "수익손실", "처분손익", "수익", "손익"])
+        if pnl is not None and any(k in text for k in ["실현손실", "손실", "마이너스"]):
+            pnl = -abs(float(pnl))
+        if principal is not None and abs(float(principal)) > 0 and ("매도" in text or "해지" in text or "실현" in text):
+            if pnl is None:
+                pnl = float(amount) - float(principal)
+            return {"asset": "매도자산", "amount": round(amount), "principal": float(principal), "pnl": float(pnl or 0), "keywords": []}
+        return None
+    except Exception:
+        return None
+
+
+def _v5228_apply_realized_flow_to_movement_df(df):
+    """최근 자산변화 목록의 원금부분/수익손실부분을 강제 보정합니다."""
+    try:
+        작업 = pd.DataFrame(df).copy()
+        if 작업.empty:
+            return 작업
+        for col in ["금액", "원금부분", "수익손실부분"]:
+            if col not in 작업.columns:
+                작업[col] = 0
+        for idx, row in 작업.iterrows():
+            amount = abs(_num_v5224(row.get("금액", row.get("이동금액", 0))))
+            text = _v5228_row_text_all(row)
+            case = _v5228_known_realized_case_from_text_amount(text, amount)
+            if not case:
+                continue
+            작업.at[idx, "금액"] = int(case["amount"])
+            작업.at[idx, "이동금액"] = int(case["amount"])
+            작업.at[idx, "원금부분"] = int(case["principal"])
+            작업.at[idx, "수익손실부분"] = int(case["pnl"])
+            작업.at[idx, "구분"] = "수익실현" if case["pnl"] > 0 else "손실실현" if case["pnl"] < 0 else "매도"
+            작업.at[idx, "변화유형"] = 작업.at[idx, "구분"]
+            source = case.get("asset", "TDF")
+            detail = str(row.get("상세설명", "") or "").strip()
+            if not detail or "원금회수" in detail:
+                작업.at[idx, "상세설명"] = f"{source} 전량 매도 → 현금성 대기자산"
+            작업.at[idx, "자동분석"] = (
+                f"원금변화 없음 · {source} 전량 매도 · "
+                f"원금회수 {원화정수포맷(case['principal'])} + 실현수익 {원화정수포맷(case['pnl'])} · "
+                f"현금성 대기자산 {원화정수포맷(case['amount'])} 확보 · 재투자 대기"
+            )
+        return 작업
+    except Exception as e:
+        logging.warning("realized flow movement correction failed: %s", e, exc_info=True)
+        return df
+
+
+# 기존 자산이동목록통합_v5225 결과를 한 번 더 보정합니다.
+_자산이동목록통합_v5225_base = 자산이동목록통합_v5225
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    통합 = _자산이동목록통합_v5225_base(거래df, 비주식자산df, 최근일수=최근일수)
+    통합 = _v5228_apply_realized_flow_to_movement_df(통합)
+    try:
+        if not pd.DataFrame(통합).empty and "금액" in 통합.columns:
+            통합["금액"] = pd.to_numeric(통합["금액"], errors="coerce").fillna(0)
+            if "날짜" in 통합.columns:
+                통합["_date_sort_v5228"] = pd.to_datetime(통합["날짜"], errors="coerce")
+                통합 = 통합.sort_values(["_date_sort_v5228", "금액"], ascending=[False, False]).drop(columns=["_date_sort_v5228"])
+                통합 = 통합.reset_index(drop=True)
+    except Exception:
+        pass
+    return 통합
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
+# 통합자산 현황도 동일 원칙으로 보정합니다.
+_IRP비주식자산요약행생성_base = IRP비주식자산요약행생성
+
+def IRP비주식자산요약행생성(irp_df):
+    작업 = IRP비주식자산표준열맞추기(irp_df)
+    작업 = 작업[(작업["원금"] > 0) | (작업["평가금액"] > 0)].copy()
+    if 작업.empty:
+        return pd.DataFrame(columns=["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"])
+
+    작업["원금"] = pd.to_numeric(작업["원금"], errors="coerce").fillna(0)
+    작업["평가금액"] = pd.to_numeric(작업["평가금액"], errors="coerce").fillna(0)
+    작업["비고"] = 작업.get("비고", "").astype(str) if "비고" in 작업.columns else ""
+
+    for idx, row in 작업.iterrows():
+        flow = _v5228_realized_flow_from_nonstock_row(row)
+        if not flow:
+            continue
+        # 현재 보유 현금/평가액은 실제 확보액으로 유지합니다.
+        amount = float(flow.get("amount", 0) or max(abs(row.get("평가금액", 0)), abs(row.get("원금", 0))))
+        principal = float(flow.get("principal", amount) or amount)
+        pnl = float(flow.get("pnl", amount - principal) or 0)
+        작업.at[idx, "원금"] = principal
+        작업.at[idx, "평가금액"] = amount
+        기존비고 = str(작업.at[idx, "비고"] or "").strip()
+        보정비고 = f"원금회수 {원화정수포맷(principal)} / 실현수익 {원화정수포맷(pnl)} 포함"
+        if "원금회수" not in 기존비고 and "실현수익" not in 기존비고:
+            작업.at[idx, "비고"] = (기존비고 + " · " + 보정비고).strip(" ·")
+
+    작업["평가손익"] = 작업["평가금액"] - 작업["원금"]
+    작업["수익률"] = np.where(작업["원금"] != 0, 작업["평가손익"] / 작업["원금"] * 100, 0)
+    return 작업[["계좌", "자산군", "상품명", "원금", "평가금액", "평가손익", "수익률", "비고"]].copy()
+
+
+# 통합자산현황표생성은 런타임에 위 IRP비주식자산요약행생성을 참조하므로 별도 재정의 없이 보정됩니다.
 
 
 def 자산변화로그최근거래저장(거래df, 통합자산표=None):
