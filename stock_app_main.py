@@ -14760,6 +14760,324 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
     return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
+
+# ============================================================
+# v5.23.7 자산원장 표시 경로 최종 복구 패치
+# 목적
+# - 실제 화면 실행 전에 최근자산변화 생성/표시 함수를 재정의합니다.
+# - 기존 전체 거래이력 44건을 유지하고, TDF2035 자금흐름 복구 5건을 병합합니다.
+# - UI 문구는 v5.23.6 최신 구조를 유지합니다.
+# - 같은 날짜는 최신 상태가 위로 오도록 정렬합니다.
+# ============================================================
+APP_VERSION = "v5.23.7-asset-ledger-full-history-ui-final"
+
+
+def _v5237_text(value):
+    try:
+        if value is None:
+            return ""
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _v5237_money(value):
+    try:
+        if value is None:
+            return 0
+        s = str(value).replace(',', '').replace('원', '').replace('%', '').strip()
+        if s == '' or s.lower() in ('nan', 'none', 'nat'):
+            return 0
+        return int(round(float(s)))
+    except Exception:
+        return 0
+
+
+def _v5237_date(value):
+    try:
+        if value is None or str(value).strip() == '':
+            return ''
+        if isinstance(value, (int, float)) and value > 20000:
+            return (pd.Timestamp('1899-12-30') + pd.to_timedelta(int(value), unit='D')).strftime('%Y-%m-%d')
+        s = str(value).strip()
+        if re.fullmatch(r"\d+(\.0)?", s):
+            n = float(s)
+            if n > 20000:
+                return (pd.Timestamp('1899-12-30') + pd.to_timedelta(int(n), unit='D')).strftime('%Y-%m-%d')
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+        return s
+    except Exception:
+        return str(value or '').strip()
+
+
+def _v5237_recovery_rows():
+    """이번 TDF2035 흐름에서 누락되면 안 되는 자산원장 복구 행."""
+    return [
+        {
+            '날짜': '2026-06-16', '계좌': '신한은행 IRP', '구분': '수익실현',
+            '종목명': 'TDF2035', '자산유형': 'TDF', '수량': 0, '단가': 0,
+            '금액': 44592176, '이동금액': 44592176, '원금부분': 40901249, '수익손실부분': 3690927,
+            '변화유형': '수익실현', '상세설명': 'TDF2035 전량 매도',
+            '자동분석': 'TDF2035 전량매도로 원금 40,901,249원을 회수하고 실현수익 3,690,927원을 확정했습니다. 총 회수금액은 44,592,176원입니다.',
+            '출처': '자산원장복구_v5237',
+        },
+        {
+            '날짜': '2026-06-17', '계좌': '신한IRP → 미래에셋', '구분': '자금이체',
+            '종목명': '예수금', '자산유형': '현금성자산', '수량': 0, '단가': 0,
+            '금액': 49244653, '이동금액': 49244653, '원금부분': 49244653, '수익손실부분': 0,
+            '변화유형': '자금이체', '상세설명': 'TDF2035 매도대금 → 미래에셋 예수금 이체',
+            '자동분석': 'TDF2035 매도 후 현금성 대기자산에 보관된 자금을 미래에셋증권 계좌 예수금으로 이체한 흐름입니다. 현재 잔액과 별도 이력으로 보존합니다.',
+            '출처': '자산원장복구_v5237',
+        },
+        {
+            '날짜': '2026-06-17', '계좌': '신한IRP', '구분': '현금대기',
+            '종목명': '현금성 대기자산', '자산유형': '현금성자산', '수량': 0, '단가': 0,
+            '금액': 20728, '이동금액': 20728, '원금부분': 20728, '수익손실부분': 0,
+            '변화유형': '현금대기', '상세설명': 'TDF2035 매도 후 신한IRP 현금성 대기자산 잔액',
+            '자동분석': '신한은행 IRP에 남아 있는 현금성 대기자산 잔액입니다. 매도대금·계좌이체액·실현손익으로 중복 계산하지 않습니다.',
+            '출처': '자산원장복구_v5237',
+        },
+        {
+            '날짜': '2026-06-17', '계좌': '미래에셋', '구분': '매수',
+            '종목명': '한화오션', '자산유형': '주식형자산', '수량': 0, '단가': 0,
+            '금액': 13350000, '이동금액': 13350000, '원금부분': 13350000, '수익손실부분': 0,
+            '변화유형': '매수', '상세설명': '예수금 → 한화오션 주식 매수',
+            '자동분석': '미래에셋 예수금에서 한화오션 주식 매수금액 13,350,000원이 주식형자산으로 이동했습니다.',
+            '출처': '자산원장복구_v5237',
+        },
+        {
+            '날짜': '2026-06-17', '계좌': '미래에셋', '구분': '현금대기',
+            '종목명': '예수금', '자산유형': '현금성자산', '수량': 0, '단가': 0,
+            '금액': 35892653, '이동금액': 35892653, '원금부분': 35892653, '수익손실부분': 0,
+            '변화유형': '현금대기', '상세설명': '한화오션 매수 후 미래에셋 예수금 잔액',
+            '자동분석': '49,244,653원 이체 후 한화오션 매수 13,350,000원을 반영한 미래에셋 예수금 잔액입니다. 매수금액이나 실현손익으로 중복 계산하지 않습니다.',
+            '출처': '자산원장복구_v5237',
+        },
+    ]
+
+
+def _v5237_semantic_key(row):
+    desc = _v5237_text(row.get('상세설명', ''))
+    typ = _v5237_text(row.get('구분', row.get('변화유형', '')))
+    acct = _v5237_text(row.get('계좌', ''))
+    name = _v5237_text(row.get('종목명', ''))
+    auto = _v5237_text(row.get('자동분석', ''))
+    merged = f"{desc} {typ} {acct} {name} {auto}"
+    amt = _v5237_money(row.get('금액', row.get('이동금액', 0)))
+
+    if 'TDF2035' in merged and ('전량 매도' in merged or '전량매도' in merged or typ == '수익실현') and abs(amt - 44592176) <= 10:
+        return 'A_TDF2035_REALIZED_44592176'
+    if 'TDF2035 매도대금' in merged and '예수금' in merged and ('이체' in merged or typ == '자금이체'):
+        return 'B_TDF2035_TO_MIRAE_49244653'
+    if abs(amt - 49244653) <= 10 and '예수금' in merged and ('이체' in merged or '보관' in merged or 'TDF2035' in merged):
+        return 'B_TDF2035_TO_MIRAE_49244653'
+    if 'TDF2035 매도 후' in merged and '현금성 대기자산' in merged and ('잔액' in merged or typ == '현금대기'):
+        return 'C_IRP_CASH_BALANCE_20728'
+    if abs(amt - 20728) <= 10 and ('현금성 대기자산' in merged or 'IRP' in merged or '신한' in merged):
+        return 'C_IRP_CASH_BALANCE_20728'
+    if '한화오션 매수 후' in merged and '예수금' in merged and ('잔액' in merged or typ == '현금대기'):
+        return 'D_MIRAE_CASH_AFTER_HANWHA_35892653'
+    if abs(amt - 35892653) <= 10 and '예수금' in merged and ('잔액' in merged or '매수 후' in merged):
+        return 'D_MIRAE_CASH_AFTER_HANWHA_35892653'
+    if ('한화오션' in merged and '매수' in merged) or (abs(amt - 13350000) <= 10 and '한화오션' in merged):
+        return 'E_HANWHA_BUY_13350000'
+    return '|'.join([_v5237_date(row.get('날짜','')), acct, typ, desc, str(amt)])
+
+
+def _v5237_flow_order(row):
+    """최근순 정렬: 같은 날짜 안에서는 최신 자산상태 → 매수 → 잔액 → 이체 순."""
+    key = _v5237_semantic_key(row)
+    typ = _v5237_text(row.get('구분', ''))
+    if key == 'D_MIRAE_CASH_AFTER_HANWHA_35892653':
+        return 10
+    if key == 'E_HANWHA_BUY_13350000':
+        return 20
+    if key == 'C_IRP_CASH_BALANCE_20728':
+        return 30
+    if key == 'B_TDF2035_TO_MIRAE_49244653':
+        return 40
+    if key == 'A_TDF2035_REALIZED_44592176':
+        return 50
+    if typ == '매수':
+        return 100
+    if typ == '매도':
+        return 110
+    if typ == '수익실현':
+        return 120
+    if typ == '자금이체':
+        return 130
+    if typ == '현금대기':
+        return 140
+    return 200
+
+
+def _v5237_prepare_ledger_df(df):
+    try:
+        base = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    except Exception:
+        base = pd.DataFrame()
+    forced = pd.DataFrame(_v5237_recovery_rows())
+    out = pd.concat([base, forced], ignore_index=True, sort=False)
+    if out.empty:
+        return out
+
+    for col in ['날짜','계좌','구분','종목명','자산유형','상세설명','자동분석','변화유형','출처']:
+        if col not in out.columns:
+            out[col] = ''
+        out[col] = out[col].fillna('').astype(str)
+    for col in ['금액','이동금액','원금부분','수익손실부분','수량','단가']:
+        if col not in out.columns:
+            out[col] = 0
+        out[col] = pd.to_numeric(out[col], errors='coerce').fillna(0).round().astype(int)
+
+    out['날짜'] = out['날짜'].apply(_v5237_date)
+    out['구분'] = out['구분'].replace({'잔액반영': '현금대기', '잔액조정': '현금대기'})
+    out['변화유형'] = out['변화유형'].replace({'잔액반영': '현금대기', '잔액조정': '현금대기'})
+    out['상세설명'] = out['상세설명'].str.replace('잔존', '잔액', regex=False).str.replace('잔액 반영', '잔액', regex=False)
+
+    out['_key_v5237'] = out.apply(_v5237_semantic_key, axis=1)
+    out['_source_rank_v5237'] = out['출처'].astype(str).apply(lambda x: 0 if '자산원장복구_v5237' in x else 5)
+    out = out.sort_values(['_key_v5237','_source_rank_v5237'], ascending=[True, True], kind='mergesort')
+    out = out.drop_duplicates('_key_v5237', keep='first')
+
+    out['_date_v5237'] = pd.to_datetime(out['날짜'], errors='coerce')
+    out['_flow_order_v5237'] = out.apply(_v5237_flow_order, axis=1)
+    out['_amount_v5237'] = out['금액'].abs()
+    out = out.sort_values(['_date_v5237','_flow_order_v5237','_amount_v5237'], ascending=[False, True, False], kind='mergesort')
+    return out.drop(columns=['_key_v5237','_source_rank_v5237','_date_v5237','_flow_order_v5237','_amount_v5237'], errors='ignore').reset_index(drop=True)
+
+
+try:
+    _자산이동목록통합_v5237_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5237_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        base = _자산이동목록통합_v5237_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5237_base else pd.DataFrame()
+    except Exception as e:
+        logging.warning('v5237 base movement failed: %s', e, exc_info=True)
+        base = pd.DataFrame()
+    return _v5237_prepare_ledger_df(base)
+
+
+def _v5237_badge_class(typ):
+    t = str(typ or '')
+    if '수익' in t or '실현' in t:
+        return 'badge-tdf'
+    if '이체' in t:
+        return 'badge-move'
+    if '현금' in t:
+        return 'badge-move'
+    if '매도' in t:
+        return 'badge-sell'
+    if '매수' in t:
+        return 'badge-buy'
+    return 'badge-move'
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=50):
+    """v5.23.7: 전체 이력 + 최신 자산원장 UI를 실제 화면 실행 전에 직접 표시."""
+    try:
+        df = _v5237_prepare_ledger_df(이동df)
+        최근자산변화표스타일_v5226()
+        st.markdown('<div class="asset-change-head"><div><span class="asset-change-title">🔎 최근 자산변화</span><span class="asset-change-sub">자산 이동·신규 편입·실현손익을 한눈에 보는 자산원장</span></div></div>', unsafe_allow_html=True)
+        if df.empty:
+            st.caption('최근 자산변화로 표시할 내역이 없습니다.')
+            return df
+
+        total_count = len(df)
+        amount_sum = pd.to_numeric(df.get('금액', 0), errors='coerce').fillna(0).abs().sum()
+        realized = pd.to_numeric(df.get('수익손실부분', 0), errors='coerce').fillna(0).sum()
+        buy_count = int(df.get('구분', pd.Series(dtype=str)).astype(str).str.contains('매수', na=False).sum())
+        sell_count = int(df.get('구분', pd.Series(dtype=str)).astype(str).str.contains('매도|수익실현|손실실현', regex=True, na=False).sum())
+        dates = pd.to_datetime(df.get('날짜', pd.Series(dtype=str)), errors='coerce').dropna()
+        period = '최근 내역' if dates.empty else f"{dates.min().strftime('%Y-%m-%d')} ~ {dates.max().strftime('%Y-%m-%d')}"
+        try:
+            new_assets = [x for x in df[df['구분'].astype(str).str.contains('매수', na=False)]['종목명'].dropna().astype(str).unique().tolist() if x][:5]
+        except Exception:
+            new_assets = []
+        kpi = (
+            '<div class="asset-kpi-box">'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">거래</div><div class="asset-kpi-value">{total_count:,}건</div><div class="asset-kpi-note">매수 {buy_count:,} / 매도 {sell_count:,}</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">이동금액</div><div class="asset-kpi-value">{원화정수포맷(amount_sum)}</div><div class="asset-kpi-note">조회기간 {period}</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">신규편입</div><div class="asset-kpi-value">{len(new_assets):,}종목</div><div class="asset-kpi-note">최근 매수 기준</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">실현손익</div><div class="asset-kpi-value">{원화정수포맷(realized)}</div><div class="asset-kpi-note">TDF·매도 손익만 별도 인식</div></div>'
+            '</div>'
+        )
+        st.markdown(kpi, unsafe_allow_html=True)
+
+        rows_html = []
+        display_count = max(최대표시, 50)
+        for _, row in df.head(display_count).iterrows():
+            d_main, d_sub = _거래요약날짜_v5226(row.get('날짜', ''))
+            typ = _v5237_text(row.get('구분', row.get('변화유형', '자산이동'))) or '자산이동'
+            badge = _v5237_badge_class(typ)
+            desc = _v5237_text(row.get('상세설명', ''))
+            auto = _v5237_text(row.get('자동분석', ''))
+            acct = _계좌짧게_v5226(row.get('계좌', '')) if '_계좌짧게_v5226' in globals() else _v5237_text(row.get('계좌',''))
+            amount = abs(_v5237_money(row.get('금액', row.get('이동금액', 0))))
+            principal = abs(_v5237_money(row.get('원금부분', 0)))
+            pnl = _v5237_money(row.get('수익손실부분', 0))
+            if pnl:
+                ps = f"원금 {원화정수포맷(principal)} / {'수익' if pnl > 0 else '손실'} {원화정수포맷(abs(pnl))}"
+            elif typ == '현금대기':
+                ps = '투자대기 현금 / 손익계산 제외'
+            elif typ == '자금이체':
+                ps = '예수금 이체·보관 / 손익계산 제외'
+            else:
+                ps = '-'
+            rows_html.append(
+                '<tr>'
+                f'<td><div class="date-main">{_html_escape_v5224(d_main)}</div><div class="date-sub">{_html_escape_v5224(d_sub)}</div></td>'
+                f'<td><span class="badge {badge}">{_html_escape_v5224(typ)}</span></td>'
+                f'<td><div class="move-main">{_html_escape_v5224(desc)}</div><div class="move-sub">{_html_escape_v5224(auto)}</div></td>'
+                f'<td class="amount-main">{원화정수포맷(amount)}</td>'
+                f'<td class="amount-main">{_html_escape_v5224(ps)}</td>'
+                f'<td><span class="account-pill">{_html_escape_v5224(acct)}</span></td>'
+                '</tr>'
+            )
+        table = (
+            '<div class="asset-change-wrap">'
+            '<table class="asset-change-table">'
+            '<thead><tr><th style="width:9%">날짜</th><th style="width:9%">구분</th><th>이동내용</th><th style="width:14%;text-align:right">금액</th><th style="width:18%;text-align:right">원금/손익</th><th style="width:10%">계좌</th></tr></thead>'
+            f'<tbody>{"".join(rows_html)}</tbody>'
+            '</table>'
+            '<div class="asset-change-foot">ⓘ 같은 날짜 안에서는 최신 자산상태가 위에 오도록 정렬합니다. 현금대기 잔액은 매수금액이나 실현손익으로 중복 계산하지 않습니다.</div>'
+            '</div>'
+        )
+        st.markdown(table, unsafe_allow_html=True)
+
+        if len(df) > display_count:
+            with st.expander(f"전체 자산 변화 목록 보기 · {len(df):,}건", expanded=False):
+                표시열 = [c for c in ['날짜','구분','상세설명','금액','원금부분','수익손실부분','계좌','자동분석'] if c in df.columns]
+                표시 = df[표시열].copy()
+                try:
+                    숫자포맷 = {c: 원화정수포맷 for c in ['금액','원금부분','수익손실부분'] if c in 표시.columns}
+                    표데이터프레임(표시.style.format(숫자포맷), width='stretch', hide_index=True)
+                except Exception:
+                    표데이터프레임(표시, width='stretch', hide_index=True)
+        return df
+    except Exception as e:
+        st.caption(f'최근 자산변화 표시 오류: {type(e).__name__}: {e}')
+        return pd.DataFrame(이동df).copy() if 이동df is not None else pd.DataFrame()
+
+
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=50):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 50))
+
+# ============================================================
+# end v5.23.7 asset ledger full history UI final patch
+# ============================================================
+
 # v5.15.1: 화면 구조는 3개 섹터로 고정합니다.
 # - 주요 모니터링
 # - 포트폴리오 현황
