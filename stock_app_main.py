@@ -14137,6 +14137,169 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # /v5.19.2 포트폴리오 핵심상태 메인 UI 통합
 # ============================================================
 
+
+# ============================================================
+# v5.22.16 cash balance / direct edit / Google Sheets format fix
+# ============================================================
+try:
+    APP_VERSION = "v5.22.16-cash-balance-sheet-format-fix"
+except Exception:
+    pass
+
+
+def _v52216_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        try:
+            if pd.isna(value):
+                return default
+        except Exception:
+            pass
+        s = str(value).strip().replace(',', '').replace('원', '').replace('₩', '').replace('%', '')
+        if s == '' or s.lower() in ['nan', 'none', 'nat', '<na>']:
+            return default
+        return float(s)
+    except Exception:
+        return default
+
+
+def _v52216_int_value(value):
+    try:
+        return int(round(_v52216_num(value, 0)))
+    except Exception:
+        return 0
+
+
+def _v52216_percent_value(value):
+    try:
+        return float(_v52216_num(value, 0))
+    except Exception:
+        return 0.0
+
+
+def _v52216_apply_google_sheet_number_format(ws, headers):
+    try:
+        for idx, col in enumerate(list(headers or []), start=1):
+            col_letter = chr(64 + idx) if idx <= 26 else None
+            if not col_letter:
+                continue
+            if col in ['원금', '평가금액']:
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}})
+            elif col == '예상연수익률':
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '0.00'}})
+            elif col in ['만기일', '반영일자', '계좌', '자산군', '상품명', '비고']:
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'TEXT'}})
+    except Exception as e:
+        logging.warning('v52216 google sheet number format failed: %s', e, exc_info=True)
+
+
+# 예수금/현금성자산은 Google Sheets의 현재잔액을 원본으로 사용합니다.
+# 거래이력 매수금액을 다시 차감하지 않아 예수금 2중 차감·2중 반영을 방지합니다.
+def _v52214_apply_cash_buy_deduction(irp_df, 거래df=None, 화면표시=False):
+    try:
+        return IRP비주식자산표준열맞추기(irp_df).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(irp_df).copy() if irp_df is not None else pd.DataFrame()
+
+
+try:
+    if '_IRP비주식자산요약행생성_v52214_base' in globals():
+        def IRP비주식자산요약행생성(irp_df):
+            return _IRP비주식자산요약행생성_v52214_base(IRP비주식자산표준열맞추기(irp_df))
+except Exception as e:
+    logging.warning('v52216 non-stock summary override failed: %s', e, exc_info=True)
+
+
+def IRP비주식자산저장(df):
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨:
+        return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
+
+    try:
+        작업 = IRP비주식자산표준열맞추기(df)
+        표준열 = ['계좌', '자산군', '상품명', '원금', '평가금액', '예상연수익률', '만기일', '반영일자', '비고']
+        작업 = 작업[표준열].copy()
+        for 열 in ['계좌', '자산군', '상품명', '만기일', '반영일자', '비고']:
+            작업[열] = 작업[열].apply(lambda v: '' if pd.isna(v) else str(v).strip())
+            작업[열] = 작업[열].replace({'nan': '', 'NaT': '', 'None': '', '<NA>': ''})
+        for 열 in ['만기일', '반영일자']:
+            작업[열] = 작업[열].apply(_v52214_date_str if '_v52214_date_str' in globals() else lambda v: str(v or '')[:10])
+        작업['원금'] = 작업['원금'].apply(_v52216_int_value)
+        작업['평가금액'] = 작업['평가금액'].apply(_v52216_int_value)
+        작업['예상연수익률'] = 작업['예상연수익률'].apply(_v52216_percent_value)
+        작업 = 작업[
+            (작업['계좌'].astype(str).str.strip() != '')
+            | (작업['자산군'].astype(str).str.strip() != '')
+            | (작업['상품명'].astype(str).str.strip() != '')
+            | (작업['원금'].abs() > 0)
+            | (작업['평가금액'].abs() > 0)
+            | (작업['비고'].astype(str).str.strip() != '')
+        ].copy()
+        try:
+            구버전기준일 = 작업['반영일자'].astype(str).str.contains('2026-04-30', na=False).sum()
+            구버전금액패턴 = 작업['평가금액'].astype(float).isin([51873538, 31443846, 27499444, 5030813, 17188280]).sum()
+            if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
+                return False, '저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다.'
+        except Exception as e:
+            logging.warning('non-stock legacy sample guard skipped: %s', e, exc_info=True)
+        spreadsheet, 연결정보 = 구글시트문서연결()
+        if spreadsheet is None:
+            return False, f"Google Sheets 미연결: {연결정보.get('메시지', '')}"
+        ws = 구글시트워크시트확보(spreadsheet, GOOGLE_SHEETS_NON_STOCK_SHEET, rows=max(100, len(작업) + 20), cols=len(표준열) + 2)
+        저장작업 = 작업.copy().replace({pd.NA: '', np.nan: '', None: ''}).fillna('')
+        저장값 = [표준열] + 저장작업[표준열].values.tolist()
+        try:
+            자동백업저장(비주식_df=작업)
+        except Exception as e:
+            logging.warning('non-stock pre-save backup failed: %s', e, exc_info=True)
+        ws.clear()
+        ws.update('A1', 저장값, value_input_option='USER_ENTERED')
+        _v52216_apply_google_sheet_number_format(ws, 표준열)
+        st.session_state['irp_non_stock_assets_df_v512'] = 작업.copy()
+        st.session_state['irp_non_stock_assets_last_saved_rows_v5221'] = len(작업)
+        st.session_state['irp_non_stock_assets_last_saved_at_v5221'] = 서울현재시각ISO()
+        try:
+            구글시트데이터프레임읽기.clear()
+        except Exception as e:
+            logging.warning('non-stock read cache clear failed: %s', e, exc_info=True)
+        return True, f'비주식자산 Google Sheets 저장 완료: {len(작업)}행'
+    except Exception as e:
+        logging.exception('IRP비주식자산저장 실패')
+        return False, f'비주식자산 저장 오류: {type(e).__name__}: {e}'
+
+
+def _v52216_table_css():
+    try:
+        css = """
+        <style>
+        div[data-testid="stDataFrame"] div[role="gridcell"],
+        div[data-testid="stDataFrame"] div[role="columnheader"],
+        .stDataFrame div[role="gridcell"],
+        .stDataFrame div[role="columnheader"] {
+            line-height: 1.18 !important;
+            white-space: nowrap !important;
+            word-break: keep-all !important;
+            overflow-wrap: normal !important;
+        }
+        .oa-table-wrap table td,
+        .oa-table-wrap table th,
+        table.dataframe td,
+        table.dataframe th {
+            line-height: 1.18 !important;
+            word-break: keep-all !important;
+            overflow-wrap: normal !important;
+            vertical-align: middle !important;
+        }
+        </style>
+        """
+        st.markdown(css, unsafe_allow_html=True)
+    except Exception as e:
+        logging.warning('v52216 table css failed: %s', e, exc_info=True)
+
+_v52216_table_css()
+
+
 # v5.15.1: 화면 구조는 3개 섹터로 고정합니다.
 # - 주요 모니터링
 # - 포트폴리오 현황
