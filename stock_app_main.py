@@ -14300,6 +14300,221 @@ def _v52216_table_css():
 _v52216_table_css()
 
 
+
+# ============================================================
+# v5.22.17 비주식·현금성 자산 변동이력 보존 및 원장 완결성 패치
+# ============================================================
+GOOGLE_SHEETS_NON_STOCK_HISTORY_SHEET_V52217 = "비주식자산변동이력"
+비주식자산변동이력표준열_v52217 = ["기록시각","반영일자","변화유형","계좌","자산군","상품명","이전원금","현재원금","원금변화","이전평가금액","현재평가금액","평가금액변화","비고","자동분석"]
+
+def _v52217_money_int(value):
+    try:
+        if value is None:
+            return 0
+        s = str(value).replace(',', '').replace('원', '').strip()
+        if s == '' or s.lower() in ['nan','none','nat','<na>']:
+            return 0
+        return int(round(float(s)))
+    except Exception:
+        return 0
+
+def _v52217_money_sheet(value):
+    return str(_v52217_money_int(value))
+
+def _v52217_date_str(value):
+    try:
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    s = str(value or '').strip()
+    return s[:10] if s else ''
+
+def _v52217_nonstock_key(row):
+    return (str(row.get('계좌','') or '').strip(), str(row.get('자산군','') or '').strip(), str(row.get('상품명','') or '').strip())
+
+def 비주식자산변동이력표준화_v52217(df):
+    작업 = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    for c in 비주식자산변동이력표준열_v52217:
+        if c not in 작업.columns:
+            작업[c] = ''
+    작업 = 작업[비주식자산변동이력표준열_v52217].copy()
+    for c in ['이전원금','현재원금','원금변화','이전평가금액','현재평가금액','평가금액변화']:
+        작업[c] = 작업[c].apply(_v52217_money_int)
+    for c in ['기록시각','반영일자','변화유형','계좌','자산군','상품명','비고','자동분석']:
+        작업[c] = 작업[c].apply(lambda v: '' if pd.isna(v) else str(v).strip())
+    return 작업
+
+def 비주식자산변동이력읽기_v52217():
+    try:
+        return 비주식자산변동이력표준화_v52217(구글시트데이터프레임읽기(GOOGLE_SHEETS_NON_STOCK_HISTORY_SHEET_V52217))
+    except Exception:
+        return 비주식자산변동이력표준화_v52217(pd.DataFrame())
+
+def 비주식자산변동이력저장_v52217(df):
+    try:
+        spreadsheet, info = 구글시트문서연결()
+        if spreadsheet is None:
+            return False, f"Google Sheets 미연결: {info.get('메시지','')}"
+        작업 = 비주식자산변동이력표준화_v52217(df)
+        ws = 구글시트워크시트확보(spreadsheet, GOOGLE_SHEETS_NON_STOCK_HISTORY_SHEET_V52217, rows=max(200, len(작업)+20), cols=len(비주식자산변동이력표준열_v52217)+2)
+        저장 = 작업.copy().replace({pd.NA:'', np.nan:'', None:''}).fillna('')
+        for c in ['이전원금','현재원금','원금변화','이전평가금액','현재평가금액','평가금액변화']:
+            저장[c] = 저장[c].apply(_v52217_money_sheet)
+        values = [비주식자산변동이력표준열_v52217] + 저장[비주식자산변동이력표준열_v52217].astype(str).values.tolist()
+        ws.clear(); ws.update('A1', values, value_input_option='RAW')
+        try:
+            for col in ['G','H','I','J','K','L']:
+                ws.format(f'{col}:{col}', {'numberFormat': {'type':'NUMBER', 'pattern':'#,##0'}})
+        except Exception:
+            pass
+        try: 구글시트데이터프레임읽기.clear()
+        except Exception: pass
+        return True, f"비주식자산변동이력 저장 완료: {len(작업)}건"
+    except Exception as e:
+        logging.warning('non-stock history save failed: %s', e, exc_info=True)
+        return False, f"비주식자산변동이력 저장 오류: {type(e).__name__}: {e}"
+
+def 비주식자산변동행생성_v52217(이전df, 현재df):
+    try: old = IRP비주식자산표준열맞추기(이전df)
+    except Exception: old = pd.DataFrame()
+    try: new = IRP비주식자산표준열맞추기(현재df)
+    except Exception: new = pd.DataFrame()
+    old_map = {_v52217_nonstock_key(r): r for _, r in old.iterrows()} if not old.empty else {}
+    new_map = {_v52217_nonstock_key(r): r for _, r in new.iterrows()} if not new.empty else {}
+    rows = []
+    now = 서울현재시각ISO() if '서울현재시각ISO' in globals() else datetime.now().isoformat(timespec='seconds')
+    for key in sorted(set(old_map.keys()) | set(new_map.keys())):
+        o, n = old_map.get(key), new_map.get(key)
+        계좌, 자산군, 상품명 = key
+        old_pr = _v52217_money_int(o.get('원금',0)) if o is not None else 0
+        new_pr = _v52217_money_int(n.get('원금',0)) if n is not None else 0
+        old_val = _v52217_money_int(o.get('평가금액',0)) if o is not None else 0
+        new_val = _v52217_money_int(n.get('평가금액',0)) if n is not None else 0
+        d_pr, d_val = new_pr-old_pr, new_val-old_val
+        old_note = str(o.get('비고','') or '') if o is not None else ''
+        new_note = str(n.get('비고','') or '') if n is not None else ''
+        if d_pr == 0 and d_val == 0 and old_note == new_note:
+            continue
+        note = new_note or old_note
+        if n is None or (new_pr == 0 and new_val == 0 and (old_pr != 0 or old_val != 0)):
+            typ = '해지/매도반영' if ('TDF' in 상품명.upper() or '매도' in note) else '잔액감소'
+        elif o is None or (old_pr == 0 and old_val == 0 and (new_pr != 0 or new_val != 0)):
+            typ = '예수금이체' if ('예수금' in 상품명 or '이체' in note or '미래에셋' in 계좌) else '현금대기' if ('현금' in 상품명 or '대기' in 상품명) else '신규반영'
+        elif d_val < 0 and ('예수금' in 상품명 or '현금' in 상품명 or '대기' in 상품명):
+            typ = '현금사용'
+        elif d_val > 0 and ('예수금' in 상품명 or '현금' in 상품명 or '대기' in 상품명):
+            typ = '현금증가'
+        else:
+            typ = '잔액변경'
+        if '한화오션' in note and ('예수금' in 상품명 or '예수금' in 자산군):
+            typ = '현금사용'; analysis = f"예수금에서 한화오션 주식 매수로 {원화정수포맷(abs(d_val))}이 사용되어 예수금 잔액이 {원화정수포맷(new_val)}으로 조정되었습니다."
+        elif typ == '예수금이체': analysis = f"{상품명} 현재잔액 {원화정수포맷(new_val)}을 반영했습니다. 계좌이체·보관 내역이며 매도손익으로 직접 계산하지 않습니다."
+        elif typ == '현금대기': analysis = f"{상품명} 잔액 {원화정수포맷(new_val)}을 반영했습니다. 재투자 대기자금입니다."
+        elif typ == '해지/매도반영': analysis = f"{상품명} 원금/평가금액이 0원으로 변경되어 매도 또는 해지 상태로 반영했습니다."
+        elif typ == '현금사용': analysis = f"{상품명} 잔액이 {원화정수포맷(abs(d_val))} 감소했습니다. 주식 매수·출금 등 현금 사용으로 해석합니다."
+        elif typ == '현금증가': analysis = f"{상품명} 잔액이 {원화정수포맷(d_val)} 증가했습니다. 입금·이체·매도대금 보관 가능성이 있습니다."
+        else: analysis = f"{상품명} 원금/평가금액 변동을 반영했습니다."
+        rows.append({'기록시각': now, '반영일자': _v52217_date_str((n if n is not None else o).get('반영일자','')), '변화유형': typ, '계좌': 계좌, '자산군': 자산군, '상품명': 상품명, '이전원금': old_pr, '현재원금': new_pr, '원금변화': d_pr, '이전평가금액': old_val, '현재평가금액': new_val, '평가금액변화': d_val, '비고': note, '자동분석': analysis})
+    return pd.DataFrame(rows, columns=비주식자산변동이력표준열_v52217)
+
+def _v52217_history_to_asset_movements(hist_df, 최근일수=90):
+    표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
+    try:
+        hist = 비주식자산변동이력표준화_v52217(hist_df)
+        if hist.empty: return pd.DataFrame(columns=표준열)
+        today = 서울현재시각().replace(tzinfo=None) if '서울현재시각' in globals() else datetime.now()
+        기준일 = today - timedelta(days=int(최근일수))
+        hist['_date'] = pd.to_datetime(hist['반영일자'], errors='coerce')
+        hist = hist[hist['_date'].isna() | (hist['_date'] >= pd.Timestamp(기준일))].copy()
+        rows=[]
+        for _, r in hist.iterrows():
+            typ=str(r.get('변화유형','') or ''); 상품명=str(r.get('상품명','') or ''); 계좌=str(r.get('계좌','') or ''); note=str(r.get('비고','') or '')
+            amount_delta=_v52217_money_int(r.get('평가금액변화',0)); current_amt=_v52217_money_int(r.get('현재평가금액',0))
+            amount=abs(amount_delta) if amount_delta != 0 and typ in ['현금사용','현금증가','잔액감소','잔액변경'] else abs(current_amt)
+            if amount<=0: continue
+            if typ=='현금사용': 구분='현금사용'; detail='예수금 → 한화오션 주식 매수' if '한화오션' in note else f'{상품명} 사용'
+            elif typ=='예수금이체': 구분='자금이체'; detail=f'TDF2035 매도대금 → {상품명} 이체' if 'TDF' in note.upper() else f'{상품명} 이체/보관'
+            elif typ=='현금대기': 구분='현금대기'; detail=f'{상품명} 잔액'
+            elif typ=='해지/매도반영': 구분='매도반영'; detail=f'{상품명} 매도/해지 반영'
+            else: 구분=typ or '잔액변경'; detail=f'{상품명} {구분}'
+            rows.append({'날짜':str(r.get('반영일자','') or ''),'계좌':계좌,'구분':구분,'종목명':상품명,'자산유형':str(r.get('자산군','') or '현금성자산'),'수량':0,'단가':0,'금액':amount,'원금부분':amount,'수익손실부분':0,'변화유형':구분,'상세설명':detail,'자동분석':str(r.get('자동분석','') or ''),'출처':'비주식자산변동이력'})
+        return pd.DataFrame(rows, columns=표준열)
+    except Exception as e:
+        logging.warning('history to movement failed: %s', e, exc_info=True); return pd.DataFrame(columns=표준열)
+
+def IRP비주식자산요약행생성(irp_df):
+    try:
+        작업=IRP비주식자산표준열맞추기(irp_df); 작업=작업[(작업['원금'].abs()>0)|(작업['평가금액'].abs()>0)].copy()
+        if 작업.empty: return pd.DataFrame(columns=['계좌','자산군','상품명','원금','평가금액','평가손익','수익률','비고'])
+        작업['원금']=작업['원금'].apply(_v52217_money_int); 작업['평가금액']=작업['평가금액'].apply(_v52217_money_int)
+        작업['평가손익']=작업['평가금액']-작업['원금']; 작업['수익률']=np.where(작업['원금']!=0, 작업['평가손익']/작업['원금']*100, 0)
+        return 작업[['계좌','자산군','상품명','원금','평가금액','평가손익','수익률','비고']].copy()
+    except Exception as e:
+        logging.warning('v52217 non-stock summary failed: %s', e, exc_info=True); return pd.DataFrame(columns=['계좌','자산군','상품명','원금','평가금액','평가손익','수익률','비고'])
+
+_IRP비주식자산저장_v52217_base = IRP비주식자산저장
+
+def IRP비주식자산저장(df):
+    연결됨, info = 구글시트운영연결확인(화면표시=False)
+    if not 연결됨: return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지','')}"
+    try:
+        try: 기존df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_NON_STOCK_SHEET)
+        except Exception: 기존df = pd.DataFrame()
+        작업=IRP비주식자산표준열맞추기(df); 표준열=['계좌','자산군','상품명','원금','평가금액','예상연수익률','만기일','반영일자','비고']; 작업=작업[표준열].copy()
+        for c in ['계좌','자산군','상품명','만기일','반영일자','비고']:
+            작업[c]=작업[c].apply(lambda v: '' if pd.isna(v) else str(v).strip()).replace({'nan':'','NaT':'','None':'','<NA>':''})
+        for c in ['만기일','반영일자']: 작업[c]=작업[c].apply(_v52217_date_str)
+        작업['원금']=작업['원금'].apply(_v52217_money_int); 작업['평가금액']=작업['평가금액'].apply(_v52217_money_int); 작업['예상연수익률']=작업['예상연수익률'].apply(lambda v: round(_v52216_num(v,0),2) if '_v52216_num' in globals() else 0.0)
+        작업=작업[(작업['계좌'].astype(str).str.strip()!='')|(작업['자산군'].astype(str).str.strip()!='')|(작업['상품명'].astype(str).str.strip()!='')|(작업['원금'].abs()>0)|(작업['평가금액'].abs()>0)|(작업['비고'].astype(str).str.strip()!='')].copy()
+        spreadsheet, 연결정보 = 구글시트문서연결()
+        if spreadsheet is None: return False, f"Google Sheets 미연결: {연결정보.get('메시지','')}"
+        ws=구글시트워크시트확보(spreadsheet, GOOGLE_SHEETS_NON_STOCK_SHEET, rows=max(100,len(작업)+20), cols=len(표준열)+2)
+        저장작업=작업.copy().replace({pd.NA:'',np.nan:'',None:''}).fillna('')
+        for c in ['원금','평가금액']: 저장작업[c]=저장작업[c].apply(_v52217_money_sheet)
+        저장작업['예상연수익률']=저장작업['예상연수익률'].apply(lambda v: f"{float(v or 0):.2f}")
+        저장값=[표준열]+저장작업[표준열].astype(str).values.tolist()
+        try: 자동백업저장(비주식_df=작업)
+        except Exception: pass
+        ws.clear(); ws.update('A1', 저장값, value_input_option='RAW')
+        try: _v52216_apply_google_sheet_number_format(ws, 표준열)
+        except Exception: pass
+        try:
+            신규이력=비주식자산변동행생성_v52217(기존df, 작업)
+            if not 신규이력.empty:
+                기존이력=비주식자산변동이력읽기_v52217(); 합본=pd.concat([기존이력,신규이력], ignore_index=True, sort=False)
+                합본['_dedup']=합본.apply(lambda r: '|'.join(str(r.get(c,'')) for c in ['반영일자','변화유형','계좌','자산군','상품명','현재원금','현재평가금액','비고']), axis=1)
+                합본=합본.drop_duplicates('_dedup', keep='last').drop(columns=['_dedup']); 비주식자산변동이력저장_v52217(합본)
+        except Exception as e: logging.warning('non-stock change history append skipped: %s', e, exc_info=True)
+        st.session_state['irp_non_stock_assets_df_v512']=작업.copy(); st.session_state['irp_non_stock_assets_last_saved_rows_v5221']=len(작업); st.session_state['irp_non_stock_assets_last_saved_at_v5221']=서울현재시각ISO()
+        try: 구글시트데이터프레임읽기.clear()
+        except Exception: pass
+        return True, f"비주식자산 Google Sheets 저장 완료: {len(작업)}행"
+    except Exception as e:
+        logging.exception('IRP비주식자산저장 실패'); return False, f"비주식자산 저장 오류: {type(e).__name__}: {e}"
+
+_자산이동목록통합_v52217_base = 자산이동목록통합_v5225
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try: base=_자산이동목록통합_v52217_base(거래df, 비주식자산df, 최근일수=최근일수)
+    except Exception: base=pd.DataFrame()
+    try: hist_mov=_v52217_history_to_asset_movements(비주식자산변동이력읽기_v52217(), 최근일수=최근일수)
+    except Exception: hist_mov=pd.DataFrame()
+    통합=pd.concat([base,hist_mov], ignore_index=True, sort=False)
+    if 통합.empty: return 통합
+    for c in ['날짜','계좌','상세설명','금액','구분']:
+        if c not in 통합.columns: 통합[c]='' if c!='금액' else 0
+    통합['금액']=pd.to_numeric(통합['금액'], errors='coerce').fillna(0); 통합['_date_sort']=pd.to_datetime(통합['날짜'], errors='coerce')
+    통합['_src_rank']=통합.get('출처','').astype(str).map(lambda x:0 if x=='비주식자산변동이력' else 1)
+    통합['_key']=통합.apply(lambda r:(str(r.get('날짜','')),str(r.get('계좌','')),str(r.get('구분','')),str(r.get('상세설명','')),round(float(r.get('금액',0) or 0))),axis=1)
+    return 통합.sort_values(['_date_sort','_src_rank','금액'], ascending=[False,True,False]).drop_duplicates('_key',keep='first').drop(columns=['_date_sort','_src_rank','_key'],errors='ignore').reset_index(drop=True)
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df=자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
 # v5.15.1: 화면 구조는 3개 섹터로 고정합니다.
 # - 주요 모니터링
 # - 포트폴리오 현황
