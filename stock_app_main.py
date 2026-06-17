@@ -16274,3 +16274,159 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
     except Exception as e:
         logging.warning('v52221 display merge failed: %s', e, exc_info=True)
         return _최근자산변화표시_v5224_v52221_base(이동df, 최대표시=최대표시)
+
+
+# ============================================================
+# v5.22.22 최근자산변화 누락 이력 강제 복구 최종 연결 패치
+# - v5.22.21에서 강제 복구 행 생성 함수는 있었지만 실제 표시 함수(v5226 경로)에
+#   완전히 연결되지 않는 경우가 있어, 표시 직전 단계에서 다시 한 번 병합합니다.
+# - 비주식자산 시트에는 새 컬럼을 추가하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.22.22-force-cashflow-display-final"
+
+_V52222_FORCED_ROWS = [
+    {
+        '날짜': '2026-06-17', '계좌': '미래에셋증권', '구분': '자금이체',
+        '종목명': '예수금', '자산유형': '현금성자산', '수량': 0, '단가': 0,
+        '금액': 49244653, '원금부분': 49244653, '수익손실부분': 0,
+        '변화유형': '자금이체',
+        '상세설명': 'TDF2035 매도대금 → 미래에셋 예수금 이체',
+        '자동분석': 'TDF2035 매도 원금과 수익금을 세금 공제 후 미래에셋증권 계좌 예수금으로 이체한 이력입니다. 현재 예수금 잔액과 별도로 보존하는 자금흐름 기록입니다.',
+        '출처': '강제복구_v52222'
+    },
+    {
+        '날짜': '2026-06-17', '계좌': '미래에셋증권', '구분': '매수',
+        '종목명': '한화오션', '자산유형': '주식형자산', '수량': 0, '단가': 0,
+        '금액': 13350000, '원금부분': 13350000, '수익손실부분': 0,
+        '변화유형': '매수',
+        '상세설명': '예수금 → 한화오션 주식 매수',
+        '자동분석': '미래에셋 예수금에서 한화오션 주식 매수금액 13,350,000원이 주식형자산으로 이동했습니다.',
+        '출처': '강제복구_v52222'
+    },
+    {
+        '날짜': '2026-06-17', '계좌': '미래에셋증권', '구분': '현금대기',
+        '종목명': '예수금', '자산유형': '현금성자산', '수량': 0, '단가': 0,
+        '금액': 35892653, '원금부분': 35892653, '수익손실부분': 0,
+        '변화유형': '현금대기',
+        '상세설명': '한화오션 매수 후 미래에셋 예수금 잔액',
+        '자동분석': '49,244,653원 이체 후 한화오션 매수 13,350,000원을 반영한 미래에셋 예수금 잔액입니다. 매수금액이나 실현손익으로 중복 계산하지 않습니다.',
+        '출처': '강제복구_v52222'
+    },
+    {
+        '날짜': '2026-06-15', '계좌': '신한IRP', '구분': '현금대기',
+        '종목명': '현금성 대기자산', '자산유형': '현금성자산', '수량': 0, '단가': 0,
+        '금액': 20728, '원금부분': 20728, '수익손실부분': 0,
+        '변화유형': '현금대기',
+        '상세설명': 'TDF2035 매도 후 현금성 대기자산 잔액',
+        '자동분석': '신한은행 IRP에 남아 있는 현금성 대기자산 잔액입니다. 매도대금·계좌이체액·실현손익으로 중복 계산하지 않습니다.',
+        '출처': '강제복구_v52222'
+    },
+]
+
+
+def _v52222_norm_money(x):
+    try:
+        return int(round(float(str(x).replace(',', '').replace('원', '').strip() or 0)))
+    except Exception:
+        return 0
+
+
+def _v52222_norm_date(x):
+    try:
+        if '_v52218_date_str' in globals():
+            return _v52218_date_str(x)
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(x, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return str(x or '')
+
+
+def _v52222_cashflow_key(row):
+    desc = str(row.get('상세설명', '') or '')
+    name = str(row.get('종목명', '') or '')
+    amt = _v52222_norm_money(row.get('금액', 0))
+    if 'TDF2035 매도대금' in desc and '예수금 이체' in desc:
+        return 'V52222_TDF2035_TO_MIRAE_49244653'
+    if '한화오션' in desc and '매수' in desc:
+        return 'V52222_HANWHA_BUY_13350000'
+    if '한화오션 매수 후' in desc and '예수금' in desc:
+        return 'V52222_MIRAE_CASH_AFTER_HANWHA_35892653'
+    if '현금성 대기자산 잔액' in desc:
+        return 'V52222_IRP_CASH_BALANCE_20728'
+    if name == '예수금' and amt == 49244653:
+        return 'V52222_TDF2035_TO_MIRAE_49244653'
+    if '한화오션' in name and amt == 13350000:
+        return 'V52222_HANWHA_BUY_13350000'
+    return '|'.join([_v52222_norm_date(row.get('날짜','')), str(row.get('계좌','')), str(row.get('구분','')), desc, str(amt)])
+
+
+def _v52222_merge_forced_cashflow(df):
+    try:
+        base = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    except Exception:
+        base = pd.DataFrame()
+    forced = pd.DataFrame(_V52222_FORCED_ROWS)
+    out = pd.concat([base, forced], ignore_index=True, sort=False)
+    if out.empty:
+        return out
+    for c in ['날짜','계좌','구분','종목명','자산유형','상세설명','자동분석','출처']:
+        if c not in out.columns:
+            out[c] = ''
+    for c in ['금액','원금부분','수익손실부분','수량','단가']:
+        if c not in out.columns:
+            out[c] = 0
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0)
+    out['날짜'] = out['날짜'].apply(_v52222_norm_date)
+    out['_key_v52222'] = out.apply(_v52222_cashflow_key, axis=1)
+    rank_map = {'강제복구_v52222':0, '현금흐름강제복구':1, '현금흐름복구':2, '현금흐름복원':3, '비주식자산변동이력':4}
+    out['_rank_v52222'] = out['출처'].astype(str).map(lambda x: rank_map.get(x, 9))
+    out['_date_v52222'] = pd.to_datetime(out['날짜'], errors='coerce')
+    out = out.sort_values(['_date_v52222','_rank_v52222','금액'], ascending=[False, True, False])
+    out = out.drop_duplicates('_key_v52222', keep='first')
+    return out.drop(columns=['_key_v52222','_rank_v52222','_date_v52222'], errors='ignore').reset_index(drop=True)
+
+
+# 통합 목록 생성 경로 보정
+try:
+    _자산이동목록통합_v52222_base = 자산이동목록통합_v5225
+    def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+        try:
+            base = _자산이동목록통합_v52222_base(거래df, 비주식자산df, 최근일수=최근일수)
+        except Exception as e:
+            logging.warning('v52222 base movement failed: %s', e, exc_info=True)
+            base = pd.DataFrame()
+        return _v52222_merge_forced_cashflow(base)
+except Exception as e:
+    logging.warning('v52222 movement hook failed: %s', e, exc_info=True)
+
+
+# 표시 함수 경로 보정: v5224와 v5226 모두 감쌉니다.
+try:
+    _최근자산변화표시_v5224_v52222_base = 최근자산변화표시_v5224
+    def 최근자산변화표시_v5224(이동df, 최대표시=12):
+        return _최근자산변화표시_v5224_v52222_base(_v52222_merge_forced_cashflow(이동df), 최대표시=최대표시)
+except Exception as e:
+    logging.warning('v52222 display v5224 hook failed: %s', e, exc_info=True)
+
+try:
+    _최근자산변화표시_v5226_v52222_base = 최근자산변화표시_v5226
+    def 최근자산변화표시_v5226(이동df, 최대표시=12):
+        return _최근자산변화표시_v5226_v52222_base(_v52222_merge_forced_cashflow(이동df), 최대표시=최대표시)
+except Exception as e:
+    logging.warning('v52222 display v5226 hook failed: %s', e, exc_info=True)
+
+try:
+    최근자산변화표시_v5223 = 최근자산변화표시_v5224
+except Exception:
+    pass
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
