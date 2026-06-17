@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.8-principal-realized-profit-fix"
+APP_VERSION = "v5.22.10-balance-reflection-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1188,7 +1188,7 @@ def 최근자산변화표스타일_v5226():
         .date-main{font-weight:720;color:#e2e8f0;white-space:nowrap;}.date-sub{font-size:.72rem;color:#94a3b8;margin-top:.05rem;}
         .move-main{font-weight:750;letter-spacing:-.02em;color:#f8fafc;white-space:normal;}.move-sub{font-size:.76rem;color:#94a3b8;margin-top:.10rem;line-height:1.30;}
         .badge{display:inline-flex;align-items:center;gap:.25rem;border-radius:8px;padding:.26rem .48rem;font-weight:760;font-size:.74rem;white-space:nowrap;}
-        .badge-move{background:rgba(37,99,235,.28);color:#bfdbfe;border:1px solid rgba(96,165,250,.24);}.badge-buy{background:rgba(22,163,74,.23);color:#bbf7d0;border:1px solid rgba(74,222,128,.24);}.badge-sell{background:rgba(220,38,38,.23);color:#fecaca;border:1px solid rgba(248,113,113,.24);}.badge-tdf{background:rgba(168,85,247,.23);color:#e9d5ff;border:1px solid rgba(216,180,254,.24);}
+        .badge-move{background:rgba(37,99,235,.28);color:#bfdbfe;border:1px solid rgba(96,165,250,.24);}.badge-balance{background:rgba(100,116,139,.24);color:#e2e8f0;border:1px solid rgba(148,163,184,.26);}.badge-buy{background:rgba(22,163,74,.23);color:#bbf7d0;border:1px solid rgba(74,222,128,.24);}.badge-sell{background:rgba(220,38,38,.23);color:#fecaca;border:1px solid rgba(248,113,113,.24);}.badge-tdf{background:rgba(168,85,247,.23);color:#e9d5ff;border:1px solid rgba(216,180,254,.24);}
         .amount-main{font-weight:780;color:#38bdf8;text-align:right;white-space:nowrap;}.account-pill{display:inline-flex;border-radius:999px;background:rgba(148,163,184,.10);border:1px solid rgba(148,163,184,.16);padding:.18rem .45rem;color:#cbd5e1;font-size:.74rem;white-space:nowrap;}
         .profit-pill-pos{display:inline-flex;margin-left:.35rem;border-radius:999px;background:rgba(34,197,94,.16);border:1px solid rgba(34,197,94,.26);color:#86efac;padding:.12rem .42rem;font-size:.72rem;font-weight:750;}
         .profit-pill-neg{display:inline-flex;margin-left:.35rem;border-radius:999px;background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.26);color:#fca5a5;padding:.12rem .42rem;font-size:.72rem;font-weight:750;}
@@ -1243,7 +1243,9 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
             이동df["수익손실부분"] = pd.to_numeric(이동df["수익손실부분"], errors="coerce").fillna(0)
 
         총건수 = len(이동df)
-        총금액 = 이동df["이동금액"].abs().sum()
+        잔액반영마스크 = 이동df.get("구분", pd.Series([], dtype=str)).astype(str).str.contains("잔액반영", na=False) if "구분" in 이동df.columns else pd.Series([False] * len(이동df))
+        # 잔액반영은 현재 잔액 확인 항목이므로 최근 자산변화의 '이동금액' KPI에서는 제외합니다.
+        총금액 = 이동df.loc[~잔액반영마스크, "이동금액"].abs().sum() if len(잔액반영마스크) == len(이동df) else 이동df["이동금액"].abs().sum()
         총손익 = 이동df["수익손실부분"].sum()
         날짜시리즈 = pd.to_datetime(이동df.get("날짜", pd.Series([], dtype=object)), errors="coerce").dropna()
         if not 날짜시리즈.empty:
@@ -1288,6 +1290,8 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
                 구분표시, badge = "수익실현", "badge-tdf"
             elif "손실실현" in 구분원본:
                 구분표시, badge = "손실실현", "badge-sell"
+            elif "잔액반영" in 구분원본 or "잔액반영" in str(row.get("변화유형", "")):
+                구분표시, badge = "잔액반영", "badge-balance"
             elif "TDF" in 자산유형.upper() or "TDF" in str(row.get("상세설명", "")).upper():
                 구분표시, badge = "TDF", "badge-tdf"
             elif "매도" in 구분원본:
@@ -1309,7 +1313,9 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
             elif 손익부분 < 0:
                 손익배지 = f'<span class="profit-pill-neg">손실실현 {원화정수포맷(abs(손익부분))}</span>'
             원금손익표시 = '-'
-            if abs(손익부분) >= 1 or abs(원금부분 - 이동금액) >= 1 or 'TDF' in 자산유형.upper():
+            if '잔액반영' in 구분원본 or '잔액반영' in str(row.get('변화유형', '')):
+                원금손익표시 = '현재잔액 반영 / 손익계산 제외'
+            elif abs(손익부분) >= 1 or abs(원금부분 - 이동금액) >= 1 or 'TDF' in 자산유형.upper():
                 원금손익표시 = _v5228_principal_profit_text(원금부분, 손익부분)
             sub = 자동 if 자동 else "자산군 이동"
 
@@ -10132,14 +10138,17 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
             else:
                 # 중요: 이 분기는 예수금/현금성대기자산의 현재 잔액 반영입니다.
                 # 현재 잔액은 매도대금이 아니므로 원금=평가금액, 손익=0으로 처리합니다.
+                # v5.22.10: 기존 현금성 대기자산에 남은 잔액은 '자산이동'이 아니라 '잔액반영'으로 구분합니다.
                 원금부분 = amount
                 손익부분 = 0.0
+                변화유형 = '잔액반영'
+                구분값 = '잔액반영'
                 if 'TDF' in str(note).upper():
                     상세설명 = f'TDF2035 매도 후 {cash_name} 잔액 반영'
-                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다. 이 금액은 현재 잔액이므로 TDF2035 매도대금 또는 실현손익으로 직접 계산하지 않습니다.'
+                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다. 기존 현금성 잔액의 변경/잔액 확인 항목이며, TDF2035 매도대금·계좌이체액·실현손익으로 계산하지 않습니다.'
                 else:
                     상세설명 = f'{cash_name} 잔액 반영'
-                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다.'
+                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다. 현재 잔액 확인 항목이므로 자산이동 금액이나 실현손익으로 계산하지 않습니다.'
 
             key = (date_text, account, cash_name, round(amount), 구분값)
             if key in used:
