@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.11-cash-term-integrity-fix"
+APP_VERSION = "v5.22.12-cash-interpretation-wording-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1320,7 +1320,7 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
                 손익배지 = f'<span class="profit-pill-neg">손실실현 {원화정수포맷(abs(손익부분))}</span>'
             원금손익표시 = '-'
             if '자금이체' in 구분원본 or '자금이체' in str(row.get('변화유형', '')):
-                원금손익표시 = '예수금 보관 / 손익계산 제외'
+                원금손익표시 = '예수금 이체·보관 / 손익계산 제외'
             elif any(x in 구분원본 for x in ['현금대기', '예수금대기', '잔액반영']) or any(x in str(row.get('변화유형', '')) for x in ['현금대기', '예수금대기', '잔액반영']):
                 원금손익표시 = '투자대기 현금 / 손익계산 제외' 
             elif abs(손익부분) >= 1 or abs(원금부분 - 이동금액) >= 1 or 'TDF' in 자산유형.upper():
@@ -3107,7 +3107,7 @@ def 자산이동설명카드표시(이동후보, 제목="최근 자산 변화"):
 
         st.markdown(f"#### {제목}")
         with st.container(border=True):
-            st.markdown(f"**{거래일자 or '최근 거래'} · 자산 이동**")
+            st.markdown(f"**{거래일자 or '최근 거래'} · {이동후보.get('표시구분') or 이동후보.get('방향') or '자산 이동'}**")
             st.markdown(f"### {설명}")
             st.caption(f"{원화정수포맷(금액)}")
             st.markdown(
@@ -5454,8 +5454,8 @@ def IRP비주식자산편집UI():
         # v5.21.3: 비주식·현금성자산 화면에서도 최근 거래에 따른 자산 이동 해석을 바로 보여줍니다.
         # 예: 예수금 → 현대차 주식 매수. 원금 변화가 0원이어도 현금성자산 감소의 이유를 확인할 수 있습니다.
         try:
-            이동후보_비주식화면 = 자산변화최근거래기반이동후보(자산변화로그읽기())
-            자산이동설명카드표시(이동후보_비주식화면, 제목="최근 거래 기반 현금성자산 변화 해석")
+            이동후보_비주식화면 = 자산변화통합최신이동후보_v52212(거래df=현재거래이력가져오기(), 비주식자산df=편집df)
+            자산이동설명카드표시(이동후보_비주식화면, 제목="최근 현금성 자산 이동 해석")
         except Exception as e:
             st.caption(f"최근 거래 기반 현금성자산 해석 표시 오류: {type(e).__name__}: {e}")
 
@@ -10154,18 +10154,18 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
                     변화유형 = '자금이체'
                     구분값 = '자금이체'
                     if 'TDF' in str(note).upper():
-                        상세설명 = f'TDF2035 매도 후 {cash_name} 보관'
+                        상세설명 = f'TDF2035 매도대금 → {cash_name} 이체'
                     else:
                         상세설명 = f'{cash_name} 보관'
-                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}은 계좌 내 예수금으로 보관 중인 투자대기 자금입니다. 비고에 이체액이 명확히 적힌 경우가 아니므로 TDF2035 매도대금·실현손익으로 직접 계산하지 않습니다.'
+                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}은 계좌 내 예수금으로 보관 중인 투자대기 자금입니다. 이 항목은 현재 잔액 확인용으로, 비고에 이체액·원금회수·실현손익이 명확히 적힌 경우가 아니면 TDF2035 매도대금이나 실현손익으로 직접 계산하지 않습니다.'
                 else:
                     변화유형 = '현금대기'
                     구분값 = '현금대기'
                     if 'TDF' in str(note).upper():
-                        상세설명 = f'TDF2035 매도 후 {cash_name} 잔존'
+                        상세설명 = f'TDF2035 매도 후 {cash_name} 잔액'
                     else:
                         상세설명 = f'{cash_name} 보유'
-                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}은 아직 투자되지 않은 현금성 대기자산입니다. 기존 현금성 잔액의 변경/확인 항목이므로 매도대금·계좌이체액·실현손익으로 계산하지 않습니다.'
+                    자동분석 = f'{cash_name} 잔액 {원화정수포맷(amount)}은 재투자를 위해 보관 중인 대기자금입니다. 기존 현금성 잔액의 변경/확인 항목이므로 매도대금·계좌이체액·실현손익으로 계산하지 않습니다.'
 
             key = (date_text, account, cash_name, round(amount), 구분값)
             if key in used:
@@ -10215,6 +10215,56 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     통합['_key'] = 통합.apply(lambda r: (str(r.get('날짜','')), str(r.get('계좌','')), str(r.get('상세설명','')), round(float(r.get('금액',0) or 0))), axis=1)
     통합 = 통합.drop_duplicates('_key', keep='first').sort_values(['_date_sort','금액'], ascending=[False, False]).drop(columns=['_date_sort','_key'])
     return 통합.reset_index(drop=True)
+
+
+def 자산변화통합최신이동후보_v52212(거래df=None, 비주식자산df=None, 최근일수=90):
+    """거래이력과 비주식·현금성자산 변경내역을 함께 보고 가장 최근 현금성 자산 흐름 1건을 카드용으로 변환합니다.
+
+    v5.22.12 개선:
+    - 비주식자산 시트에 6/17 예수금 이체·보관 내역이 있으면 6/15 주식/ETF 매수보다 우선 표시합니다.
+    - 예수금/현금성 대기자산의 현재 잔액 항목은 매도대금·실현손익이 아니라 현재 잔액 확인 항목으로 설명합니다.
+    """
+    try:
+        통합 = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=최근일수)
+        if 통합 is None or 통합.empty:
+            return 자산변화최근거래기반이동후보(자산변화로그읽기())
+        통합 = 통합.copy()
+        통합['_date_sort_v52212'] = pd.to_datetime(통합.get('날짜', ''), errors='coerce')
+        통합['금액'] = pd.to_numeric(통합.get('금액', 0), errors='coerce').fillna(0)
+        # 최신 날짜 우선, 같은 날짜에서는 금액이 큰 항목 우선
+        통합 = 통합.sort_values(['_date_sort_v52212', '금액'], ascending=[False, False])
+        row = 통합.iloc[0]
+        날짜 = str(row.get('날짜', '') or '')
+        구분 = str(row.get('구분', row.get('변화유형', '자산 이동')) or '자산 이동')
+        상세 = str(row.get('상세설명', '') or '').strip()
+        자동 = str(row.get('자동분석', '') or '').strip()
+        금액 = float(row.get('금액', 0) or 0)
+        if not 상세:
+            return 자산변화최근거래기반이동후보(자산변화로그읽기())
+        표시구분 = 구분
+        if 구분 == '자금이체':
+            표시구분 = '자금이체'
+        elif 구분 == '현금대기':
+            표시구분 = '현금대기'
+        elif '매수' in 구분:
+            표시구분 = '매수'
+        elif '매도' in 구분:
+            표시구분 = '매도'
+        return {
+            '추천사유': 표시구분,
+            '확인금액': 금액,
+            '설명': 상세,
+            '자동분석': 자동 or '최근 현금성 자산 흐름을 기준으로 표시했습니다.',
+            '거래일자': 날짜,
+            '종목명': str(row.get('종목명', '') or ''),
+            '종목코드': str(row.get('종목코드', '') or ''),
+            '거래구분': 구분,
+            '방향': 표시구분,
+            '표시구분': 표시구분,
+        }
+    except Exception as e:
+        logging.warning('latest integrated cash movement candidate failed: %s', e, exc_info=True)
+        return 자산변화최근거래기반이동후보(자산변화로그읽기())
 
 def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
     """자산 변화 탭에 최근 자산 이동을 요약 카드 + 표 중심 UI로 표시합니다.
