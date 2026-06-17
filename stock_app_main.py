@@ -16631,10 +16631,12 @@ def _v52222_merge_forced_cashflow(df):
             amt = _v52222_norm_money(row.get('금액', 0))
             if 'TDF2035 매도대금' in desc and '예수금' in desc:
                 return 10
-            if '한화오션' in desc and '매수' in desc:
-                return 20
+            # 중요: '한화오션 매수 후 예수금 잔액' 문장에도 '매수'가 포함되므로
+            # 일반 한화오션 매수보다 먼저 판정해야 합니다.
             if '한화오션 매수 후' in desc and '예수금' in desc:
                 return 30
+            if '한화오션' in desc and '매수' in desc:
+                return 20
             if '현금성 대기자산 잔액' in desc:
                 return 40
             if typ == '수익실현':
@@ -16705,3 +16707,87 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # v5.23.1 자산원장 동일날짜 표시순서 보정
 # ============================================================
 APP_VERSION = "v5.23.1-asset-ledger-event-order-fix"
+
+
+# ============================================================
+# v5.23.2 자산원장 자금흐름 순서 최종 보정
+# - 같은 날짜 2026-06-17 안에서 예수금 잔액 문장이 일반 매수 조건에 먼저 걸리는 문제를 수정합니다.
+# - 표시 순서: 자금이체 → 한화오션 매수 → 매수 후 예수금 잔액 → IRP 현금성 대기자산 잔액
+# ============================================================
+APP_VERSION = "v5.23.2-asset-ledger-flow-order-final"
+
+def _v5232_ledger_flow_order(row):
+    try:
+        desc = str(row.get('상세설명', '') or '')
+        typ = str(row.get('구분', '') or '')
+        name = str(row.get('종목명', '') or '')
+        amt = _v52222_norm_money(row.get('금액', 0)) if '_v52222_norm_money' in globals() else int(float(row.get('금액', 0) or 0))
+
+        if 'TDF2035 매도대금' in desc and '예수금' in desc:
+            return 10
+        if ('한화오션' in desc and '주식 매수' in desc) or ('한화오션' in name and amt == 13350000):
+            return 20
+        if '한화오션 매수 후' in desc and '예수금' in desc:
+            return 30
+        if '현금성 대기자산 잔액' in desc or '현금성 대기자산' in name:
+            return 40
+        if typ == '수익실현':
+            return 50
+        if typ == '자금이체':
+            return 60
+        if typ == '매수':
+            return 70
+        if typ == '매도':
+            return 80
+        if typ == '현금대기':
+            return 90
+        return 100
+    except Exception:
+        return 100
+
+def _v5232_resort_asset_ledger(df):
+    try:
+        out = pd.DataFrame(df).copy()
+        if out.empty:
+            return out
+        if '날짜' not in out.columns:
+            return out
+        out['_date_v5232'] = pd.to_datetime(out['날짜'].apply(_v52222_norm_date if '_v52222_norm_date' in globals() else lambda x: x), errors='coerce')
+        out['_flow_order_v5232'] = out.apply(_v5232_ledger_flow_order, axis=1)
+        out['_amount_v5232'] = pd.to_numeric(out.get('금액', 0), errors='coerce').fillna(0)
+        out = out.sort_values(['_date_v5232', '_flow_order_v5232', '_amount_v5232'], ascending=[False, True, False])
+        return out.drop(columns=['_date_v5232','_flow_order_v5232','_amount_v5232'], errors='ignore').reset_index(drop=True)
+    except Exception as e:
+        logging.warning('v5232 resort failed: %s', e, exc_info=True)
+        return df
+
+try:
+    _v52222_merge_forced_cashflow_v5232_base = _v52222_merge_forced_cashflow
+    def _v52222_merge_forced_cashflow(df):
+        return _v5232_resort_asset_ledger(_v52222_merge_forced_cashflow_v5232_base(df))
+except Exception as e:
+    logging.warning('v5232 merge hook failed: %s', e, exc_info=True)
+
+try:
+    _최근자산변화표시_v5224_v5232_base = 최근자산변화표시_v5224
+    def 최근자산변화표시_v5224(이동df, 최대표시=12):
+        return _최근자산변화표시_v5224_v5232_base(_v5232_resort_asset_ledger(이동df), 최대표시=최대표시)
+except Exception as e:
+    logging.warning('v5232 display hook failed: %s', e, exc_info=True)
+
+try:
+    _최근자산변화표시_v5226_v5232_base = 최근자산변화표시_v5226
+    def 최근자산변화표시_v5226(이동df, 최대표시=12):
+        return _최근자산변화표시_v5226_v5232_base(_v5232_resort_asset_ledger(이동df), 최대표시=최대표시)
+except Exception as e:
+    logging.warning('v5232 display v5226 hook failed: %s', e, exc_info=True)
+
+try:
+    최근자산변화표시_v5223 = 최근자산변화표시_v5224
+except Exception:
+    pass
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    이동df = _v5232_resort_asset_ledger(이동df)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
