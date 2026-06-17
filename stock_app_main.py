@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.10-balance-reflection-fix"
+APP_VERSION = "v5.22.11-cash-term-integrity-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -1188,7 +1188,7 @@ def 최근자산변화표스타일_v5226():
         .date-main{font-weight:720;color:#e2e8f0;white-space:nowrap;}.date-sub{font-size:.72rem;color:#94a3b8;margin-top:.05rem;}
         .move-main{font-weight:750;letter-spacing:-.02em;color:#f8fafc;white-space:normal;}.move-sub{font-size:.76rem;color:#94a3b8;margin-top:.10rem;line-height:1.30;}
         .badge{display:inline-flex;align-items:center;gap:.25rem;border-radius:8px;padding:.26rem .48rem;font-weight:760;font-size:.74rem;white-space:nowrap;}
-        .badge-move{background:rgba(37,99,235,.28);color:#bfdbfe;border:1px solid rgba(96,165,250,.24);}.badge-balance{background:rgba(100,116,139,.24);color:#e2e8f0;border:1px solid rgba(148,163,184,.26);}.badge-buy{background:rgba(22,163,74,.23);color:#bbf7d0;border:1px solid rgba(74,222,128,.24);}.badge-sell{background:rgba(220,38,38,.23);color:#fecaca;border:1px solid rgba(248,113,113,.24);}.badge-tdf{background:rgba(168,85,247,.23);color:#e9d5ff;border:1px solid rgba(216,180,254,.24);}
+        .badge-move{background:rgba(37,99,235,.28);color:#bfdbfe;border:1px solid rgba(96,165,250,.24);}.badge-transfer{background:rgba(14,165,233,.20);color:#bae6fd;border:1px solid rgba(56,189,248,.26);}.badge-cash{background:rgba(100,116,139,.24);color:#e2e8f0;border:1px solid rgba(148,163,184,.26);}.badge-buy{background:rgba(22,163,74,.23);color:#bbf7d0;border:1px solid rgba(74,222,128,.24);}.badge-sell{background:rgba(220,38,38,.23);color:#fecaca;border:1px solid rgba(248,113,113,.24);}.badge-tdf{background:rgba(168,85,247,.23);color:#e9d5ff;border:1px solid rgba(216,180,254,.24);}
         .amount-main{font-weight:780;color:#38bdf8;text-align:right;white-space:nowrap;}.account-pill{display:inline-flex;border-radius:999px;background:rgba(148,163,184,.10);border:1px solid rgba(148,163,184,.16);padding:.18rem .45rem;color:#cbd5e1;font-size:.74rem;white-space:nowrap;}
         .profit-pill-pos{display:inline-flex;margin-left:.35rem;border-radius:999px;background:rgba(34,197,94,.16);border:1px solid rgba(34,197,94,.26);color:#86efac;padding:.12rem .42rem;font-size:.72rem;font-weight:750;}
         .profit-pill-neg{display:inline-flex;margin-left:.35rem;border-radius:999px;background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.26);color:#fca5a5;padding:.12rem .42rem;font-size:.72rem;font-weight:750;}
@@ -1243,9 +1243,13 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
             이동df["수익손실부분"] = pd.to_numeric(이동df["수익손실부분"], errors="coerce").fillna(0)
 
         총건수 = len(이동df)
-        잔액반영마스크 = 이동df.get("구분", pd.Series([], dtype=str)).astype(str).str.contains("잔액반영", na=False) if "구분" in 이동df.columns else pd.Series([False] * len(이동df))
-        # 잔액반영은 현재 잔액 확인 항목이므로 최근 자산변화의 '이동금액' KPI에서는 제외합니다.
-        총금액 = 이동df.loc[~잔액반영마스크, "이동금액"].abs().sum() if len(잔액반영마스크) == len(이동df) else 이동df["이동금액"].abs().sum()
+        현금관리마스크 = pd.Series([False] * len(이동df), index=이동df.index)
+        for _col in ["구분", "변화유형"]:
+            if _col in 이동df.columns:
+                현금관리마스크 = 현금관리마스크 | 이동df[_col].astype(str).str.contains("현금대기|자금이체|예수금대기|잔액반영", na=False)
+        # 현금대기/자금이체는 현재 현금 잔액 확인 성격이 강하므로 최근 자산변화의 '이동금액' KPI에서는 제외합니다.
+        # 실제 이동금액은 거래이력 또는 비고에 이체금액이 명확히 적힌 경우에만 별도 거래로 집계해야 합니다.
+        총금액 = 이동df.loc[~현금관리마스크, "이동금액"].abs().sum() if len(현금관리마스크) == len(이동df) else 이동df["이동금액"].abs().sum()
         총손익 = 이동df["수익손실부분"].sum()
         날짜시리즈 = pd.to_datetime(이동df.get("날짜", pd.Series([], dtype=object)), errors="coerce").dropna()
         if not 날짜시리즈.empty:
@@ -1290,8 +1294,10 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
                 구분표시, badge = "수익실현", "badge-tdf"
             elif "손실실현" in 구분원본:
                 구분표시, badge = "손실실현", "badge-sell"
-            elif "잔액반영" in 구분원본 or "잔액반영" in str(row.get("변화유형", "")):
-                구분표시, badge = "잔액반영", "badge-balance"
+            elif "자금이체" in 구분원본 or "자금이체" in str(row.get("변화유형", "")):
+                구분표시, badge = "자금이체", "badge-transfer"
+            elif any(x in 구분원본 for x in ["현금대기", "예수금대기", "잔액반영"]) or any(x in str(row.get("변화유형", "")) for x in ["현금대기", "예수금대기", "잔액반영"]):
+                구분표시, badge = "현금대기", "badge-cash"
             elif "TDF" in 자산유형.upper() or "TDF" in str(row.get("상세설명", "")).upper():
                 구분표시, badge = "TDF", "badge-tdf"
             elif "매도" in 구분원본:
@@ -1313,8 +1319,10 @@ def 최근자산변화표시_v5226(이동df, 최대표시=12):
             elif 손익부분 < 0:
                 손익배지 = f'<span class="profit-pill-neg">손실실현 {원화정수포맷(abs(손익부분))}</span>'
             원금손익표시 = '-'
-            if '잔액반영' in 구분원본 or '잔액반영' in str(row.get('변화유형', '')):
-                원금손익표시 = '현재잔액 반영 / 손익계산 제외'
+            if '자금이체' in 구분원본 or '자금이체' in str(row.get('변화유형', '')):
+                원금손익표시 = '예수금 보관 / 손익계산 제외'
+            elif any(x in 구분원본 for x in ['현금대기', '예수금대기', '잔액반영']) or any(x in str(row.get('변화유형', '')) for x in ['현금대기', '예수금대기', '잔액반영']):
+                원금손익표시 = '투자대기 현금 / 손익계산 제외' 
             elif abs(손익부분) >= 1 or abs(원금부분 - 이동금액) >= 1 or 'TDF' in 자산유형.upper():
                 원금손익표시 = _v5228_principal_profit_text(원금부분, 손익부분)
             sub = 자동 if 자동 else "자산군 이동"
@@ -10057,7 +10065,7 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
     - 예수금/현금성 대기자산의 '현재 잔액'을 TDF2035 매도대금으로 착각하지 않습니다.
     - 확정 매도금 44,592,176원 또는 비고에 원금회수/실현손익 금액이 명시된 경우에만
       수익실현 거래로 분리합니다.
-    - 그 외 현금성 행은 '현금성자산 잔액 반영'으로 표시하고 손익은 0원으로 둡니다.
+    - 그 외 현금성 행은 '현금대기'로 표시하고 손익은 0원으로 둡니다.
     """
     표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
     try:
@@ -10136,19 +10144,28 @@ def 비주식자산최근이동목록생성(비주식자산df, 최근일수=90):
                 상세설명 = f'{source_name} 전량 매도 → {cash_name}'
                 자동분석 = _v5228_realized_analysis(source_name, cash_name, amount, 원금부분, 손익부분)
             else:
-                # 중요: 이 분기는 예수금/현금성대기자산의 현재 잔액 반영입니다.
-                # 현재 잔액은 매도대금이 아니므로 원금=평가금액, 손익=0으로 처리합니다.
-                # v5.22.10: 기존 현금성 대기자산에 남은 잔액은 '자산이동'이 아니라 '잔액반영'으로 구분합니다.
+                # 중요: 이 분기는 예수금/현금성대기자산의 현재 잔액 관리입니다.
+                # 현재 잔액은 매도대금 자체가 아니므로 원금=평가금액, 손익=0으로 처리합니다.
+                # v5.22.11: 금융·증권 용어 기준으로 예수금 보관은 '자금이체', 미투자 현금 잔액은 '현금대기'로 표시합니다.
                 원금부분 = amount
                 손익부분 = 0.0
-                변화유형 = '잔액반영'
-                구분값 = '잔액반영'
-                if 'TDF' in str(note).upper():
-                    상세설명 = f'TDF2035 매도 후 {cash_name} 잔액 반영'
-                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다. 기존 현금성 잔액의 변경/잔액 확인 항목이며, TDF2035 매도대금·계좌이체액·실현손익으로 계산하지 않습니다.'
+                is_transfer_cash = ('예수금' in cash_name) or ('이체' in str(note)) or ('미래에셋' in account)
+                if is_transfer_cash:
+                    변화유형 = '자금이체'
+                    구분값 = '자금이체'
+                    if 'TDF' in str(note).upper():
+                        상세설명 = f'TDF2035 매도 후 {cash_name} 보관'
+                    else:
+                        상세설명 = f'{cash_name} 보관'
+                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}은 계좌 내 예수금으로 보관 중인 투자대기 자금입니다. 비고에 이체액이 명확히 적힌 경우가 아니므로 TDF2035 매도대금·실현손익으로 직접 계산하지 않습니다.'
                 else:
-                    상세설명 = f'{cash_name} 잔액 반영'
-                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}을 반영했습니다. 현재 잔액 확인 항목이므로 자산이동 금액이나 실현손익으로 계산하지 않습니다.'
+                    변화유형 = '현금대기'
+                    구분값 = '현금대기'
+                    if 'TDF' in str(note).upper():
+                        상세설명 = f'TDF2035 매도 후 {cash_name} 잔존'
+                    else:
+                        상세설명 = f'{cash_name} 보유'
+                    자동분석 = f'{cash_name} 현재 잔액 {원화정수포맷(amount)}은 아직 투자되지 않은 현금성 대기자산입니다. 기존 현금성 잔액의 변경/확인 항목이므로 매도대금·계좌이체액·실현손익으로 계산하지 않습니다.'
 
             key = (date_text, account, cash_name, round(amount), 구분값)
             if key in used:
