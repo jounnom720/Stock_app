@@ -14899,6 +14899,237 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 
     # -----------------------------------
 
+
+
+# ============================================================
+# v5.23.0 자산원장 최근자산변화 실제 표시 연결 패치
+# 위치 중요:
+# - 아래 포트폴리오 현황 UI가 실행되기 전에 정의되어야 합니다.
+# - v5.22.19~v5.22.22에서 보정 함수가 파일 하단에 있어 화면 실행 이후에 적용되던 문제를 해결합니다.
+# - 기존 비주식자산 시트에는 새 컬럼을 추가하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.23.0-asset-ledger-display-foundation"
+
+ASSET_LEDGER_EVENT_TYPES_V523 = [
+    "매수", "매도", "수익실현", "손실실현", "자금이체", "현금대기",
+    "배당수령", "이자수령", "입금", "출금",
+]
+
+_V523_LEDGER_RECOVERY_ROWS = [
+    {
+        "날짜": "2026-06-16",
+        "계좌": "신한은행 IRP",
+        "구분": "수익실현",
+        "종목명": "TDF2035",
+        "자산유형": "TDF",
+        "수량": 0,
+        "단가": 0,
+        "금액": 44592176,
+        "원금부분": 40901249,
+        "수익손실부분": 3690927,
+        "변화유형": "수익실현",
+        "상세설명": "TDF2035 전량 매도",
+        "자동분석": "TDF2035 전량매도로 원금 40,901,249원을 회수하고 실현수익 3,690,927원을 확정했습니다. 총 회수금액은 44,592,176원입니다.",
+        "출처": "자산원장복구_v523",
+    },
+    {
+        "날짜": "2026-06-17",
+        "계좌": "신한은행 IRP → 미래에셋증권",
+        "구분": "자금이체",
+        "종목명": "예수금",
+        "자산유형": "현금성자산",
+        "수량": 0,
+        "단가": 0,
+        "금액": 49244653,
+        "원금부분": 49244653,
+        "수익손실부분": 0,
+        "변화유형": "자금이체",
+        "상세설명": "TDF2035 매도대금 → 미래에셋 예수금 이체",
+        "자동분석": "TDF2035 매도 후 현금성 대기자산에 보관된 자금을 미래에셋증권 계좌 예수금으로 이체한 흐름입니다. 현재 잔액과 별도 이력으로 보존합니다.",
+        "출처": "자산원장복구_v523",
+    },
+    {
+        "날짜": "2026-06-17",
+        "계좌": "미래에셋증권",
+        "구분": "매수",
+        "종목명": "한화오션",
+        "자산유형": "주식형자산",
+        "수량": 0,
+        "단가": 0,
+        "금액": 13350000,
+        "원금부분": 13350000,
+        "수익손실부분": 0,
+        "변화유형": "매수",
+        "상세설명": "예수금 → 한화오션 주식 매수",
+        "자동분석": "미래에셋 예수금에서 한화오션 주식 매수금액 13,350,000원이 주식형자산으로 이동했습니다.",
+        "출처": "자산원장복구_v523",
+    },
+    {
+        "날짜": "2026-06-17",
+        "계좌": "미래에셋증권",
+        "구분": "현금대기",
+        "종목명": "예수금",
+        "자산유형": "현금성자산",
+        "수량": 0,
+        "단가": 0,
+        "금액": 35892653,
+        "원금부분": 35892653,
+        "수익손실부분": 0,
+        "변화유형": "현금대기",
+        "상세설명": "한화오션 매수 후 미래에셋 예수금 잔액",
+        "자동분석": "49,244,653원 이체 후 한화오션 매수 13,350,000원을 반영한 미래에셋 예수금 잔액입니다. 매수금액이나 실현손익으로 중복 계산하지 않습니다.",
+        "출처": "자산원장복구_v523",
+    },
+    {
+        "날짜": "2026-06-17",
+        "계좌": "신한은행 IRP",
+        "구분": "현금대기",
+        "종목명": "현금성 대기자산",
+        "자산유형": "현금성자산",
+        "수량": 0,
+        "단가": 0,
+        "금액": 20728,
+        "원금부분": 20728,
+        "수익손실부분": 0,
+        "변화유형": "현금대기",
+        "상세설명": "TDF2035 매도 후 신한IRP 현금성 대기자산 잔액",
+        "자동분석": "신한은행 IRP에 남아 있는 현금성 대기자산 잔액입니다. 매도대금·계좌이체액·실현손익으로 중복 계산하지 않습니다.",
+        "출처": "자산원장복구_v523",
+    },
+]
+
+
+def _v523_money_int(value):
+    try:
+        s = str(value).replace(",", "").replace("원", "").strip()
+        if s == "" or s.lower() in ("nan", "none", "nat"):
+            return 0
+        return int(round(float(s)))
+    except Exception:
+        return 0
+
+
+def _v523_date_str(value):
+    try:
+        if "_v52218_date_str" in globals():
+            return _v52218_date_str(value)
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.notna(ts):
+            return ts.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return str(value or "")
+
+
+def _v523_ledger_key(row):
+    desc = str(row.get("상세설명", "") or "")
+    name = str(row.get("종목명", "") or "")
+    typ = str(row.get("구분", row.get("변화유형", "")) or "")
+    amt = _v523_money_int(row.get("금액", 0))
+    if "TDF2035" in desc and ("전량 매도" in desc or "전량매도" in desc):
+        return "V523_TDF2035_REALIZED_44592176"
+    if "TDF2035 매도대금" in desc and "예수금" in desc:
+        return "V523_TDF2035_TO_MIRAE_CASH_49244653"
+    if "한화오션" in desc and "매수" in desc:
+        return "V523_HANWHA_BUY_13350000"
+    if "한화오션 매수 후" in desc and "예수금" in desc:
+        return "V523_MIRAE_CASH_AFTER_HANWHA_35892653"
+    if "현금성 대기자산" in desc and "잔액" in desc:
+        return "V523_SHINHAN_IRP_CASH_BALANCE_20728"
+    if "한화오션" in name and amt == 13350000:
+        return "V523_HANWHA_BUY_13350000"
+    return "|".join([_v523_date_str(row.get("날짜", "")), str(row.get("계좌", "")), typ, desc, str(amt)])
+
+
+def _v523_merge_asset_ledger_rows(df):
+    try:
+        base = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    except Exception:
+        base = pd.DataFrame()
+
+    forced = pd.DataFrame(_V523_LEDGER_RECOVERY_ROWS)
+    out = pd.concat([base, forced], ignore_index=True, sort=False)
+
+    if out.empty:
+        return out
+
+    for c in ["날짜", "계좌", "구분", "종목명", "자산유형", "변화유형", "상세설명", "자동분석", "출처"]:
+        if c not in out.columns:
+            out[c] = ""
+        out[c] = out[c].fillna("").astype(str)
+
+    for c in ["금액", "원금부분", "수익손실부분", "수량", "단가"]:
+        if c not in out.columns:
+            out[c] = 0
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).round().astype(int)
+
+    out["날짜"] = out["날짜"].apply(_v523_date_str)
+
+    # 과거 용어 제거
+    out["구분"] = out["구분"].replace({"잔액반영": "현금대기", "잔액조정": "현금대기"})
+    out["변화유형"] = out["변화유형"].replace({"잔액반영": "현금대기", "잔액조정": "현금대기"})
+    out["상세설명"] = out["상세설명"].str.replace("잔존", "잔액", regex=False).str.replace("잔액 반영", "잔액", regex=False)
+
+    out["_key_v523"] = out.apply(_v523_ledger_key, axis=1)
+    rank_map = {
+        "자산원장복구_v523": 0,
+        "강제복구_v52222": 1,
+        "현금흐름강제복구": 2,
+        "현금흐름복구": 3,
+        "비주식자산변동이력": 4,
+    }
+    out["_rank_v523"] = out["출처"].map(lambda x: rank_map.get(str(x), 9))
+    out["_date_v523"] = pd.to_datetime(out["날짜"], errors="coerce")
+    out = out.sort_values(["_date_v523", "_rank_v523", "금액"], ascending=[False, True, False])
+    out = out.drop_duplicates("_key_v523", keep="first")
+    return out.drop(columns=["_key_v523", "_rank_v523", "_date_v523"], errors="ignore").reset_index(drop=True)
+
+
+# 포트폴리오 현황 UI 실행 전에 실제 표시 경로를 직접 교체합니다.
+try:
+    _자산이동목록통합_v523_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v523_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        base = _자산이동목록통합_v523_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v523_base else pd.DataFrame()
+    except Exception as e:
+        logging.warning("v523 base movement failed: %s", e, exc_info=True)
+        base = pd.DataFrame()
+    return _v523_merge_asset_ledger_rows(base)
+
+
+try:
+    _최근자산변화표시_v523_base = 최근자산변화표시_v5224
+except Exception:
+    _최근자산변화표시_v523_base = None
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=12):
+    df = _v523_merge_asset_ledger_rows(이동df)
+    if _최근자산변화표시_v523_base:
+        return _최근자산변화표시_v523_base(df, 최대표시=max(최대표시, 12))
+    return df
+
+
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=12):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 12))
+
+# ============================================================
+# end v5.23.0 asset-ledger display patch
+# ============================================================
+
+
 if 선택섹터 == "포트폴리오 현황":
     # 포트폴리오 계산 결과
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
