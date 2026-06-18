@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.24.1-version-guard-clean"
+APP_VERSION = "v5.24.2-runtime-audit-clean"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -14055,7 +14055,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.24.1-version-guard-clean"
+    APP_VERSION = "v5.24.2-runtime-audit-clean"
 except Exception:
     pass
 
@@ -14435,7 +14435,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.24.1-version-guard-clean"
+APP_VERSION = "v5.24.2-runtime-audit-clean"
 
 
 def _v5239_text(value):
@@ -15254,7 +15254,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.24.1-version-guard-clean"
+APP_VERSION = "v5.24.2-runtime-audit-clean"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15577,7 +15577,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.1-version-guard-clean"
+APP_VERSION = "v5.24.2-runtime-audit-clean"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -15865,7 +15865,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.1-version-guard-clean"
+APP_VERSION = "v5.24.2-runtime-audit-clean"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -16144,7 +16144,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.24.1-version-guard-clean"
+APP_VERSION = "v5.24.2-runtime-audit-clean"
 
 
 def _v52221_to_df_safe(obj):
@@ -16396,5 +16396,72 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.1-version-guard-clean"
+APP_VERSION = "v5.24.2-runtime-audit-clean"
 
+
+
+# ============================================================
+# v5.24.2 runtime audit clean
+# 목적
+# - 실행 로직은 변경하지 않습니다.
+# - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
+# - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.24.2-runtime-audit-clean"
+
+
+def _v5242_runtime_integrity_check():
+    """운영자가 필요할 때 호출해 현재 실행 중인 핵심 함수와 버전 상태를 확인하는 비침투형 점검 함수."""
+    try:
+        import inspect
+        checks = []
+        핵심함수 = [
+            "자산이동목록통합_v5225",
+            "최근자산변화카드표시",
+            "최근자산변화표시_v5224",
+            "IRP비주식자산저장",
+            "IRP비주식자산요약행생성",
+            "_v5235_merge_and_sort_ledger",
+            "_v5235_build_full_movement_base",
+            "_v52217_history_to_asset_movements",
+        ]
+        for name in 핵심함수:
+            obj = globals().get(name)
+            if obj is None:
+                checks.append({"항목": name, "상태": "누락", "위치": "-"})
+                continue
+            try:
+                line = inspect.getsourcelines(obj)[1]
+            except Exception:
+                line = "확인불가"
+            checks.append({"항목": name, "상태": "정상", "위치": line})
+        checks.append({"항목": "APP_VERSION", "상태": APP_VERSION, "위치": "runtime"})
+        checks.append({"항목": "정상 기준", "상태": "거래 48건 / 실현손익 3,690,927원 유지 대상", "위치": "검증 기준"})
+        return checks
+    except Exception as e:
+        return [{"항목": "runtime_integrity_check", "상태": f"점검 오류: {type(e).__name__}: {e}", "위치": "-"}]
+
+
+def v5242_운영점검표시():
+    """Streamlit 화면에서 수동 호출할 수 있는 운영 점검 표시 함수. 기본 실행 흐름에는 자동 개입하지 않습니다."""
+    try:
+        if 'st' not in globals():
+            return _v5242_runtime_integrity_check()
+        점검 = _v5242_runtime_integrity_check()
+        with st.expander("v5.24.2 운영 점검", expanded=False):
+            st.caption("기능 변경 없이 현재 실행 중인 핵심 함수와 버전 표기를 확인합니다.")
+            try:
+                st.dataframe(pd.DataFrame(점검), use_container_width=True, hide_index=True)
+            except Exception:
+                st.write(점검)
+        return 점검
+    except Exception as e:
+        try:
+            logging.warning("v5.24.2 runtime audit display failed: %s", e, exc_info=True)
+        except Exception:
+            pass
+        return []
+
+# ============================================================
+# end v5.24.2 runtime audit clean
+# ============================================================
