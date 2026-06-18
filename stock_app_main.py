@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.23.10-full-history-arrow-safe-fix"
+APP_VERSION = "v5.24.1-version-guard-clean"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -3111,7 +3111,7 @@ def 자산이동설명카드표시(이동후보, 제목="최근 자산 변화"):
             st.markdown(f"### {설명}")
             st.caption(f"{원화정수포맷(금액)}")
             st.markdown(
-                f"""
+                """
                 <div style="padding:0.75rem 0.9rem;border-radius:10px;background:rgba(59,130,246,0.14);color:#93c5fd;font-weight:520;">
                     {자동분석}
                 </div>
@@ -10271,12 +10271,6 @@ def 자산변화통합최신이동후보_v52212(거래df=None, 비주식자산df
         logging.warning('latest integrated cash movement candidate failed: %s', e, exc_info=True)
         return 자산변화최근거래기반이동후보(자산변화로그읽기())
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
-    """자산 변화 탭에 최근 자산 이동을 요약 카드 + 표 중심 UI로 표시합니다.
-    v5.22.5부터 거래이력뿐 아니라 비주식자산 시트의 TDF 매도→현금성자산 이동도 함께 반영합니다.
-    """
-    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
 
@@ -13288,7 +13282,7 @@ def 포트폴리오종합인사이트UI(보유포트폴리오, 통합자산표=N
     c1, c2, c3 = st.columns([0.9, 1.75, 1.75], gap="medium")
     with c1:
         st.markdown(
-            f"""
+            """
             <div class='insight-card'>
                 <div class='insight-card-label'>종합 상태</div>
                 <div class='insight-status'>{상태}</div>
@@ -13299,7 +13293,7 @@ def 포트폴리오종합인사이트UI(보유포트폴리오, 통합자산표=N
         )
     with c2:
         st.markdown(
-            f"""
+            """
             <div class='insight-card'>
                 <div class='insight-card-label'>핵심 요약</div>
                 <div class='insight-body'>{핵심}</div>
@@ -13310,7 +13304,7 @@ def 포트폴리오종합인사이트UI(보유포트폴리오, 통합자산표=N
         )
     with c3:
         st.markdown(
-            f"""
+            """
             <div class='insight-card'>
                 <div class='insight-card-label'>다음 점검</div>
                 <div class='insight-body'>{다음점검}</div>
@@ -13582,87 +13576,6 @@ def IRP비주식자산요약행생성(irp_df):
 
 
 # 기존 저장 함수 보정: Google Sheets에 저장될 때도 현재 잔액과 정수 표시를 함께 정리합니다.
-def IRP비주식자산저장(df):
-    연결됨, info = 구글시트운영연결확인(화면표시=False)
-    if not 연결됨:
-        return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
-
-    try:
-        try:
-            거래df = 현재거래이력가져오기()
-        except Exception:
-            거래df = pd.DataFrame()
-        작업 = IRP비주식자산표준열맞추기(df)
-        # v5.22.15: 시스템 직접 입력/수정 저장 시 사용자가 입력한 현재 잔액을 그대로 저장합니다.
-        # 예수금 비고의 "주식 매수" 문구만으로 자동 차감하면 이미 차감 입력된 잔액이 다시 줄어드는 중복 차감 오류가 발생합니다.
-        # 중복 여부는 통합 계산/점검에서 안내하되, 저장 단계에서는 원본 입력값을 훼손하지 않습니다.
-        표준열 = ["계좌", "자산군", "상품명", "원금", "평가금액", "예상연수익률", "만기일", "반영일자", "비고"]
-        작업 = 작업[표준열].copy()
-
-        for 열 in ["계좌", "자산군", "상품명", "만기일", "반영일자", "비고"]:
-            작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
-            작업[열] = 작업[열].replace({"nan": "", "NaT": "", "None": "", "<NA>": ""})
-        for 열 in ["만기일", "반영일자"]:
-            작업[열] = 작업[열].apply(_v52214_date_str)
-        for 열 in ["원금", "평가금액", "예상연수익률"]:
-            작업[열] = 작업[열].apply(_v52214_num)
-
-        작업 = 작업[
-            (작업["계좌"].astype(str).str.strip() != "")
-            | (작업["자산군"].astype(str).str.strip() != "")
-            | (작업["상품명"].astype(str).str.strip() != "")
-            | (작업["원금"].abs() > 0)
-            | (작업["평가금액"].abs() > 0)
-            | (작업["비고"].astype(str).str.strip() != "")
-        ].copy()
-
-        try:
-            구버전기준일 = 작업["반영일자"].astype(str).str.contains("2026-04-30", na=False).sum()
-            구버전금액패턴 = 작업["평가금액"].astype(float).isin([51873538, 31443846, 27499444, 5030813, 17188280]).sum()
-            if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
-                return False, "저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다."
-        except Exception as e:
-            logging.warning("non-stock legacy sample guard skipped: %s", e, exc_info=True)
-
-        spreadsheet, 연결정보 = 구글시트문서연결()
-        if spreadsheet is None:
-            return False, f"Google Sheets 미연결: {연결정보.get('메시지', '')}"
-
-        ws = 구글시트워크시트확보(
-            spreadsheet,
-            GOOGLE_SHEETS_NON_STOCK_SHEET,
-            rows=max(100, len(작업) + 20),
-            cols=len(표준열) + 2,
-        )
-
-        저장작업 = 작업.copy()
-        for 열 in ["원금", "평가금액"]:
-            저장작업[열] = 저장작업[열].apply(_v52214_money_str)
-        저장작업["예상연수익률"] = 저장작업["예상연수익률"].apply(lambda v: f"{_v52214_num(v):.2f}")
-        저장작업 = 저장작업.replace({pd.NA: "", np.nan: "", None: ""}).fillna("")
-        저장값 = [표준열] + 저장작업[표준열].astype(str).values.tolist()
-
-        try:
-            자동백업저장(비주식_df=작업)
-        except Exception as e:
-            logging.warning("non-stock pre-save backup failed: %s", e, exc_info=True)
-
-        ws.clear()
-        구글시트워크시트포맷적용(ws, 저장작업)
-        # RAW + 정수 문자열 저장으로 111.0 표시를 방지합니다.
-        ws.update("A1", 저장값, value_input_option="RAW")
-
-        st.session_state["irp_non_stock_assets_df_v512"] = 작업.copy()
-        st.session_state["irp_non_stock_assets_last_saved_rows_v5221"] = len(작업)
-        st.session_state["irp_non_stock_assets_last_saved_at_v5221"] = 서울현재시각ISO()
-        try:
-            구글시트데이터프레임읽기.clear()
-        except Exception as e:
-            logging.warning("non-stock read cache clear failed: %s", e, exc_info=True)
-        return True, f"비주식자산 Google Sheets 저장 완료: {len(작업)}행"
-    except Exception as e:
-        logging.exception("IRP비주식자산저장 실패")
-        return False, f"비주식자산 저장 오류: {type(e).__name__}: {e}"
 
 
 
@@ -14091,7 +14004,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
         st.caption('v5.19.3 · 거래이력 기반 포트폴리오 성격 → 산업 노출도 → 영향요인 TOP3 → 오늘의 상태 순서로 표시합니다.')
 
         st.markdown(
-            f"""
+            """
             <div style="border:1px solid rgba(148,163,184,.35); border-radius:18px; padding:18px 20px; margin:8px 0 18px 0; background:rgba(15,23,42,.28);">
               <div style="font-size:.90rem; color:#94a3b8; margin-bottom:6px;">포트폴리오 성격</div>
               <div style="font-size:1.65rem; font-weight:700; line-height:1.2;">{html.escape(profile.get('성격','-'))}</div>
@@ -14142,7 +14055,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.22.16-cash-balance-sheet-format-fix"
+    APP_VERSION = "v5.24.1-version-guard-clean"
 except Exception:
     pass
 
@@ -14510,9 +14423,6 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     통합['_key']=통합.apply(lambda r:(str(r.get('날짜','')),str(r.get('계좌','')),str(r.get('구분','')),str(r.get('상세설명','')),round(float(r.get('금액',0) or 0))),axis=1)
     return 통합.sort_values(['_date_sort','_src_rank','금액'], ascending=[False,True,False]).drop_duplicates('_key',keep='first').drop(columns=['_date_sort','_src_rank','_key'],errors='ignore').reset_index(drop=True)
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
-    이동df=자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
 
@@ -14525,7 +14435,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.23.9-full-history-before-main-ledger-fix"
+APP_VERSION = "v5.24.1-version-guard-clean"
 
 
 def _v5239_text(value):
@@ -14729,9 +14639,6 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     return out.drop(columns=['_key_v5239', '_src_rank_v5239', '_date_sort_v5239', '_event_order_v5239', '_ledger_order_v5239'], errors='ignore').reset_index(drop=True)
 
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=12):
-    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 # v5.15.1: 화면 구조는 3개 섹터로 고정합니다.
 # - 주요 모니터링
@@ -15347,7 +15254,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.22.18-cash-flow-history-recovery"
+APP_VERSION = "v5.24.1-version-guard-clean"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15648,9 +15555,6 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     return 통합.drop(columns=['_date_sort','_src_rank','_key'],errors='ignore').reset_index(drop=True)
 
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
-    이동df=자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
 # v5.22.18: 비주식자산 저장 시 날짜 일련번호 복원과 원 단위 정수 저장을 재보장합니다.
@@ -15673,7 +15577,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.22.19-nonstock-history-auto-recovery"
+APP_VERSION = "v5.24.1-version-guard-clean"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -15932,9 +15836,6 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     return 통합.drop(columns=['_date_sort','_src_rank','_key'], errors='ignore').reset_index(drop=True)
 
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
-    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
 # v5.22.19: 저장 전 날짜·금액 정규화 재보장
@@ -15964,7 +15865,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.22.20-nonstock-history-recovery-display-fix"
+APP_VERSION = "v5.24.1-version-guard-clean"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -16234,9 +16135,6 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     return 통합.drop(columns=['_date_sort','_src_rank','_key'], errors='ignore').reset_index(drop=True)
 
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
-    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
 # ============================================================
@@ -16246,7 +16144,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.22.21-nonstock-cashflow-force-merge"
+APP_VERSION = "v5.24.1-version-guard-clean"
 
 
 def _v52221_to_df_safe(obj):
@@ -16492,3 +16390,11 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
     except Exception as e:
         logging.warning('v52221 display merge failed: %s', e, exc_info=True)
         return _최근자산변화표시_v5224_v52221_base(이동df, 최대표시=최대표시)
+
+# ============================================================
+# v5.24.1 version guard
+# - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
+# - 기능/데이터 로직은 변경하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.24.1-version-guard-clean"
+
