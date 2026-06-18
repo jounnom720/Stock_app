@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.22.13-integrity-checked"
+APP_VERSION = "v5.23.10-full-history-arrow-safe-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -14719,7 +14719,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     if '이동금액' not in out.columns:
         out['이동금액'] = out['금액'].abs()
     out['_key_v5239'] = out.apply(_v5239_row_key, axis=1)
-    out['_src_rank_v5239'] = out['출처'].astype(str).apply(lambda x: 0 if '자산원장복구_v5239' in x else 5)
+    out['_src_rank_v5239'] = out['출처'].apply(lambda x: 0 if '자산원장복구_v5239' in str(x or '') else 5)
     out['_date_sort_v5239'] = pd.to_datetime(out['날짜'], errors='coerce')
     out['_event_order_v5239'] = out.apply(_v5239_order, axis=1)
     # 복구행을 우선 보존한 뒤 전체 이력은 그대로 유지합니다.
