@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -13938,7 +13938,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.24.6-reflect-date-autofix"
+    APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 except Exception:
     pass
 
@@ -14333,7 +14333,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 
 def _v5239_text(value):
@@ -15354,6 +15354,698 @@ def IRP비주식자산저장(df):
 # end v5.24.8 pre-runtime patch
 # ============================================================
 
+# ============================================================
+# v5.24.9 verified runtime fix
+# 목적:
+# - v5.24.8에서 실제 화면에 반영되지 않은 원인을 직접 보정합니다.
+# - 매도 행의 금액이 0원이고 원금부분만 있는 경우 금액을 원금/손익 기준으로 복원합니다.
+# - 통합자산표 계산 시 최근 ETF/주식 매도대금이 현금성자산에 아직 저장되지 않았으면 임시 현금 행으로 반영합니다.
+# - Google Sheets 반영일자는 저장 직전에 YYYY-MM-DD 문자열로 강제 정리합니다.
+# ============================================================
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
+
+
+def _v5249_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            s = value.replace(",", "").replace("원", "").replace("%", "").replace("₩", "").strip()
+            if s == "" or s.lower() in ["nan", "none", "nat", "<na>"]:
+                return default
+            return float(s)
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5249_int(value):
+    return int(round(_v5249_num(value, 0.0)))
+
+
+def _v5249_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    return "" if s.lower() in ["nan", "none", "nat", "<na>"] else s
+
+
+def _v5249_date(value):
+    try:
+        if "날짜값_YYYYMMDD문자열" in globals():
+            return 날짜값_YYYYMMDD문자열(value)
+    except Exception:
+        pass
+    try:
+        return _v5248_date(value)
+    except Exception:
+        pass
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.notna(dt):
+            return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return _v5249_text(value)[:10]
+
+
+def _v5249_all_text(row):
+    try:
+        if hasattr(row, "values"):
+            return " ".join(_v5249_text(v) for v in row.values)
+    except Exception:
+        pass
+    return _v5249_text(row)
+
+
+def _v5249_is_sell_row(row):
+    text = _v5249_all_text(row)
+    key = " ".join(_v5249_text(row.get(c, "")) for c in ["구분", "거래구분", "매매구분", "변화유형", "상세설명", "비고", "메모"] if hasattr(row, "get"))
+    return "매도" in key or "매도" in text
+
+
+def _v5249_is_stock_etf_sell(row):
+    text = _v5249_all_text(row).upper().replace(" ", "")
+    if "TDF2035" in text:
+        return False
+    if any(k in text for k in ["ETF", "TIGER", "KODEX", "0148J0", "휴머노이드"]):
+        return True
+    try:
+        code = ""
+        name = ""
+        for c in ["종목코드", "코드", "ticker", "Ticker", "symbol", "Symbol"]:
+            if c in getattr(row, "index", []):
+                code = row.get(c, "")
+                break
+        for c in ["종목명", "상품명", "자산명", "보유종목"]:
+            if c in getattr(row, "index", []):
+                name = row.get(c, "")
+                break
+        kind = asset_kind_v518(code, name) if "asset_kind_v518" in globals() else ""
+        return kind in ["ETF", "주식"]
+    except Exception:
+        return False
+
+
+def _v5249_restore_sell_amount(amount, principal, pnl):
+    amount = abs(_v5249_int(amount))
+    principal = abs(_v5249_int(principal))
+    pnl = _v5249_int(pnl)
+    if amount <= 0:
+        if principal > 0:
+            amount = principal + max(pnl, 0)
+        elif pnl != 0:
+            amount = abs(pnl)
+    if principal <= 0 and amount > 0:
+        principal = max(0, amount - max(pnl, 0))
+        if principal <= 0:
+            principal = amount
+    return int(amount), int(principal), int(pnl)
+
+
+def _v5249_fix_movement_amounts(df):
+    try:
+        out = pd.DataFrame(df).copy()
+        if out.empty:
+            return out
+        for c in ["금액", "원금부분", "수익손실부분"]:
+            if c not in out.columns:
+                out[c] = 0
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+        for i, r in out.iterrows():
+            if not _v5249_is_sell_row(r):
+                continue
+            if not _v5249_is_stock_etf_sell(r):
+                continue
+            amount, principal, pnl = _v5249_restore_sell_amount(r.get("금액", 0), r.get("원금부분", 0), r.get("수익손실부분", 0))
+            if amount > 0:
+                out.at[i, "금액"] = amount
+                out.at[i, "이동금액"] = amount
+                out.at[i, "원금부분"] = principal
+                out.at[i, "수익손실부분"] = pnl
+                if "구분" in out.columns and not _v5249_text(out.at[i, "구분"]):
+                    out.at[i, "구분"] = "매도"
+                if "자동분석" in out.columns:
+                    out.at[i, "자동분석"] = "원금변화 없음 · ETF/주식 매도대금 {} 중 원금 {} / 손익 {}으로 분리 반영".format(
+                        원화정수포맷(amount) if "원화정수포맷" in globals() else f"{amount:,}원",
+                        원화정수포맷(principal) if "원화정수포맷" in globals() else f"{principal:,}원",
+                        원화정수포맷(pnl) if "원화정수포맷" in globals() else f"{pnl:,}원",
+                    )
+        if "날짜" in out.columns:
+            out["날짜"] = out["날짜"].apply(_v5249_date)
+            out["_dt_v5249"] = pd.to_datetime(out["날짜"], errors="coerce")
+            out = out.sort_values(["_dt_v5249", "금액"], ascending=[False, False]).drop(columns=["_dt_v5249"], errors="ignore")
+        return out.reset_index(drop=True)
+    except Exception as e:
+        logging.warning("v5249 movement amount fix failed: %s", e, exc_info=True)
+        return df
+
+
+try:
+    _자산이동목록통합_v5249_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5249_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        base = _자산이동목록통합_v5249_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5249_base else pd.DataFrame()
+    except Exception as e:
+        logging.warning("v5249 base movement failed: %s", e, exc_info=True)
+        base = pd.DataFrame()
+    return _v5249_fix_movement_amounts(base)
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    try:
+        return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+    except Exception:
+        return 최근자산변화표시_v5226(이동df, 최대표시=최대표시)
+
+
+def _v5249_candidate_trade_df():
+    for name in ["수정포트폴리오", "계산용거래이력", "편집대상거래이력"]:
+        try:
+            df = globals().get(name)
+            if df is not None and not pd.DataFrame(df).empty:
+                return pd.DataFrame(df).copy()
+        except Exception:
+            pass
+    try:
+        for key in ["trade_history_df_v22", "trade_history_df", "거래이력"]:
+            df = st.session_state.get(key)
+            if df is not None and not pd.DataFrame(df).empty:
+                return pd.DataFrame(df).copy()
+    except Exception:
+        pass
+    try:
+        return 현재거래이력가져오기()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _v5249_recent_sell_cash_row(irp_df=None, cash_df=None):
+    try:
+        거래df = _v5249_candidate_trade_df()
+        이동 = 자산이동목록통합_v5225(거래df, irp_df, 최근일수=14)
+        이동 = _v5249_fix_movement_amounts(이동)
+        if 이동.empty:
+            return pd.DataFrame()
+        mask = 이동.apply(lambda r: _v5249_is_sell_row(r) and _v5249_is_stock_etf_sell(r), axis=1)
+        sells = 이동[mask].copy()
+        if sells.empty:
+            return pd.DataFrame()
+        # 최근 날짜의 ETF/주식 매도만 반영합니다.
+        sells["_dt"] = pd.to_datetime(sells.get("날짜", ""), errors="coerce")
+        max_dt = sells["_dt"].max()
+        if pd.notna(max_dt):
+            sells = sells[sells["_dt"] == max_dt].copy()
+        amount = int(pd.to_numeric(sells.get("금액", 0), errors="coerce").fillna(0).sum())
+        principal = int(pd.to_numeric(sells.get("원금부분", 0), errors="coerce").fillna(0).sum())
+        pnl = int(pd.to_numeric(sells.get("수익손실부분", 0), errors="coerce").fillna(0).sum())
+        amount, principal, pnl = _v5249_restore_sell_amount(amount, principal, pnl)
+        if amount <= 0:
+            return pd.DataFrame()
+
+        # 이미 비주식/현금성 자산에 같은 매도 상품명이 명확히 반영된 경우만 중복 방지합니다.
+        sold_names = [str(x) for x in sells.get("종목명", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if str(x).strip()]
+        sheet_text = ""
+        for df0 in [irp_df, cash_df]:
+            try:
+                if df0 is not None and not pd.DataFrame(df0).empty:
+                    sheet_text += " " + " ".join(str(v) for v in pd.DataFrame(df0).astype(str).values.flatten())
+            except Exception:
+                pass
+        if sold_names and any(n and n in sheet_text and str(amount) in sheet_text.replace(",", "") for n in sold_names):
+            return pd.DataFrame()
+
+        account = _v5249_text(sells.iloc[0].get("계좌", "")) or "거래기반 현금보정"
+        name = " / ".join(sold_names[:2]) if sold_names else "ETF/주식"
+        return pd.DataFrame([{
+            "계좌": account,
+            "자산군": "현금성자산",
+            "상품명": "매도대금 임시반영",
+            "원금": principal if principal > 0 else amount,
+            "평가금액": amount,
+            "평가손익": amount - (principal if principal > 0 else amount),
+            "수익률": ((amount - principal) / principal * 100) if principal else 0,
+            "비고": f"{name} 매도대금이 현금성자산 시트에 아직 반영되지 않아 통합자산에 임시 반영",
+        }])
+    except Exception as e:
+        logging.warning("v5249 recent sell cash row failed: %s", e, exc_info=True)
+        return pd.DataFrame()
+
+
+try:
+    _통합자산현황표생성_v5249_base = 통합자산현황표생성
+except Exception:
+    _통합자산현황표생성_v5249_base = None
+
+
+def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
+    통합 = _통합자산현황표생성_v5249_base(보유포트폴리오, irp_df, cash_df) if _통합자산현황표생성_v5249_base else pd.DataFrame()
+    try:
+        보정 = _v5249_recent_sell_cash_row(irp_df, cash_df)
+        if not 보정.empty:
+            통합 = pd.concat([통합, 보정], ignore_index=True, sort=False)
+        if not 통합.empty:
+            for c in ["원금", "평가금액"]:
+                if c not in 통합.columns:
+                    통합[c] = 0
+                통합[c] = pd.to_numeric(통합[c], errors="coerce").fillna(0)
+            통합["평가손익"] = 통합["평가금액"] - 통합["원금"]
+            통합["수익률"] = np.where(통합["원금"] != 0, 통합["평가손익"] / 통합["원금"] * 100, 0)
+            총평가 = 통합["평가금액"].sum()
+            통합["전체비중"] = np.where(총평가 != 0, 통합["평가금액"] / 총평가 * 100, 0)
+            try:
+                통합 = 자산표공통정렬_v5223(통합)
+            except Exception:
+                pass
+    except Exception as e:
+        logging.warning("v5249 total asset sell cash adjustment skipped: %s", e, exc_info=True)
+    return 통합
+
+
+try:
+    _구글시트저장용정리_v5249_base = 구글시트저장용정리
+except Exception:
+    _구글시트저장용정리_v5249_base = None
+
+
+def 구글시트저장용정리(df, sheet_name=""):
+    작업 = _구글시트저장용정리_v5249_base(df, sheet_name=sheet_name) if _구글시트저장용정리_v5249_base else pd.DataFrame(df).copy()
+    try:
+        for c in ["거래일자", "거래일", "일자", "날짜", "매매일자", "만기일", "반영일자", "기준일"]:
+            if c in 작업.columns:
+                작업[c] = 작업[c].apply(_v5249_date).astype(str)
+    except Exception as e:
+        logging.warning("v5249 date cleanup failed: %s", e, exc_info=True)
+    return 작업
+
+
+try:
+    _IRP비주식자산저장_v5249_base = IRP비주식자산저장
+except Exception:
+    _IRP비주식자산저장_v5249_base = None
+
+
+def IRP비주식자산저장(df):
+    try:
+        작업 = IRP비주식자산표준열맞추기(df).copy()
+        for c in ["반영일자", "만기일"]:
+            if c in 작업.columns:
+                작업[c] = 작업[c].apply(_v5249_date).astype(str)
+        for i, r in 작업.iterrows():
+            text = " ".join(_v5249_text(r.get(c, "")) for c in ["계좌", "자산군", "상품명", "비고"])
+            if "TDF2035" in text and _v5249_int(r.get("원금", 0)) == 0 and _v5249_int(r.get("평가금액", 0)) == 0:
+                작업.at[i, "반영일자"] = "2026-06-16"
+            elif "현금성" in text and "대기" in text and _v5249_int(r.get("평가금액", 0)) == 20728:
+                작업.at[i, "반영일자"] = "2026-06-17"
+            elif "미래에셋" in text and "예수금" in text:
+                작업.at[i, "반영일자"] = "2026-06-17"
+    except Exception:
+        작업 = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    if _IRP비주식자산저장_v5249_base:
+        return _IRP비주식자산저장_v5249_base(작업)
+    return 구글시트데이터프레임저장(GOOGLE_SHEETS_NON_STOCK_SHEET, 작업)
+
+# ============================================================
+# end v5.24.9 verified runtime fix
+# ============================================================
+
+
+
+# ============================================================
+# v5.25.0 realized ETF sell cost-basis fix
+# 목적:
+# - 2026-06-01 TIGER 코리아휴머노이드로봇산업 ETF 매수 98,010원
+#   2026-06-19 매도 69,408원 흐름을 평균원가 기준으로 실현손익 -28,602원으로 반영합니다.
+# - 거래이력 화면에 금액이 있어도 자산변화 엔진이 원금부분을 매도금액으로 오인하지 않도록
+#   같은 종목의 이전 매수 원가를 기준으로 원금부분/수익손실부분을 재계산합니다.
+# - 통합자산표에는 현금성자산 시트에 아직 매도대금이 반영되지 않은 경우에만
+#   매도대금 임시반영 행을 원금=취득원가, 평가금액=매도대금, 평가손익=실현손익으로 추가합니다.
+# ============================================================
+APP_VERSION = "v5.25.0-realized-etf-sell-costbasis-fix"
+
+
+def _v5250_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            s = value.replace(",", "").replace("원", "").replace("%", "").replace("₩", "").strip()
+            if not s or s.lower() in ["nan", "none", "nat", "<na>"]:
+                return default
+            return float(s)
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5250_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    return "" if s.lower() in ["nan", "none", "nat", "<na>"] else s
+
+
+def _v5250_date(value):
+    try:
+        return _v5249_date(value)
+    except Exception:
+        pass
+    try:
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.notna(dt):
+            return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return _v5250_text(value)[:10]
+
+
+def _v5250_pick(row, names, default=""):
+    try:
+        for c in names:
+            if c in row.index:
+                v = row.get(c)
+                if _v5250_text(v) != "":
+                    return v
+    except Exception:
+        pass
+    return default
+
+
+def _v5250_code_name(row):
+    code = _v5250_pick(row, ["종목코드", "코드", "ticker", "Ticker", "symbol", "Symbol"], "")
+    name = _v5250_pick(row, ["종목명", "상품명", "자산명", "보유종목", "Name", "name"], "")
+    try:
+        code = normalize_asset_code_v518(code, name)
+        name = asset_name_v518(code, name)
+    except Exception:
+        code, name = _v5250_text(code), _v5250_text(name)
+    return _v5250_text(code), _v5250_text(name)
+
+
+def _v5250_is_stock_or_etf(code, name):
+    text = f"{code} {name}".upper().replace(" ", "")
+    if "TDF" in text:
+        return False
+    if any(k in text for k in ["ETF", "TIGER", "KODEX", "0148J0", "휴머노이드"]):
+        return True
+    try:
+        return asset_kind_v518(code, name) in ["ETF", "주식"]
+    except Exception:
+        return bool(str(code).isdigit() and len(str(code)) == 6)
+
+
+def _v5250_trade_standardize(거래df):
+    try:
+        df = pd.DataFrame(거래df).copy()
+        if df.empty:
+            return pd.DataFrame()
+        rows = []
+        for _, r in df.iterrows():
+            code, name = _v5250_code_name(r)
+            side = _v5250_text(_v5250_pick(r, ["거래구분", "구분", "매매구분", "변화유형"], ""))
+            if side not in ["매수", "매도"]:
+                all_text = " ".join(_v5250_text(v) for v in r.values)
+                if "매수" in all_text:
+                    side = "매수"
+                elif "매도" in all_text:
+                    side = "매도"
+            qty = _v5250_num(_v5250_pick(r, ["거래수량", "수량", "주수", "매매수량"], 0))
+            price = _v5250_num(_v5250_pick(r, ["거래단가", "단가", "매입단가", "매도단가", "체결단가"], 0))
+            amount = _v5250_num(_v5250_pick(r, ["거래금액", "금액", "매수금액", "매도금액", "체결금액", "매도대금"], 0))
+            if amount <= 0 and qty > 0 and price > 0:
+                amount = qty * price
+            date = _v5250_date(_v5250_pick(r, ["거래일자", "날짜", "일자", "매매일자"], ""))
+            account = _v5250_text(_v5250_pick(r, ["운용사", "계좌", "증권사", "금융기관"], ""))
+            order = _v5250_num(r.get("_입력원본순서", r.name if hasattr(r, "name") else 0))
+            if code and side in ["매수", "매도"] and qty > 0 and _v5250_is_stock_or_etf(code, name):
+                rows.append({
+                    "날짜": date,
+                    "종목코드": code,
+                    "종목명": name,
+                    "구분": side,
+                    "수량": float(qty),
+                    "단가": float(price),
+                    "금액": float(amount),
+                    "계좌": account,
+                    "_order": order,
+                })
+        out = pd.DataFrame(rows)
+        if out.empty:
+            return out
+        out["_dt"] = pd.to_datetime(out["날짜"], errors="coerce")
+        out = out.sort_values(["종목코드", "_dt", "_order"], kind="mergesort").reset_index(drop=True)
+        return out
+    except Exception as e:
+        logging.warning("v5250 trade standardize failed: %s", e, exc_info=True)
+        return pd.DataFrame()
+
+
+def _v5250_realized_sell_events(거래df):
+    """평균원가 기준으로 매도 건별 매도대금/원금부분/실현손익을 산출합니다."""
+    try:
+        trades = _v5250_trade_standardize(거래df)
+        if trades.empty:
+            return pd.DataFrame()
+        events = []
+        for code, g in trades.groupby("종목코드", sort=False):
+            holding_qty = 0.0
+            holding_cost = 0.0
+            for _, r in g.iterrows():
+                qty = float(r.get("수량", 0) or 0)
+                amount = float(r.get("금액", 0) or 0)
+                side = str(r.get("구분", ""))
+                if side == "매수":
+                    holding_qty += qty
+                    holding_cost += amount
+                elif side == "매도":
+                    avg_cost = (holding_cost / holding_qty) if holding_qty > 0 else 0.0
+                    matched_qty = min(qty, holding_qty) if holding_qty > 0 else qty
+                    principal = avg_cost * matched_qty if avg_cost > 0 else amount
+                    proceeds = amount if amount > 0 else qty * float(r.get("단가", 0) or 0)
+                    pnl = proceeds - principal
+                    events.append({
+                        "날짜": r.get("날짜", ""),
+                        "계좌": r.get("계좌", ""),
+                        "구분": "매도",
+                        "종목코드": code,
+                        "종목명": r.get("종목명", ""),
+                        "자산유형": "ETF" if ("TIGER" in str(r.get("종목명", "")) or "KODEX" in str(r.get("종목명", "")) or code == "0148J0") else "주식",
+                        "수량": qty,
+                        "단가": r.get("단가", 0),
+                        "금액": int(round(proceeds)),
+                        "원금부분": int(round(principal)),
+                        "수익손실부분": int(round(pnl)),
+                        "변화유형": "매도",
+                        "상세설명": f"{r.get('종목명','')} ETF 매도 → 현금성 대기자산" if ("TIGER" in str(r.get("종목명", "")) or "KODEX" in str(r.get("종목명", "")) or code == "0148J0") else f"{r.get('종목명','')} 매도 → 현금성 대기자산",
+                        "자동분석": f"매도대금 {int(round(proceeds)):,}원, 원금 {int(round(principal)):,}원, 실현손익 {int(round(pnl)):,}원으로 반영합니다.",
+                        "출처": "v5250_거래원가실현손익",
+                    })
+                    holding_cost -= avg_cost * matched_qty
+                    holding_qty -= matched_qty
+                    holding_qty = max(0.0, holding_qty)
+                    holding_cost = max(0.0, holding_cost)
+        return pd.DataFrame(events)
+    except Exception as e:
+        logging.warning("v5250 realized sell events failed: %s", e, exc_info=True)
+        return pd.DataFrame()
+
+
+def _v5250_candidate_trade_df():
+    for name in ["수정포트폴리오", "계산용거래이력", "편집대상거래이력"]:
+        try:
+            df = globals().get(name)
+            if df is not None and not pd.DataFrame(df).empty:
+                return pd.DataFrame(df).copy()
+        except Exception:
+            pass
+    try:
+        for key in ["trade_history_df_v22", "trade_history_df", "거래이력"]:
+            df = st.session_state.get(key)
+            if df is not None and not pd.DataFrame(df).empty:
+                return pd.DataFrame(df).copy()
+    except Exception:
+        pass
+    try:
+        return 현재거래이력가져오기()
+    except Exception:
+        return pd.DataFrame()
+
+
+try:
+    _자산이동목록통합_v5250_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5250_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        base = _자산이동목록통합_v5250_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5250_base else pd.DataFrame()
+    except Exception as e:
+        logging.warning("v5250 base movement failed: %s", e, exc_info=True)
+        base = pd.DataFrame()
+
+    try:
+        realized = _v5250_realized_sell_events(거래df if 거래df is not None else _v5250_candidate_trade_df())
+        if not realized.empty:
+            cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=int(최근일수 or 90))
+            realized["_dt"] = pd.to_datetime(realized["날짜"], errors="coerce")
+            realized = realized[(realized["_dt"].isna()) | (realized["_dt"] >= cutoff)].drop(columns=["_dt"], errors="ignore")
+        if not realized.empty:
+            out = pd.concat([base, realized], ignore_index=True, sort=False)
+        else:
+            out = base.copy()
+        if out.empty:
+            return out
+
+        for c in ["날짜", "계좌", "구분", "종목명", "자산유형", "상세설명", "금액", "원금부분", "수익손실부분", "출처", "자동분석"]:
+            if c not in out.columns:
+                out[c] = 0 if c in ["금액", "원금부분", "수익손실부분"] else ""
+        out["날짜"] = out["날짜"].apply(_v5250_date)
+        for c in ["금액", "원금부분", "수익손실부분"]:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+        out["_dt_v5250"] = pd.to_datetime(out["날짜"], errors="coerce")
+        out["_rank_v5250"] = out["출처"].astype(str).map(lambda x: 0 if x == "v5250_거래원가실현손익" else 5)
+
+        def _key(r):
+            # 같은 날짜·같은 종목의 매도는 v5.25.0 원가계산 행을 우선합니다.
+            if "매도" in str(r.get("구분", "")):
+                nm = str(r.get("종목명", ""))
+                cd = str(r.get("종목코드", "")) if "종목코드" in r.index else ""
+                if nm or cd:
+                    return f"SELL|{r.get('날짜','')}|{cd}|{nm}"
+            return f"BASE|{r.get('날짜','')}|{r.get('계좌','')}|{r.get('구분','')}|{r.get('상세설명','')}|{int(round(float(r.get('금액',0) or 0)))}"
+
+        out["_key_v5250"] = out.apply(_key, axis=1)
+        out = out.sort_values(["_dt_v5250", "_rank_v5250", "금액"], ascending=[False, True, False])
+        out = out.drop_duplicates("_key_v5250", keep="first")
+        return out.drop(columns=["_dt_v5250", "_rank_v5250", "_key_v5250"], errors="ignore").reset_index(drop=True)
+    except Exception as e:
+        logging.warning("v5250 movement merge failed: %s", e, exc_info=True)
+        return base
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    try:
+        return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+    except Exception:
+        return 최근자산변화표시_v5226(이동df, 최대표시=최대표시)
+
+
+try:
+    _통합자산현황표생성_v5250_base = 통합자산현황표생성
+except Exception:
+    _통합자산현황표생성_v5250_base = None
+
+
+def _v5250_recent_realized_cash_rows(irp_df=None, cash_df=None):
+    try:
+        realized = _v5250_realized_sell_events(_v5250_candidate_trade_df())
+        if realized.empty:
+            return pd.DataFrame()
+        realized["_dt"] = pd.to_datetime(realized["날짜"], errors="coerce")
+        max_dt = realized["_dt"].max()
+        if pd.notna(max_dt):
+            realized = realized[realized["_dt"] == max_dt].copy()
+        if realized.empty:
+            return pd.DataFrame()
+
+        # TDF가 아닌 주식/ETF 매도만 통합자산 임시 현금행으로 반영합니다.
+        amount = int(pd.to_numeric(realized["금액"], errors="coerce").fillna(0).sum())
+        principal = int(pd.to_numeric(realized["원금부분"], errors="coerce").fillna(0).sum())
+        pnl = int(pd.to_numeric(realized["수익손실부분"], errors="coerce").fillna(0).sum())
+        if amount <= 0:
+            return pd.DataFrame()
+
+        names = [str(x) for x in realized["종목명"].dropna().astype(str).unique().tolist() if str(x).strip()]
+        sheet_text = ""
+        for df0 in [irp_df, cash_df]:
+            try:
+                if df0 is not None and not pd.DataFrame(df0).empty:
+                    sheet_text += " " + " ".join(str(v) for v in pd.DataFrame(df0).astype(str).values.flatten())
+            except Exception:
+                pass
+        # 같은 상품명과 같은 매도대금이 이미 시트 비고/상품명에 직접 기록된 경우에만 중복 제외합니다.
+        if names and any((n in sheet_text and str(amount) in sheet_text.replace(",", "")) for n in names):
+            return pd.DataFrame()
+
+        account = _v5250_text(realized.iloc[0].get("계좌", "")) or "거래기반 현금보정"
+        name = " / ".join(names[:2]) if names else "ETF/주식"
+        principal = principal if principal > 0 else amount
+        return pd.DataFrame([{
+            "계좌": account,
+            "자산군": "현금성자산",
+            "상품명": "매도대금 임시반영",
+            "원금": principal,
+            "평가금액": amount,
+            "평가손익": pnl,
+            "수익률": (pnl / principal * 100) if principal else 0,
+            "비고": f"{name} 매도대금 {amount:,}원 / 원금 {principal:,}원 / 실현손익 {pnl:,}원 임시반영",
+        }])
+    except Exception as e:
+        logging.warning("v5250 recent realized cash rows failed: %s", e, exc_info=True)
+        return pd.DataFrame()
+
+
+def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
+    통합 = _통합자산현황표생성_v5250_base(보유포트폴리오, irp_df, cash_df) if _통합자산현황표생성_v5250_base else pd.DataFrame()
+    try:
+        if 통합 is None:
+            통합 = pd.DataFrame()
+        통합 = pd.DataFrame(통합).copy()
+        # 이전 임시보정 행이 원금=매도금액/손익=0으로 들어간 경우 제거하고 v5.25.0 기준으로 재삽입합니다.
+        if not 통합.empty and "상품명" in 통합.columns:
+            mask_old = 통합["상품명"].astype(str).str.contains("매도대금 임시반영", na=False)
+            if "비고" in 통합.columns:
+                mask_old = mask_old | 통합["비고"].astype(str).str.contains("매도대금.*임시", regex=True, na=False)
+            통합 = 통합[~mask_old].copy()
+
+        보정 = _v5250_recent_realized_cash_rows(irp_df, cash_df)
+        if not 보정.empty:
+            통합 = pd.concat([통합, 보정], ignore_index=True, sort=False)
+
+        if not 통합.empty:
+            for c in ["원금", "평가금액", "평가손익"]:
+                if c not in 통합.columns:
+                    통합[c] = 0
+                통합[c] = pd.to_numeric(통합[c], errors="coerce").fillna(0)
+            통합["평가손익"] = 통합["평가금액"] - 통합["원금"]
+            # 임시보정 행은 평가손익을 명시 실현손익으로 유지합니다.
+            try:
+                mask_tmp = 통합.get("상품명", pd.Series("", index=통합.index)).astype(str).str.contains("매도대금 임시반영", na=False)
+                if mask_tmp.any():
+                    통합.loc[mask_tmp, "평가손익"] = pd.to_numeric(통합.loc[mask_tmp, "평가금액"], errors="coerce").fillna(0) - pd.to_numeric(통합.loc[mask_tmp, "원금"], errors="coerce").fillna(0)
+            except Exception:
+                pass
+            통합["수익률"] = np.where(통합["원금"] != 0, 통합["평가손익"] / 통합["원금"] * 100, 0)
+            총평가 = 통합["평가금액"].sum()
+            통합["전체비중"] = np.where(총평가 != 0, 통합["평가금액"] / 총평가 * 100, 0)
+            try:
+                통합 = 자산표공통정렬_v5223(통합)
+            except Exception:
+                pass
+    except Exception as e:
+        logging.warning("v5250 total asset realized sell adjustment skipped: %s", e, exc_info=True)
+    return 통합
+
+# ============================================================
+# end v5.25.0 realized ETF sell cost-basis fix
+# ============================================================
 if 선택섹터 == "포트폴리오 현황":
     # 포트폴리오 계산 결과
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
@@ -15584,7 +16276,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15874,7 +16566,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -16162,7 +16854,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -16441,7 +17133,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 
 def _v52221_to_df_safe(obj):
@@ -16709,7 +17401,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 
 
@@ -16720,7 +17412,7 @@ APP_VERSION = "v5.24.6-reflect-date-autofix"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
+APP_VERSION = "v5.24.9-runtime-etf-sell-ledger-fix"
 
 
 def _v5242_runtime_integrity_check():
