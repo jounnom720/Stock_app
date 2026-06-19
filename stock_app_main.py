@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -13925,7 +13925,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+    APP_VERSION = "v5.24.4-order-guard-clean"
 except Exception:
     pass
 
@@ -14255,6 +14255,43 @@ def IRP비주식자산저장(df):
 
 _자산이동목록통합_v52217_base = 자산이동목록통합_v5225
 
+# v5.24.4 order guard
+# 자산이동목록통합_v5225가 먼저 호출될 때 _v52217_history_to_asset_movements 미정의 예외가 조용히 삼켜지지 않도록 선행 정의합니다.
+if '_v52217_history_to_asset_movements' not in globals():
+    def _v52217_history_to_asset_movements(hist_df, 최근일수=90):
+        표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
+        try:
+            hist = 비주식자산변동이력표준화_v52217(hist_df) if '비주식자산변동이력표준화_v52217' in globals() else pd.DataFrame(hist_df).copy()
+            if hist is None or pd.DataFrame(hist).empty:
+                return pd.DataFrame(columns=표준열)
+            hist = pd.DataFrame(hist).copy()
+            if '변화유형' in hist.columns:
+                hist = hist[~hist['변화유형'].astype(str).isin(['기준잔액'])].copy()
+            if hist.empty:
+                return pd.DataFrame(columns=표준열)
+            rows = []
+            for _, r in hist.iterrows():
+                amount = 0.0
+                for c in ['변동평가금액','현재평가금액','평가금액','현재원금','원금']:
+                    if c in hist.columns:
+                        try:
+                            amount = float(str(r.get(c, 0)).replace(',', '').replace('원', '') or 0)
+                            if amount:
+                                break
+                        except Exception:
+                            pass
+                typ = str(r.get('변화유형', '') or '').strip()
+                상품명 = str(r.get('상품명', '') or r.get('자산명', '') or '').strip()
+                계좌 = str(r.get('계좌', '') or '').strip()
+                detail = str(r.get('상세설명', '') or '').strip()
+                if not detail:
+                    detail = f'{상품명} {typ or "자산변화"}'.strip()
+                rows.append({'날짜': str(r.get('반영일자', '') or r.get('날짜', '') or '')[:10], '계좌': 계좌, '구분': typ or '자산변화', '종목명': 상품명, '자산유형': str(r.get('자산군', '') or ''), '수량': 0, '단가': 0, '금액': amount, '원금부분': amount, '수익손실부분': 0, '변화유형': typ, '상세설명': detail, '자동분석': str(r.get('자동분석', '') or ''), '출처': '비주식자산변동이력'})
+            return pd.DataFrame(rows, columns=표준열)
+        except Exception as e:
+            logging.warning('v5244 order guard history movement failed: %s', e, exc_info=True)
+            return pd.DataFrame(columns=표준열)
+
 def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
     try: base=_자산이동목록통합_v52217_base(거래df, 비주식자산df, 최근일수=최근일수)
     except Exception: base=pd.DataFrame()
@@ -14281,7 +14318,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 
 def _v5239_text(value):
@@ -15100,7 +15137,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15390,7 +15427,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -15678,7 +15715,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -15957,7 +15994,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 
 def _v52221_to_df_safe(obj):
@@ -16209,7 +16246,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 
 
@@ -16220,7 +16257,7 @@ APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.3.1-nameerror-hotfix"
+APP_VERSION = "v5.24.4-order-guard-clean"
 
 
 def _v5242_runtime_integrity_check():
