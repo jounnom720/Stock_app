@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -10318,6 +10318,13 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     return 통합
 
 
+# v5.24.3.1 hotfix
+# 자산변동추이UI가 모듈 실행 중 먼저 호출되기 전에 최근자산변화카드표시가 존재하도록 복구합니다.
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
 
 
 # 통합자산 현황도 동일 원칙으로 보정합니다.
@@ -13918,7 +13925,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.24.3-duplicate-prune-clean"
+    APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 except Exception:
     pass
 
@@ -14274,7 +14281,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 
 def _v5239_text(value):
@@ -15093,7 +15100,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15383,7 +15390,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -15671,7 +15678,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -15950,7 +15957,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 
 def _v52221_to_df_safe(obj):
@@ -16202,7 +16209,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 
 
@@ -16213,7 +16220,7 @@ APP_VERSION = "v5.24.3-duplicate-prune-clean"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.3-duplicate-prune-clean"
+APP_VERSION = "v5.24.3.1-nameerror-hotfix"
 
 
 def _v5242_runtime_integrity_check():
