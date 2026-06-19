@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -2477,7 +2477,7 @@ def 구글시트워크시트포맷적용(ws, df):
             if 열이름 in ["종목코드", "코드"]:
                 ws.format(f"{col_letter}:{col_letter}", {"numberFormat": {"type": "TEXT"}})
             if 열이름 in ["거래일자", "거래일", "일자", "날짜", "매매일자", "만기일", "반영일자", "기준일"]:
-                ws.format(f"{col_letter}:{col_letter}", {"numberFormat": {"type": "TEXT"}})
+                ws.format(f"{col_letter}:{col_letter}", {"numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"}})
     except Exception as e:
         logging.warning("suppressed exception at line 1857: %s", e, exc_info=True)
 
@@ -5065,8 +5065,9 @@ def 기본IRP비주식자산표():
 
 
 def 날짜값_YYYYMMDD문자열(값):
-    """날짜/일시 값을 화면 표시용 YYYY-MM-DD 문자열로 정리합니다.
-    - 엑셀 업로드 시 들어오는 2026-05-06 00:00:00 형태를 2026-05-06으로 통일
+    """날짜/일시 값을 화면·Google Sheets 공통 YYYY-MM-DD 문자열로 정리합니다.
+    - Google Sheets/Excel 날짜 일련번호(예: 46190)는 2026-06-17로 복원
+    - 2026-05-06 00:00:00 형태는 2026-05-06으로 통일
     - 빈 값, NaT, nan, None은 공란으로 처리
     """
     if 값 is None:
@@ -5074,23 +5075,35 @@ def 날짜값_YYYYMMDD문자열(값):
     try:
         if pd.isna(값):
             return ""
-    except Exception as e:
-        logging.warning("suppressed exception at line 4234: %s", e, exc_info=True)
+    except Exception:
+        pass
 
     문자 = str(값).strip()
-    if 문자 in ["", "NaT", "nat", "nan", "None"]:
+    if 문자 in ["", "NaT", "nat", "nan", "None", "<NA>"]:
         return ""
 
     try:
+        # Google Sheets/Excel 날짜 일련번호 보정
+        if isinstance(값, (int, float, np.integer, np.floating)):
+            숫자 = float(값)
+            if 30000 <= 숫자 <= 70000:
+                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(int(round(숫자)), unit="D")).strftime("%Y-%m-%d")
+        if re.fullmatch(r"\d+(\.0+)?", 문자):
+            숫자 = float(문자)
+            if 30000 <= 숫자 <= 70000:
+                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(int(round(숫자)), unit="D")).strftime("%Y-%m-%d")
+
+        if re.match(r"^\d{4}-\d{2}-\d{2}", 문자):
+            return 문자[:10]
+
         변환 = pd.to_datetime(값, errors="coerce")
         if pd.isna(변환):
             return ""
         return 변환.strftime("%Y-%m-%d")
     except Exception:
-        # 이미 YYYY-MM-DD로 시작하는 문자열이면 앞 10자리만 사용
         if re.match(r"^\d{4}-\d{2}-\d{2}", 문자):
             return 문자[:10]
-        return 문자
+        return 문자[:10] if 문자 else ""
 
 
 def IRP비주식자산표준열맞추기(df):
@@ -13925,7 +13938,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.24.4-order-guard-clean"
+    APP_VERSION = "v5.24.5-date-sync-clean"
 except Exception:
     pass
 
@@ -13971,7 +13984,9 @@ def _v52216_apply_google_sheet_number_format(ws, headers):
                 ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}})
             elif col == '예상연수익률':
                 ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '0.00'}})
-            elif col in ['만기일', '반영일자', '계좌', '자산군', '상품명', '비고']:
+            elif col in ['만기일', '반영일자']:
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
+            elif col in ['계좌', '자산군', '상품명', '비고']:
                 ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'TEXT'}})
     except Exception as e:
         logging.warning('v52216 google sheet number format failed: %s', e, exc_info=True)
@@ -14318,7 +14333,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 
 def _v5239_text(value):
@@ -15137,7 +15152,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15427,7 +15442,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -15715,7 +15730,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -15994,7 +16009,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 
 def _v52221_to_df_safe(obj):
@@ -16091,6 +16106,22 @@ def _v52221_forced_cashflow_rows(거래df=None, 비주식자산df=None, base_mov
         transfer_date = globals().get('_V52219_KNOWN_TDF2035_TRANSFER_DATE', '2026-06-17')
         buy_amt = globals().get('_V52219_KNOWN_HANWHA_BUY_AMOUNT', 13_350_000)
 
+        # v5.24.5: 최근 자산변화의 현재잔액 행은 Google Sheets 비주식자산의 반영일자를 그대로 사용합니다.
+        # 숫자 일련번호(46188 등)는 _v52218_date_str/날짜값_YYYYMMDD문자열에서 YYYY-MM-DD로 복원됩니다.
+        mirae_cash_date = transfer_date
+        irp_cash_date = '2026-06-15'
+        try:
+            ns_for_date = _v52221_collect_nonstock_candidates(비주식자산df)
+            for _, rr in ns_for_date.iterrows():
+                row_text = ' '.join(str(rr.get(c, '')) for c in ['계좌','자산군','상품명','비고'])
+                row_date = _v52218_date_str(rr.get('반영일자', '')) or 날짜값_YYYYMMDD문자열(rr.get('반영일자', ''))
+                if row_date and '미래에셋' in row_text and '예수금' in row_text:
+                    mirae_cash_date = row_date
+                if row_date and (('신한' in row_text or 'IRP' in row_text.upper()) and '현금성' in row_text and ('대기' in row_text or '현금성자산' in row_text)):
+                    irp_cash_date = row_date
+        except Exception as e:
+            logging.warning('v5245 cash date extraction failed: %s', e, exc_info=True)
+
         # 1) TDF2035 매도대금 예수금 이체 이력: 현재 잔액이 아니라 과거 이체 사건입니다.
         rows.append({
             '날짜': transfer_date,
@@ -16130,7 +16161,7 @@ def _v52221_forced_cashflow_rows(거래df=None, 비주식자산df=None, base_mov
         # 3) 현재 예수금 잔액: 금액이 확인될 때만 표시합니다.
         if mirae_cash > 0:
             rows.append({
-                '날짜': transfer_date,
+                '날짜': mirae_cash_date,
                 '계좌': mirae_acct,
                 '구분': '현금대기',
                 '종목명': '예수금',
@@ -16149,7 +16180,7 @@ def _v52221_forced_cashflow_rows(거래df=None, 비주식자산df=None, base_mov
         # 4) 신한IRP 현금성 대기자산 잔액: 현재 잔액으로만 표시합니다.
         if irp_cash > 0:
             rows.append({
-                '날짜': '2026-06-15',
+                '날짜': irp_cash_date,
                 '계좌': irp_acct,
                 '구분': '현금대기',
                 '종목명': '현금성 대기자산',
@@ -16203,7 +16234,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
         if '한화오션 매수 후 예수금 잔액' in desc:
             return ('2026-06-17','미래에셋','현금대기','MIRAE_CASH_AFTER_HANWHA')
         if '현금성 대기자산 잔액' in desc:
-            return (str(r.get('날짜','')),'신한IRP','현금대기','SHINHAN_IRP_CASH_BALANCE')
+            return ('신한IRP','현금대기','SHINHAN_IRP_CASH_BALANCE')
         return (str(r.get('날짜','')), str(r.get('계좌','')), str(r.get('구분','')), desc, int(float(r.get('금액',0) or 0)))
 
     out['_key'] = out.apply(_key, axis=1)
@@ -16233,7 +16264,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
             else:
                 df['_date_sort_v52221'] = pd.NaT
             df['_src_rank_v52221'] = df.get('출처','').astype(str).map(lambda x: {'현금흐름강제복구':0,'현금흐름복구':1}.get(x,9))
-            df['_key_v52221'] = df.apply(lambda r: ('TDF2035_TO_MIRAE_49244653' if 'TDF2035 매도대금' in str(r.get('상세설명','')) else 'HANWHA_OCEAN_BUY_13350000' if '한화오션' in str(r.get('상세설명','')) and '매수' in str(r.get('상세설명','')) else 'MIRAE_CASH_AFTER_HANWHA' if '한화오션 매수 후 예수금 잔액' in str(r.get('상세설명','')) else '|'.join([str(r.get('날짜','')),str(r.get('계좌','')),str(r.get('구분','')),str(r.get('상세설명','')),str(int(float(r.get('금액',0) or 0)))])), axis=1)
+            df['_key_v52221'] = df.apply(lambda r: ('TDF2035_TO_MIRAE_49244653' if 'TDF2035 매도대금' in str(r.get('상세설명','')) else 'HANWHA_OCEAN_BUY_13350000' if '한화오션' in str(r.get('상세설명','')) and '매수' in str(r.get('상세설명','')) else 'MIRAE_CASH_AFTER_HANWHA' if '한화오션 매수 후 예수금 잔액' in str(r.get('상세설명','')) else 'SHINHAN_IRP_CASH_BALANCE' if '현금성 대기자산 잔액' in str(r.get('상세설명','')) else '|'.join([str(r.get('날짜','')),str(r.get('계좌','')),str(r.get('구분','')),str(r.get('상세설명','')),str(int(float(r.get('금액',0) or 0)))])), axis=1)
             df = df.sort_values(['_date_sort_v52221','_src_rank_v52221','금액'], ascending=[False,True,False]).drop_duplicates('_key_v52221', keep='first')
             df = df.drop(columns=['_date_sort_v52221','_src_rank_v52221','_key_v52221'], errors='ignore')
         return _최근자산변화표시_v5224_v52221_base(df, 최대표시=최대표시)
@@ -16246,7 +16277,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 
 
@@ -16257,7 +16288,7 @@ APP_VERSION = "v5.24.4-order-guard-clean"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.4-order-guard-clean"
+APP_VERSION = "v5.24.5-date-sync-clean"
 
 
 def _v5242_runtime_integrity_check():
