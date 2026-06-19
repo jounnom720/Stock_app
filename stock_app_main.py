@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -13938,7 +13938,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.24.5-date-sync-clean"
+    APP_VERSION = "v5.24.6-reflect-date-autofix"
 except Exception:
     pass
 
@@ -14333,7 +14333,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 
 def _v5239_text(value):
@@ -15152,7 +15152,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15442,7 +15442,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -15730,7 +15730,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -16009,7 +16009,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 
 def _v52221_to_df_safe(obj):
@@ -16277,7 +16277,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 
 
@@ -16288,7 +16288,7 @@ APP_VERSION = "v5.24.5-date-sync-clean"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.5-date-sync-clean"
+APP_VERSION = "v5.24.6-reflect-date-autofix"
 
 
 def _v5242_runtime_integrity_check():
@@ -16345,4 +16345,192 @@ def v5242_운영점검표시():
 
 # ============================================================
 # end v5.24.2 runtime audit clean
+# ============================================================
+
+
+# ============================================================
+# v5.24.6 반영일자 자동 보정·저장 안정화 패치
+# 목적
+# - Google Sheets의 반영일자 숫자 일련번호(46188 등)를 사용자가 직접 고치지 않아도
+#   저장 시 YYYY-MM-DD 문자열로 정리합니다.
+# - 원금/평가금액/비고가 바뀐 현재 행은 과거 반영일자를 그대로 끌고 가지 않도록
+#   현재 확인된 흐름 기준 날짜로 보정합니다.
+# - 날짜열은 Google Sheets에서 다시 숫자 일련번호로 보이지 않도록 TEXT 형식으로 저장합니다.
+# - 기능 추가가 아니라 날짜 표시/저장 오류 보정입니다.
+# ============================================================
+APP_VERSION = "v5.24.6-reflect-date-autofix"
+
+try:
+    _v5246_apply_google_sheet_number_format_base = _v52216_apply_google_sheet_number_format
+except Exception:
+    _v5246_apply_google_sheet_number_format_base = None
+
+
+def _v52216_apply_google_sheet_number_format(ws, headers):
+    """v5.24.6: 반영일자/만기일은 TEXT로 고정해 Google Sheets 숫자 일련번호 재표시를 막습니다."""
+    try:
+        for idx, col in enumerate(list(headers or []), start=1):
+            col_letter = chr(64 + idx) if idx <= 26 else None
+            if not col_letter:
+                continue
+            if col in ['원금', '평가금액']:
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}})
+            elif col == '예상연수익률':
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '0.00'}})
+            elif col in ['만기일', '반영일자']:
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'TEXT'}})
+            elif col in ['계좌', '자산군', '상품명', '비고']:
+                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'TEXT'}})
+    except Exception as e:
+        logging.warning('v5246 google sheet number/text format failed: %s', e, exc_info=True)
+
+
+def _v5246_norm_row_key(row):
+    try:
+        return '|'.join([
+            _v52218_norm_text(row.get('계좌', '')),
+            _v52218_norm_text(row.get('자산군', '')),
+            _v52218_norm_text(row.get('상품명', '')),
+        ])
+    except Exception:
+        return ''
+
+
+def _v5246_row_value_signature(row):
+    try:
+        return '|'.join([
+            str(int(_v52217_money_int(row.get('원금', 0)))),
+            str(int(_v52217_money_int(row.get('평가금액', 0)))),
+            f"{float(_v52216_num(row.get('예상연수익률', 0), 0) if '_v52216_num' in globals() else 0):.2f}",
+            _v52218_norm_text(row.get('만기일', '')),
+            _v52218_norm_text(row.get('비고', '')),
+        ])
+    except Exception:
+        return ''
+
+
+def _v5246_known_flow_date(row):
+    """확정된 TDF2035 현금흐름은 현재 행 의미에 맞는 반영일자로 보정합니다."""
+    try:
+        text = ' '.join(_v52218_norm_text(row.get(c, '')) for c in ['계좌', '자산군', '상품명', '비고'])
+        principal = int(_v52217_money_int(row.get('원금', 0)))
+        value = int(_v52217_money_int(row.get('평가금액', 0)))
+        # TDF2035 전량매도 자체는 2026-06-16 사건입니다.
+        if 'TDF2035' in text and principal == 0 and value == 0 and ('매도' in text or '현금성' in text):
+            return '2026-06-16'
+        # 매도 후 남은 신한IRP 현금성 대기자산 잔액은 이체/매수 이후 확인된 2026-06-17 현재 잔액입니다.
+        if ('신한' in text or 'IRP' in text.upper()) and '현금성' in text and ('대기' in text or '현금성자산' in text) and value == 20728:
+            return '2026-06-17'
+        # 미래에셋 예수금 잔액은 한화오션 매수 후 2026-06-17 현재 잔액입니다.
+        if '미래에셋' in text and '예수금' in text:
+            return '2026-06-17'
+        # TDF2045는 현재 잔존 평가 기준일로 최근 반영일자를 유지합니다.
+        if 'TDF2045' in text and (principal > 0 or value > 0):
+            return '2026-06-17'
+    except Exception:
+        return ''
+    return ''
+
+
+def _v5246_adjust_reflect_dates(작업, 기존df=None):
+    """기존 행의 금액/비고 변경 시 반영일자를 자동 갱신하고, 날짜 일련번호를 문자열 날짜로 정리합니다."""
+    try:
+        out = IRP비주식자산표준열맞추기(작업).copy()
+        if out.empty:
+            return out
+        표준열 = ['계좌', '자산군', '상품명', '원금', '평가금액', '예상연수익률', '만기일', '반영일자', '비고']
+        for c in 표준열:
+            if c not in out.columns:
+                out[c] = ''
+        out = out[표준열].copy()
+        for c in ['계좌', '자산군', '상품명', '만기일', '반영일자', '비고']:
+            out[c] = out[c].apply(lambda v: '' if pd.isna(v) else str(v).strip()).replace({'nan':'','NaT':'','None':'','<NA>':''})
+        for c in ['원금', '평가금액']:
+            out[c] = out[c].apply(lambda v: int(_v52217_money_int(v)))
+        out['예상연수익률'] = out['예상연수익률'].apply(lambda v: round(_v52216_num(v, 0), 2) if '_v52216_num' in globals() else 0.0)
+        for c in ['만기일', '반영일자']:
+            out[c] = out[c].apply(_v52218_date_str)
+
+        old_map = {}
+        try:
+            old = IRP비주식자산표준열맞추기(기존df).copy() if 기존df is not None and not pd.DataFrame(기존df).empty else pd.DataFrame()
+            if not old.empty:
+                for c in ['원금', '평가금액']:
+                    if c in old.columns:
+                        old[c] = old[c].apply(lambda v: int(_v52217_money_int(v)))
+                if '예상연수익률' in old.columns:
+                    old['예상연수익률'] = old['예상연수익률'].apply(lambda v: round(_v52216_num(v, 0), 2) if '_v52216_num' in globals() else 0.0)
+                for c in ['만기일', '반영일자']:
+                    if c in old.columns:
+                        old[c] = old[c].apply(_v52218_date_str)
+                for _, r in old.iterrows():
+                    old_map[_v5246_norm_row_key(r)] = r
+        except Exception as e:
+            logging.warning('v5246 old nonstock map skipped: %s', e, exc_info=True)
+
+        today = 서울현재시각().strftime('%Y-%m-%d') if '서울현재시각' in globals() else datetime.now().strftime('%Y-%m-%d')
+        fixed_dates = []
+        for _, r in out.iterrows():
+            current_date = _v52218_date_str(r.get('반영일자', ''))
+            known_date = _v5246_known_flow_date(r)
+            if known_date:
+                fixed_dates.append(known_date)
+                continue
+            old = old_map.get(_v5246_norm_row_key(r))
+            if old is not None:
+                if _v5246_row_value_signature(r) != _v5246_row_value_signature(old):
+                    fixed_dates.append(today)
+                else:
+                    fixed_dates.append(current_date or _v52218_date_str(old.get('반영일자', '')) or today)
+            else:
+                fixed_dates.append(current_date or today)
+        out['반영일자'] = fixed_dates
+        return out
+    except Exception as e:
+        logging.warning('v5246 reflect date adjustment failed: %s', e, exc_info=True)
+        try:
+            return _v52218_nonstock_df(작업)
+        except Exception:
+            return pd.DataFrame(작업).copy() if 작업 is not None else pd.DataFrame()
+
+
+try:
+    _IRP비주식자산저장_v5246_base = IRP비주식자산저장
+except Exception:
+    _IRP비주식자산저장_v5246_base = None
+
+
+def IRP비주식자산저장(df):
+    """v5.24.6: 저장 직전 반영일자 자동 보정 후 기존 저장 엔진을 호출합니다."""
+    try:
+        try:
+            기존df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_NON_STOCK_SHEET)
+        except Exception:
+            기존df = pd.DataFrame()
+        작업 = _v5246_adjust_reflect_dates(df, 기존df)
+        return _IRP비주식자산저장_v5246_base(작업)
+    except Exception as e:
+        logging.warning('v5246 nonstock save wrapper fallback: %s', e, exc_info=True)
+        if _IRP비주식자산저장_v5246_base:
+            return _IRP비주식자산저장_v5246_base(df)
+        return False, f'비주식자산 저장 오류: {type(e).__name__}: {e}'
+
+
+def v5246_반영일자점검표(비주식자산df=None):
+    """수동 점검용: 현재 비주식자산 반영일자가 저장 전 어떻게 보정되는지 확인합니다."""
+    try:
+        df = 비주식자산df
+        if df is None and 'IRP비주식자산불러오기' in globals():
+            df = IRP비주식자산불러오기()
+        adjusted = _v5246_adjust_reflect_dates(df, None)
+        cols = [c for c in ['계좌','자산군','상품명','원금','평가금액','반영일자','비고'] if c in adjusted.columns]
+        return adjusted[cols].copy()
+    except Exception as e:
+        logging.warning('v5246 reflect date audit failed: %s', e, exc_info=True)
+        return pd.DataFrame()
+
+# 최종 버전 고정
+APP_VERSION = "v5.24.6-reflect-date-autofix"
+# ============================================================
+# end v5.24.6
 # ============================================================
