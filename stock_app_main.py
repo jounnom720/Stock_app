@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -5216,92 +5216,6 @@ def IRP비주식자산불러오기():
         st.warning(f"비주식자산 Google Sheets 읽기 실패: {type(e).__name__}: {e}")
         return IRP비주식자산표준열맞추기(pd.DataFrame())
 
-def IRP비주식자산저장(df):
-    """v5.22.1: 비주식자산을 Google Sheets '비주식자산' 탭에 직접 저장합니다.
-    - 화면 편집값을 표준열로 정리
-    - 쉼표/원/공백이 섞인 숫자도 안전 변환
-    - 구글시트 저장 후 캐시와 세션값을 갱신
-    - 저장 직후 실제 시트 행 수를 확인
-    """
-    연결됨, info = 구글시트운영연결확인(화면표시=False)
-    if not 연결됨:
-        return False, f"Google Sheets 연결 실패로 저장을 중단했습니다: {info.get('메시지', '')}"
-
-    try:
-        작업 = IRP비주식자산표준열맞추기(df)
-        표준열 = ["계좌", "자산군", "상품명", "원금", "평가금액", "예상연수익률", "만기일", "반영일자", "비고"]
-        작업 = 작업[표준열].copy()
-
-        # 완전 빈 행 제거. 단, 해지 상품처럼 원금/평가금액이 0이어도 상품명이 있으면 보존합니다.
-        for 열 in ["계좌", "자산군", "상품명", "만기일", "반영일자", "비고"]:
-            작업[열] = 작업[열].apply(lambda 값: "" if pd.isna(값) else str(값).strip())
-            작업[열] = 작업[열].replace({"nan": "", "NaT": "", "None": "", "<NA>": ""})
-
-        for 열 in ["원금", "평가금액", "예상연수익률"]:
-            작업[열] = pd.to_numeric(작업[열], errors="coerce").fillna(0.0)
-
-        작업 = 작업[
-            (작업["계좌"].astype(str).str.strip() != "")
-            | (작업["자산군"].astype(str).str.strip() != "")
-            | (작업["상품명"].astype(str).str.strip() != "")
-            | (작업["원금"].abs() > 0)
-            | (작업["평가금액"].abs() > 0)
-            | (작업["비고"].astype(str).str.strip() != "")
-        ].copy()
-
-        # v5.14.40 안전장치 유지: 예전 샘플값 보호
-        try:
-            구버전기준일 = 작업["반영일자"].astype(str).str.contains("2026-04-30", na=False).sum()
-            구버전금액패턴 = 작업["평가금액"].astype(float).isin([51873538, 31443846, 27499444, 5030813, 17188280]).sum()
-            if len(작업) >= 5 and 구버전기준일 >= 3 and 구버전금액패턴 >= 3:
-                return False, "저장 중단: 2026-04-30 기준 구버전 기본값으로 보입니다. Google Sheets 원본을 보호하기 위해 저장하지 않았습니다."
-        except Exception as e:
-            logging.warning("non-stock legacy sample guard skipped: %s", e, exc_info=True)
-
-        spreadsheet, 연결정보 = 구글시트문서연결()
-        if spreadsheet is None:
-            return False, f"Google Sheets 미연결: {연결정보.get('메시지', '')}"
-
-        ws = 구글시트워크시트확보(
-            spreadsheet,
-            GOOGLE_SHEETS_NON_STOCK_SHEET,
-            rows=max(100, len(작업) + 20),
-            cols=len(표준열) + 2,
-        )
-
-        저장값 = [표준열] + 작업.astype(object).where(pd.notna(작업), "").astype(str).values.tolist()
-
-        # v5.22.3-stable: 시트를 지우기 전에 로컬 백업을 먼저 남깁니다.
-        # Google API 중간 실패가 발생해도 사용자가 입력한 비주식자산 편집값을 복구할 수 있게 합니다.
-        try:
-            자동백업저장(비주식_df=작업)
-        except Exception as e:
-            logging.warning("non-stock pre-save backup failed: %s", e, exc_info=True)
-
-        ws.clear()
-        ws.update("A1", 저장값, value_input_option="RAW")
-
-        # v5.22.2: 저장 직후 get_all_values() 검증은 Google Sheets 읽기 쿼터를 빠르게 소모하므로 생략합니다.
-        # gspread update가 예외 없이 끝나면 저장 성공으로 보고, 세션 캐시를 즉시 갱신합니다.
-        저장행수 = len(작업)
-
-        # 캐시/세션 갱신
-        st.session_state["irp_non_stock_assets_df_v512"] = 작업.copy()
-        st.session_state["irp_non_stock_assets_last_saved_rows_v5221"] = len(작업)
-        st.session_state["irp_non_stock_assets_last_saved_at_v5221"] = 서울현재시각ISO()
-
-        try:
-            구글시트데이터프레임읽기.clear()
-        except Exception as e:
-            logging.warning("non-stock read cache clear failed: %s", e, exc_info=True)
-        # v5.22.2: 전체 st.cache_data.clear()는 모든 시세/시트 캐시를 지워 재실행 시 읽기 요청을 폭증시킬 수 있어 사용하지 않습니다.
-        # 화면 반영은 위 세션 캐시 갱신값을 우선 사용합니다.
-
-        return True, f"비주식자산 Google Sheets 저장 완료: {len(작업)}행"
-
-    except Exception as e:
-        logging.exception("IRP비주식자산저장 실패")
-        return False, f"비주식자산 저장 오류: {type(e).__name__}: {e}"
 
 
 def IRP비주식자산검증표생성(df):
@@ -10404,9 +10318,6 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
     return 통합
 
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
-    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
 
 
 # 통합자산 현황도 동일 원칙으로 보정합니다.
@@ -13520,59 +13431,11 @@ def _v52214_trade_buy_rows_for_cash_note(거래df, cash_row):
         return pd.DataFrame()
 
 
-def _v52214_apply_cash_buy_deduction(irp_df, 거래df=None, 화면표시=False):
-    """비고에 명시된 예수금 사용 매수금액을 현금성자산 현재 잔액에서 차감합니다."""
-    try:
-        작업 = IRP비주식자산표준열맞추기(irp_df).copy()
-        if 작업.empty:
-            return 작업
-        if 거래df is None:
-            try:
-                거래df = 현재거래이력가져오기()
-            except Exception:
-                거래df = pd.DataFrame()
-        조정메모 = []
-        for idx, row in 작업.iterrows():
-            자산텍스트 = f"{row.get('자산군','')} {row.get('상품명','')} {row.get('비고','')}"
-            if not any(k in 자산텍스트 for k in ["예수금", "현금성", "현금", "대기자산"]):
-                continue
-            후보 = _v52214_trade_buy_rows_for_cash_note(거래df, row)
-            if 후보.empty:
-                continue
-            buy_amount = float(후보["_v52214_buy_amount"].sum())
-            현재잔액 = max(_v52214_num(row.get("평가금액", 0)), _v52214_num(row.get("원금", 0)))
-            if buy_amount <= 0 or 현재잔액 < buy_amount:
-                continue
-            조정후 = 현재잔액 - buy_amount
-            작업.at[idx, "원금"] = 조정후
-            작업.at[idx, "평가금액"] = 조정후
-            기존비고 = str(작업.at[idx, "비고"] or "").strip()
-            추가비고 = f"{_CASH_BUY_DEDUCTION_MARK_V52214} {원화정수포맷(buy_amount)}"
-            if 추가비고 not in 기존비고:
-                작업.at[idx, "비고"] = (기존비고 + " · " + 추가비고).strip(" ·")
-            종목명목록 = []
-            name_col = _v5214_first_col(후보, ["종목명", "상품명", "자산명", "name"])
-            if name_col:
-                종목명목록 = [x for x in 후보[name_col].astype(str).dropna().unique().tolist() if x]
-            조정메모.append(f"{row.get('상품명','현금성자산')} {원화정수포맷(현재잔액)} → {원화정수포맷(조정후)} ({', '.join(종목명목록) or '매수'} {원화정수포맷(buy_amount)} 차감)")
-        if 화면표시 and 조정메모:
-            st.info("현금성자산 현재잔액 보정: " + " / ".join(조정메모))
-        return 작업.reset_index(drop=True)
-    except Exception as e:
-        logging.warning("cash buy deduction apply failed: %s", e, exc_info=True)
-        return IRP비주식자산표준열맞추기(irp_df)
 
 
 # 기존 요약 함수 보정: 통합자산 계산 단계에서 매수금액 중복을 방지합니다.
 _IRP비주식자산요약행생성_v52214_base = IRP비주식자산요약행생성
 
-def IRP비주식자산요약행생성(irp_df):
-    try:
-        조정df = _v52214_apply_cash_buy_deduction(irp_df, 거래df=None, 화면표시=False)
-        return _IRP비주식자산요약행생성_v52214_base(조정df)
-    except Exception as e:
-        logging.warning("non-stock summary cash-buy correction failed: %s", e, exc_info=True)
-        return _IRP비주식자산요약행생성_v52214_base(irp_df)
 
 
 # 기존 저장 함수 보정: Google Sheets에 저장될 때도 현재 잔액과 정수 표시를 함께 정리합니다.
@@ -14055,7 +13918,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.24.2-runtime-audit-clean"
+    APP_VERSION = "v5.24.3-duplicate-prune-clean"
 except Exception:
     pass
 
@@ -14332,30 +14195,6 @@ def 비주식자산변동행생성_v52217(이전df, 현재df):
         rows.append({'기록시각': now, '반영일자': _v52217_date_str((n if n is not None else o).get('반영일자','')), '변화유형': typ, '계좌': 계좌, '자산군': 자산군, '상품명': 상품명, '이전원금': old_pr, '현재원금': new_pr, '원금변화': d_pr, '이전평가금액': old_val, '현재평가금액': new_val, '평가금액변화': d_val, '비고': note, '자동분석': analysis})
     return pd.DataFrame(rows, columns=비주식자산변동이력표준열_v52217)
 
-def _v52217_history_to_asset_movements(hist_df, 최근일수=90):
-    표준열 = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
-    try:
-        hist = 비주식자산변동이력표준화_v52217(hist_df)
-        if hist.empty: return pd.DataFrame(columns=표준열)
-        today = 서울현재시각().replace(tzinfo=None) if '서울현재시각' in globals() else datetime.now()
-        기준일 = today - timedelta(days=int(최근일수))
-        hist['_date'] = pd.to_datetime(hist['반영일자'], errors='coerce')
-        hist = hist[hist['_date'].isna() | (hist['_date'] >= pd.Timestamp(기준일))].copy()
-        rows=[]
-        for _, r in hist.iterrows():
-            typ=str(r.get('변화유형','') or ''); 상품명=str(r.get('상품명','') or ''); 계좌=str(r.get('계좌','') or ''); note=str(r.get('비고','') or '')
-            amount_delta=_v52217_money_int(r.get('평가금액변화',0)); current_amt=_v52217_money_int(r.get('현재평가금액',0))
-            amount=abs(amount_delta) if amount_delta != 0 and typ in ['현금사용','현금증가','잔액감소','잔액변경'] else abs(current_amt)
-            if amount<=0: continue
-            if typ=='현금사용': 구분='현금사용'; detail='예수금 → 한화오션 주식 매수' if '한화오션' in note else f'{상품명} 사용'
-            elif typ=='예수금이체': 구분='자금이체'; detail=f'TDF2035 매도대금 → {상품명} 이체' if 'TDF' in note.upper() else f'{상품명} 이체/보관'
-            elif typ=='현금대기': 구분='현금대기'; detail=f'{상품명} 잔액'
-            elif typ=='해지/매도반영': 구분='매도반영'; detail=f'{상품명} 매도/해지 반영'
-            else: 구분=typ or '잔액변경'; detail=f'{상품명} {구분}'
-            rows.append({'날짜':str(r.get('반영일자','') or ''),'계좌':계좌,'구분':구분,'종목명':상품명,'자산유형':str(r.get('자산군','') or '현금성자산'),'수량':0,'단가':0,'금액':amount,'원금부분':amount,'수익손실부분':0,'변화유형':구분,'상세설명':detail,'자동분석':str(r.get('자동분석','') or ''),'출처':'비주식자산변동이력'})
-        return pd.DataFrame(rows, columns=표준열)
-    except Exception as e:
-        logging.warning('history to movement failed: %s', e, exc_info=True); return pd.DataFrame(columns=표준열)
 
 def IRP비주식자산요약행생성(irp_df):
     try:
@@ -14435,7 +14274,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 
 def _v5239_text(value):
@@ -15254,7 +15093,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -15520,39 +15359,6 @@ except Exception:
     _자산이동목록통합_v52218_base = 자산이동목록통합_v5225
 
 
-def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
-    try:
-        if 비주식자산df is not None:
-            _v52218_append_nonstock_history_from_state_change(비주식자산df)
-    except Exception:
-        pass
-    try:
-        base = _자산이동목록통합_v52218_base(거래df, 비주식자산df, 최근일수=최근일수)
-    except Exception:
-        base = pd.DataFrame()
-    try:
-        hist_mov = _v52217_history_to_asset_movements(비주식자산변동이력읽기_v52217(), 최근일수=최근일수)
-    except Exception:
-        hist_mov = pd.DataFrame()
-    try:
-        recovery = _v52218_cash_flow_recovery_movements(거래df, 비주식자산df)
-    except Exception:
-        recovery = pd.DataFrame()
-    통합 = pd.concat([base, hist_mov, recovery], ignore_index=True, sort=False)
-    if 통합.empty:
-        return 통합
-    for c in ['날짜','계좌','상세설명','금액','구분','출처']:
-        if c not in 통합.columns:
-            통합[c] = '' if c!='금액' else 0
-    통합['날짜'] = 통합['날짜'].apply(_v52218_date_str)
-    통합['금액'] = pd.to_numeric(통합['금액'], errors='coerce').fillna(0)
-    # 잔액 확인성 행은 KPI 이동금액을 부풀리지 않도록 표시에는 남기되 중복 행을 정리합니다.
-    통합['_date_sort']=pd.to_datetime(통합['날짜'], errors='coerce')
-    rank_map = {'비주식자산변동이력':0, '현금흐름복원':1}
-    통합['_src_rank']=통합.get('출처','').astype(str).map(lambda x:rank_map.get(x,2))
-    통합['_key']=통합.apply(lambda r:(str(r.get('날짜','')),str(r.get('계좌','')),str(r.get('구분','')),str(r.get('상세설명','')),round(float(r.get('금액',0) or 0))),axis=1)
-    통합 = 통합.sort_values(['_date_sort','_src_rank','금액'], ascending=[False,True,False]).drop_duplicates('_key',keep='first')
-    return 통합.drop(columns=['_date_sort','_src_rank','_key'],errors='ignore').reset_index(drop=True)
 
 
 
@@ -15577,7 +15383,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -15865,7 +15671,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -16144,7 +15950,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 
 def _v52221_to_df_safe(obj):
@@ -16396,18 +16202,18 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 
 
 # ============================================================
-# v5.24.2 runtime audit clean
+# v5.24.3 duplicate prune audit clean
 # 목적
 # - 실행 로직은 변경하지 않습니다.
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.24.2-runtime-audit-clean"
+APP_VERSION = "v5.24.3-duplicate-prune-clean"
 
 
 def _v5242_runtime_integrity_check():
