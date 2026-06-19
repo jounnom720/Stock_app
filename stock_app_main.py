@@ -14922,6 +14922,438 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 
     # -----------------------------------
 
+
+# ============================================================
+# v5.24.8 pre-runtime patch
+# 목적
+# - 이 패치는 화면 라우팅이 실행되기 전에 반드시 정의되어야 합니다.
+# - v5.24.7 패치가 파일 하단에 위치해 실제 화면 호출 뒤에 실행되던 문제를 수정합니다.
+# - ETF/주식 매도 행의 금액·원금·실현손익 보정, 반영일자 문자열 저장 보정,
+#   거래기반 현금 보정 행을 모두 화면 계산 전에 적용합니다.
+# - 기존 전체 거래이력 병합과 TDF2035 실현손익 보호 로직은 건드리지 않습니다.
+# ============================================================
+APP_VERSION = "v5.24.8-pre-runtime-etf-sell-cash-fix"
+
+
+def _v5248_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    return s
+
+
+def _v5248_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            s = value.replace(",", "").replace("원", "").replace("%", "").strip()
+            if s == "" or s.lower() in ["nan", "none", "nat", "<na>"]:
+                return default
+            return float(s)
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5248_money(value):
+    return int(round(_v5248_num(value, 0.0)))
+
+
+def _v5248_date(value):
+    """Google Sheets/Excel 일련번호와 일반 날짜를 YYYY-MM-DD 문자열로 통일합니다."""
+    s = _v5248_text(value)
+    if not s:
+        return ""
+    try:
+        # 46190 같은 Google Sheets 날짜 일련번호 처리
+        if re.fullmatch(r"\d{5}(\.0)?", s):
+            serial = int(float(s))
+            if 30000 <= serial <= 80000:
+                return (datetime(1899, 12, 30) + timedelta(days=serial)).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    try:
+        dt = pd.to_datetime(s, errors="coerce")
+        if pd.notna(dt):
+            return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return s[:10]
+
+
+def _v5248_first(row, candidates):
+    try:
+        for c in candidates:
+            if hasattr(row, "get") and c in getattr(row, "index", []):
+                v = row.get(c, "")
+                if _v5248_text(v) != "":
+                    return v
+    except Exception:
+        pass
+    return ""
+
+
+def _v5248_row_text(row):
+    try:
+        return " ".join(_v5248_text(v) for v in row.values)
+    except Exception:
+        return ""
+
+
+def _v5248_side(row):
+    text = _v5248_row_text(row)
+    keytext = " ".join(_v5248_text(row.get(c, "")) for c in ["구분", "거래구분", "매매구분", "분류", "유형", "비고", "메모"] if hasattr(row, "get") and c in getattr(row, "index", []))
+    if "매도" in keytext or "매도" in text:
+        return "매도"
+    if "매수" in keytext or "매수" in text:
+        return "매수"
+    return ""
+
+
+def _v5248_trade_date(row):
+    for c in ["날짜", "거래일자", "거래일", "매도일", "매수일", "체결일", "일자", "반영일자"]:
+        if hasattr(row, "get") and c in getattr(row, "index", []):
+            d = _v5248_date(row.get(c, ""))
+            if d:
+                return d
+    try:
+        return 서울현재시각().strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def _v5248_trade_name(row):
+    raw_name = _v5248_first(row, ["종목명", "상품명", "자산명", "보유종목", "name", "Name"])
+    raw_code = _v5248_first(row, ["종목코드", "코드", "ticker", "Ticker", "symbol", "Symbol"])
+    try:
+        return _v5248_text(asset_name_v518(raw_code, raw_name))
+    except Exception:
+        return _v5248_text(raw_name or raw_code)
+
+
+def _v5248_account(row):
+    return _v5248_text(_v5248_first(row, ["계좌", "계좌명", "운용사", "증권사", "보관기관", "금융기관"])).replace("미래에셋증권", "미래에셋/증권계좌")
+
+
+def _v5248_asset_kind(row, name=""):
+    code = _v5248_first(row, ["종목코드", "코드", "ticker", "Ticker", "symbol", "Symbol"])
+    text = (str(code) + " " + str(name) + " " + _v5248_row_text(row)).upper().replace(" ", "")
+    try:
+        kind = asset_kind_v518(code, name)
+        if kind:
+            return "ETF" if kind == "ETF" else kind
+    except Exception:
+        pass
+    if any(x in text for x in ["ETF", "KODEX", "TIGER", "0148J0", "휴머노이드"]):
+        return "ETF"
+    if "TDF" in text:
+        return "TDF"
+    return "주식형자산"
+
+
+def _v5248_qty_price_amount(row):
+    qty = 0
+    price = 0
+    for c in ["수량", "거래수량", "매도수량", "매수수량", "체결수량", "보유수량"]:
+        if c in getattr(row, "index", []):
+            qty = abs(_v5248_num(row.get(c, 0), 0))
+            if qty:
+                break
+    for c in ["단가", "거래단가", "매도단가", "매도가", "매수가", "체결단가", "체결가", "가격", "현재가"]:
+        if c in getattr(row, "index", []):
+            price = abs(_v5248_num(row.get(c, 0), 0))
+            if price:
+                break
+    return int(round(qty * price)) if qty and price else 0
+
+
+def _v5248_trade_amount(row, side=""):
+    if side == "매도":
+        candidates = ["매도금액", "매도대금", "매각금액", "매도정산금액", "정산금액", "체결금액", "거래금액", "매매금액", "처분금액", "입금액", "금액", "평가금액"]
+    elif side == "매수":
+        candidates = ["매수금액", "매입금액", "체결금액", "거래금액", "매매금액", "출금액", "금액", "투자원금"]
+    else:
+        candidates = ["금액", "거래금액", "체결금액", "매매금액", "매수금액", "매도금액", "매도대금", "투자원금"]
+    for c in candidates:
+        if c in getattr(row, "index", []):
+            v = abs(_v5248_money(row.get(c, 0)))
+            if v > 0:
+                return v
+    qp = _v5248_qty_price_amount(row)
+    return qp if qp > 0 else 0
+
+
+def _v5248_principal_pnl(row, amount=0, side=""):
+    principal = 0
+    for c in ["원금부분", "원금", "투자원금", "취득금액", "매입금액", "매수금액", "평균매입금액", "매입원금"]:
+        if c in getattr(row, "index", []):
+            v = abs(_v5248_money(row.get(c, 0)))
+            if v > 0:
+                principal = v
+                break
+    pnl = None
+    for c in ["수익손실부분", "실현손익", "실현수익", "실현손실", "평가손익", "손익", "수익", "처분손익", "매매손익"]:
+        if c in getattr(row, "index", []):
+            pnl = _v5248_money(row.get(c, 0))
+            break
+    if principal <= 0 and amount > 0:
+        principal = max(0, int(amount - (pnl or 0))) if side == "매도" and pnl is not None else amount
+    if pnl is None:
+        pnl = int(amount - principal) if side == "매도" and amount > 0 and principal > 0 else 0
+    if amount <= 0 and principal > 0:
+        amount = principal + max(0, pnl)
+    return int(amount), int(principal), int(pnl)
+
+
+def _v5248_cash_name(account=""):
+    a = str(account or "")
+    return "현금성 대기자산" if ("IRP" in a.upper() or "신한" in a) else "예수금"
+
+
+def _v5248_recent_sell_rows(거래df=None, 최근일수=90):
+    cols = ["날짜", "계좌", "구분", "종목명", "자산유형", "수량", "단가", "금액", "원금부분", "수익손실부분", "변화유형", "상세설명", "자동분석", "출처"]
+    rows = []
+    try:
+        df = pd.DataFrame(거래df).copy() if 거래df is not None else pd.DataFrame()
+        if df.empty:
+            return pd.DataFrame(rows, columns=cols)
+        today_dt = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
+        try:
+            today_dt = pd.to_datetime(서울현재시각().strftime("%Y-%m-%d"))
+        except Exception:
+            pass
+        for _, r in df.iterrows():
+            side = _v5248_side(r)
+            if side != "매도":
+                continue
+            name = _v5248_trade_name(r)
+            row_text = _v5248_row_text(r).upper()
+            if "TDF2035" in row_text:
+                continue
+            kind = _v5248_asset_kind(r, name)
+            if kind not in ["ETF", "주식", "주식형자산"] and not any(x in row_text for x in ["ETF", "TIGER", "KODEX"]):
+                continue
+            date = _v5248_trade_date(r)
+            try:
+                if (today_dt - pd.to_datetime(date)).days > 최근일수:
+                    continue
+            except Exception:
+                pass
+            amount = _v5248_trade_amount(r, side)
+            amount, principal, pnl = _v5248_principal_pnl(r, amount, side)
+            if amount <= 0 and principal <= 0:
+                continue
+            account = _v5248_account(r)
+            cash = _v5248_cash_name(account)
+            pnl_txt = "손익 0원"
+            try:
+                if pnl > 0:
+                    pnl_txt = "실현수익 " + 원화정수포맷(pnl)
+                elif pnl < 0:
+                    pnl_txt = "실현손실 " + 원화정수포맷(pnl)
+            except Exception:
+                if pnl > 0:
+                    pnl_txt = "실현수익 {:,}원".format(pnl)
+                elif pnl < 0:
+                    pnl_txt = "실현손실 {:,}원".format(pnl)
+            rows.append({
+                "날짜": date,
+                "계좌": account,
+                "구분": "매도",
+                "종목명": name,
+                "자산유형": kind,
+                "수량": abs(_v5248_money(_v5248_first(r, ["수량", "거래수량", "매도수량", "체결수량"]))),
+                "단가": abs(_v5248_money(_v5248_first(r, ["단가", "거래단가", "매도단가", "매도가", "체결가", "가격"]))),
+                "금액": int(amount),
+                "원금부분": int(principal),
+                "수익손실부분": int(pnl),
+                "변화유형": "매도",
+                "상세설명": "{} {} 매도 → {}".format(name, kind, cash),
+                "자동분석": "원금변화 없음 · {} 원금 {} + {}이 {}으로 이동".format(kind, 원화정수포맷(principal) if "원화정수포맷" in globals() else str(principal), pnl_txt, cash),
+                "출처": "v5248_거래기반매도보정",
+            })
+    except Exception as e:
+        logging.warning("v5248 recent sell rows failed: %s", e, exc_info=True)
+    return pd.DataFrame(rows, columns=cols)
+
+
+try:
+    _자산이동목록통합_v5248_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5248_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        base = _자산이동목록통합_v5248_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5248_base else pd.DataFrame()
+    except Exception as e:
+        logging.warning("v5248 base movement failed: %s", e, exc_info=True)
+        base = pd.DataFrame()
+    corr = _v5248_recent_sell_rows(거래df, 최근일수=최근일수)
+    out = pd.concat([base, corr], ignore_index=True, sort=False)
+    if out.empty:
+        return out
+    for c in ["날짜", "계좌", "구분", "종목명", "자산유형", "상세설명", "금액", "원금부분", "수익손실부분", "출처", "자동분석"]:
+        if c not in out.columns:
+            out[c] = 0 if c in ["금액", "원금부분", "수익손실부분"] else ""
+    out["날짜"] = out["날짜"].apply(_v5248_date)
+    for c in ["금액", "원금부분", "수익손실부분"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(float)
+    out["_dt_v5248"] = pd.to_datetime(out["날짜"], errors="coerce")
+    out["_rank_v5248"] = out["출처"].astype(str).map(lambda x: 0 if x == "v5248_거래기반매도보정" else 5)
+    def _key(r):
+        name = str(r.get("종목명", ""))
+        kind = str(r.get("자산유형", ""))
+        desc = str(r.get("상세설명", ""))
+        if str(r.get("구분", "")) == "매도" and name and ("ETF" in kind or "TIGER" in name or "KODEX" in name or "휴머노이드" in name):
+            return "SELL|{}|{}".format(r.get("날짜", ""), name)
+        return "BASE|{}|{}|{}|{}".format(r.get("날짜", ""), r.get("계좌", ""), r.get("구분", ""), desc)
+    out["_key_v5248"] = out.apply(_key, axis=1)
+    out = out.sort_values(["_dt_v5248", "_rank_v5248", "금액"], ascending=[False, True, False])
+    out = out.drop_duplicates("_key_v5248", keep="first")
+    return out.drop(columns=["_dt_v5248", "_rank_v5248", "_key_v5248"], errors="ignore").reset_index(drop=True)
+
+
+# 기존 자산변동추이UI가 이 이름을 호출하므로, 화면 호출 전에 재고정합니다.
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    try:
+        return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+    except Exception:
+        return 최근자산변화표시_v5226(이동df, 최대표시=최대표시)
+
+
+try:
+    _통합자산현황표생성_v5248_base = 통합자산현황표생성
+except Exception:
+    _통합자산현황표생성_v5248_base = None
+
+
+def _v5248_nonstock_cash_total(df):
+    try:
+        d = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+        if d.empty:
+            return 0
+        total = 0
+        for _, r in d.iterrows():
+            text = " ".join(_v5248_text(r.get(c, "")) for c in ["계좌", "자산군", "상품명", "비고"])
+            if any(x in text for x in ["현금", "예수금", "대기", "CMA"]):
+                total += max(abs(_v5248_money(r.get("원금", 0))), abs(_v5248_money(r.get("평가금액", 0))))
+        return int(total)
+    except Exception:
+        return 0
+
+
+def _v5248_trade_cash_adjustment_rows(irp_df=None, cash_df=None):
+    """거래이력에 매도는 있으나 현금성자산 시트에 반영되지 않은 최근 매도대금을 통합자산에 임시 보정합니다."""
+    try:
+        거래df = st.session_state.get("trade_history_df_v22", pd.DataFrame()) if "st" in globals() else pd.DataFrame()
+        sells = _v5248_recent_sell_rows(거래df, 최근일수=7)
+        if sells.empty:
+            return pd.DataFrame()
+        sell_amount = int(pd.to_numeric(sells.get("금액", 0), errors="coerce").fillna(0).sum())
+        sell_principal = int(pd.to_numeric(sells.get("원금부분", 0), errors="coerce").fillna(0).sum())
+        sell_pnl = int(pd.to_numeric(sells.get("수익손실부분", 0), errors="coerce").fillna(0).sum())
+        if sell_amount <= 0 and sell_principal <= 0:
+            return pd.DataFrame()
+        # 이미 시트의 현금성자산에 같은 금액이 명확히 들어간 경우 중복 보정을 피합니다.
+        cash_total = _v5248_nonstock_cash_total(irp_df) + _v5248_nonstock_cash_total(cash_df)
+        if sell_amount > 0 and cash_total >= sell_amount and len(sells) == 1:
+            # 기존 현금 총액만으로는 완벽한 중복판정이 어렵기 때문에, 비고에 오늘 매도 관련 문구가 있는 경우만 제외합니다.
+            text_all = " ".join(_v5248_text(v) for v in pd.DataFrame(irp_df).astype(str).values.flatten()) if irp_df is not None else ""
+            text_all += " " + (" ".join(_v5248_text(v) for v in pd.DataFrame(cash_df).astype(str).values.flatten()) if cash_df is not None else "")
+            if any(str(x) in text_all for x in sells["종목명"].astype(str).tolist()):
+                return pd.DataFrame()
+        account = _v5248_text(sells.iloc[0].get("계좌", ""))
+        return pd.DataFrame([{
+            "계좌": account or "거래기반 현금보정",
+            "자산군": "현금성자산",
+            "상품명": "매도대금 임시반영",
+            "원금": sell_principal if sell_principal > 0 else sell_amount,
+            "평가금액": sell_amount,
+            "평가손익": sell_amount - (sell_principal if sell_principal > 0 else sell_amount),
+            "수익률": ((sell_amount - sell_principal) / sell_principal * 100) if sell_principal else 0,
+            "비고": "거래이력 매도대금이 비주식/현금성자산 시트에 아직 반영되지 않아 통합자산에 임시 반영",
+        }])
+    except Exception as e:
+        logging.warning("v5248 trade cash adjustment failed: %s", e, exc_info=True)
+        return pd.DataFrame()
+
+
+def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
+    통합 = _통합자산현황표생성_v5248_base(보유포트폴리오, irp_df, cash_df) if _통합자산현황표생성_v5248_base else pd.DataFrame()
+    try:
+        보정 = _v5248_trade_cash_adjustment_rows(irp_df, cash_df)
+        if not 보정.empty:
+            통합 = pd.concat([통합, 보정], ignore_index=True, sort=False)
+            통합["원금"] = pd.to_numeric(통합["원금"], errors="coerce").fillna(0)
+            통합["평가금액"] = pd.to_numeric(통합["평가금액"], errors="coerce").fillna(0)
+            통합["평가손익"] = 통합["평가금액"] - 통합["원금"]
+            통합["수익률"] = np.where(통합["원금"] != 0, 통합["평가손익"] / 통합["원금"] * 100, 0)
+            총평가 = 통합["평가금액"].sum()
+            통합["전체비중"] = np.where(총평가 != 0, 통합["평가금액"] / 총평가 * 100, 0)
+    except Exception as e:
+        logging.warning("v5248 total asset cash adjustment skipped: %s", e, exc_info=True)
+    return 통합
+
+
+try:
+    _구글시트저장용정리_v5248_base = 구글시트저장용정리
+except Exception:
+    _구글시트저장용정리_v5248_base = None
+
+
+def 구글시트저장용정리(df, sheet_name=""):
+    작업 = _구글시트저장용정리_v5248_base(df, sheet_name=sheet_name) if _구글시트저장용정리_v5248_base else pd.DataFrame(df).copy()
+    try:
+        for c in ["거래일자", "거래일", "일자", "날짜", "매매일자", "만기일", "반영일자", "기준일"]:
+            if c in 작업.columns:
+                작업[c] = 작업[c].apply(_v5248_date).astype(str)
+    except Exception as e:
+        logging.warning("v5248 save date cleanup failed: %s", e, exc_info=True)
+    return 작업
+
+
+try:
+    _IRP비주식자산저장_v5248_base = IRP비주식자산저장
+except Exception:
+    _IRP비주식자산저장_v5248_base = None
+
+
+def IRP비주식자산저장(df):
+    try:
+        작업 = IRP비주식자산표준열맞추기(df).copy()
+        if "반영일자" in 작업.columns:
+            작업["반영일자"] = 작업["반영일자"].apply(_v5248_date).astype(str)
+        if "만기일" in 작업.columns:
+            작업["만기일"] = 작업["만기일"].apply(_v5248_date).astype(str)
+        # 금액/비고가 현재 의미상 확정된 행은 잘못된 과거 일련번호를 보정합니다.
+        for i, r in 작업.iterrows():
+            text = " ".join(_v5248_text(r.get(c, "")) for c in ["계좌", "자산군", "상품명", "비고"])
+            if "TDF2035" in text and _v5248_money(r.get("원금", 0)) == 0 and _v5248_money(r.get("평가금액", 0)) == 0:
+                작업.at[i, "반영일자"] = "2026-06-16"
+            elif "현금성" in text and "대기" in text and _v5248_money(r.get("평가금액", 0)) == 20728:
+                작업.at[i, "반영일자"] = "2026-06-17"
+            elif "미래에셋" in text and "예수금" in text:
+                작업.at[i, "반영일자"] = "2026-06-17"
+    except Exception:
+        작업 = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
+    if _IRP비주식자산저장_v5248_base:
+        return _IRP비주식자산저장_v5248_base(작업)
+    return 구글시트데이터프레임저장(GOOGLE_SHEETS_NON_STOCK_SHEET, 작업)
+
+# ============================================================
+# end v5.24.8 pre-runtime patch
+# ============================================================
+
 if 선택섹터 == "포트폴리오 현황":
     # 포트폴리오 계산 결과
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
@@ -16345,550 +16777,4 @@ def v5242_운영점검표시():
 
 # ============================================================
 # end v5.24.2 runtime audit clean
-# ============================================================
-
-
-# ============================================================
-# v5.24.6 반영일자 자동 보정·저장 안정화 패치
-# 목적
-# - Google Sheets의 반영일자 숫자 일련번호(46188 등)를 사용자가 직접 고치지 않아도
-#   저장 시 YYYY-MM-DD 문자열로 정리합니다.
-# - 원금/평가금액/비고가 바뀐 현재 행은 과거 반영일자를 그대로 끌고 가지 않도록
-#   현재 확인된 흐름 기준 날짜로 보정합니다.
-# - 날짜열은 Google Sheets에서 다시 숫자 일련번호로 보이지 않도록 TEXT 형식으로 저장합니다.
-# - 기능 추가가 아니라 날짜 표시/저장 오류 보정입니다.
-# ============================================================
-APP_VERSION = "v5.24.6-reflect-date-autofix"
-
-try:
-    _v5246_apply_google_sheet_number_format_base = _v52216_apply_google_sheet_number_format
-except Exception:
-    _v5246_apply_google_sheet_number_format_base = None
-
-
-def _v52216_apply_google_sheet_number_format(ws, headers):
-    """v5.24.6: 반영일자/만기일은 TEXT로 고정해 Google Sheets 숫자 일련번호 재표시를 막습니다."""
-    try:
-        for idx, col in enumerate(list(headers or []), start=1):
-            col_letter = chr(64 + idx) if idx <= 26 else None
-            if not col_letter:
-                continue
-            if col in ['원금', '평가금액']:
-                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}})
-            elif col == '예상연수익률':
-                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '0.00'}})
-            elif col in ['만기일', '반영일자']:
-                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'TEXT'}})
-            elif col in ['계좌', '자산군', '상품명', '비고']:
-                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'TEXT'}})
-    except Exception as e:
-        logging.warning('v5246 google sheet number/text format failed: %s', e, exc_info=True)
-
-
-def _v5246_norm_row_key(row):
-    try:
-        return '|'.join([
-            _v52218_norm_text(row.get('계좌', '')),
-            _v52218_norm_text(row.get('자산군', '')),
-            _v52218_norm_text(row.get('상품명', '')),
-        ])
-    except Exception:
-        return ''
-
-
-def _v5246_row_value_signature(row):
-    try:
-        return '|'.join([
-            str(int(_v52217_money_int(row.get('원금', 0)))),
-            str(int(_v52217_money_int(row.get('평가금액', 0)))),
-            f"{float(_v52216_num(row.get('예상연수익률', 0), 0) if '_v52216_num' in globals() else 0):.2f}",
-            _v52218_norm_text(row.get('만기일', '')),
-            _v52218_norm_text(row.get('비고', '')),
-        ])
-    except Exception:
-        return ''
-
-
-def _v5246_known_flow_date(row):
-    """확정된 TDF2035 현금흐름은 현재 행 의미에 맞는 반영일자로 보정합니다."""
-    try:
-        text = ' '.join(_v52218_norm_text(row.get(c, '')) for c in ['계좌', '자산군', '상품명', '비고'])
-        principal = int(_v52217_money_int(row.get('원금', 0)))
-        value = int(_v52217_money_int(row.get('평가금액', 0)))
-        # TDF2035 전량매도 자체는 2026-06-16 사건입니다.
-        if 'TDF2035' in text and principal == 0 and value == 0 and ('매도' in text or '현금성' in text):
-            return '2026-06-16'
-        # 매도 후 남은 신한IRP 현금성 대기자산 잔액은 이체/매수 이후 확인된 2026-06-17 현재 잔액입니다.
-        if ('신한' in text or 'IRP' in text.upper()) and '현금성' in text and ('대기' in text or '현금성자산' in text) and value == 20728:
-            return '2026-06-17'
-        # 미래에셋 예수금 잔액은 한화오션 매수 후 2026-06-17 현재 잔액입니다.
-        if '미래에셋' in text and '예수금' in text:
-            return '2026-06-17'
-        # TDF2045는 현재 잔존 평가 기준일로 최근 반영일자를 유지합니다.
-        if 'TDF2045' in text and (principal > 0 or value > 0):
-            return '2026-06-17'
-    except Exception:
-        return ''
-    return ''
-
-
-def _v5246_adjust_reflect_dates(작업, 기존df=None):
-    """기존 행의 금액/비고 변경 시 반영일자를 자동 갱신하고, 날짜 일련번호를 문자열 날짜로 정리합니다."""
-    try:
-        out = IRP비주식자산표준열맞추기(작업).copy()
-        if out.empty:
-            return out
-        표준열 = ['계좌', '자산군', '상품명', '원금', '평가금액', '예상연수익률', '만기일', '반영일자', '비고']
-        for c in 표준열:
-            if c not in out.columns:
-                out[c] = ''
-        out = out[표준열].copy()
-        for c in ['계좌', '자산군', '상품명', '만기일', '반영일자', '비고']:
-            out[c] = out[c].apply(lambda v: '' if pd.isna(v) else str(v).strip()).replace({'nan':'','NaT':'','None':'','<NA>':''})
-        for c in ['원금', '평가금액']:
-            out[c] = out[c].apply(lambda v: int(_v52217_money_int(v)))
-        out['예상연수익률'] = out['예상연수익률'].apply(lambda v: round(_v52216_num(v, 0), 2) if '_v52216_num' in globals() else 0.0)
-        for c in ['만기일', '반영일자']:
-            out[c] = out[c].apply(_v52218_date_str)
-
-        old_map = {}
-        try:
-            old = IRP비주식자산표준열맞추기(기존df).copy() if 기존df is not None and not pd.DataFrame(기존df).empty else pd.DataFrame()
-            if not old.empty:
-                for c in ['원금', '평가금액']:
-                    if c in old.columns:
-                        old[c] = old[c].apply(lambda v: int(_v52217_money_int(v)))
-                if '예상연수익률' in old.columns:
-                    old['예상연수익률'] = old['예상연수익률'].apply(lambda v: round(_v52216_num(v, 0), 2) if '_v52216_num' in globals() else 0.0)
-                for c in ['만기일', '반영일자']:
-                    if c in old.columns:
-                        old[c] = old[c].apply(_v52218_date_str)
-                for _, r in old.iterrows():
-                    old_map[_v5246_norm_row_key(r)] = r
-        except Exception as e:
-            logging.warning('v5246 old nonstock map skipped: %s', e, exc_info=True)
-
-        today = 서울현재시각().strftime('%Y-%m-%d') if '서울현재시각' in globals() else datetime.now().strftime('%Y-%m-%d')
-        fixed_dates = []
-        for _, r in out.iterrows():
-            current_date = _v52218_date_str(r.get('반영일자', ''))
-            known_date = _v5246_known_flow_date(r)
-            if known_date:
-                fixed_dates.append(known_date)
-                continue
-            old = old_map.get(_v5246_norm_row_key(r))
-            if old is not None:
-                if _v5246_row_value_signature(r) != _v5246_row_value_signature(old):
-                    fixed_dates.append(today)
-                else:
-                    fixed_dates.append(current_date or _v52218_date_str(old.get('반영일자', '')) or today)
-            else:
-                fixed_dates.append(current_date or today)
-        out['반영일자'] = fixed_dates
-        return out
-    except Exception as e:
-        logging.warning('v5246 reflect date adjustment failed: %s', e, exc_info=True)
-        try:
-            return _v52218_nonstock_df(작업)
-        except Exception:
-            return pd.DataFrame(작업).copy() if 작업 is not None else pd.DataFrame()
-
-
-try:
-    _IRP비주식자산저장_v5246_base = IRP비주식자산저장
-except Exception:
-    _IRP비주식자산저장_v5246_base = None
-
-
-def IRP비주식자산저장(df):
-    """v5.24.6: 저장 직전 반영일자 자동 보정 후 기존 저장 엔진을 호출합니다."""
-    try:
-        try:
-            기존df = 구글시트데이터프레임읽기(GOOGLE_SHEETS_NON_STOCK_SHEET)
-        except Exception:
-            기존df = pd.DataFrame()
-        작업 = _v5246_adjust_reflect_dates(df, 기존df)
-        return _IRP비주식자산저장_v5246_base(작업)
-    except Exception as e:
-        logging.warning('v5246 nonstock save wrapper fallback: %s', e, exc_info=True)
-        if _IRP비주식자산저장_v5246_base:
-            return _IRP비주식자산저장_v5246_base(df)
-        return False, f'비주식자산 저장 오류: {type(e).__name__}: {e}'
-
-
-def v5246_반영일자점검표(비주식자산df=None):
-    """수동 점검용: 현재 비주식자산 반영일자가 저장 전 어떻게 보정되는지 확인합니다."""
-    try:
-        df = 비주식자산df
-        if df is None and 'IRP비주식자산불러오기' in globals():
-            df = IRP비주식자산불러오기()
-        adjusted = _v5246_adjust_reflect_dates(df, None)
-        cols = [c for c in ['계좌','자산군','상품명','원금','평가금액','반영일자','비고'] if c in adjusted.columns]
-        return adjusted[cols].copy()
-    except Exception as e:
-        logging.warning('v5246 reflect date audit failed: %s', e, exc_info=True)
-        return pd.DataFrame()
-
-# 최종 버전 고정
-APP_VERSION = "v5.24.6-reflect-date-autofix"
-# ============================================================
-# end v5.24.6
-# ============================================================
-
-
-# ============================================================
-# v5.24.7 ETF 매도 원금/손익 반영 + 반영일자 저장 강제 보정
-# 목적
-# - 거래이력에 오늘 ETF/주식 매도 행이 표시되지만 금액 0원, 손익 0원으로 해석되는 문제를 보정합니다.
-# - 매도금액/매도대금/체결금액/수량*매도가 등 가능한 컬럼을 폭넓게 읽어 이동금액·원금부분·실현손익을 계산합니다.
-# - Google Sheets 반영일자는 DATE가 아니라 TEXT로 고정하고, 저장값도 YYYY-MM-DD 문자열로 강제합니다.
-# - 기존 48건 거래이력 병합, TDF2035 실현손익 3,690,927원 보호 로직은 수정하지 않습니다.
-# ============================================================
-APP_VERSION = "v5.24.7-etf-sell-date-profit-fix"
-
-
-def _v5247_money(value):
-    try:
-        if value is None:
-            return 0
-        if isinstance(value, str):
-            s = value.replace(',', '').replace('원', '').replace('%', '').strip()
-            if s == '' or s.lower() in ['nan', 'none', 'nat', '<na>']:
-                return 0
-            return int(round(float(s)))
-        if pd.isna(value):
-            return 0
-        return int(round(float(value)))
-    except Exception:
-        try:
-            return int(_v52217_money_int(value))
-        except Exception:
-            return 0
-
-
-def _v5247_text(value):
-    try:
-        if value is None or pd.isna(value):
-            return ''
-    except Exception:
-        pass
-    return str(value).strip()
-
-
-def _v5247_row_text(row):
-    try:
-        return ' '.join(_v5247_text(row.get(c, '')) for c in getattr(row, 'index', []))
-    except Exception:
-        try:
-            return ' '.join(_v5247_text(v) for v in row.values())
-        except Exception:
-            return ''
-
-
-def _v5247_date(value):
-    try:
-        d = _v52218_date_str(value)
-        if d:
-            return d
-    except Exception:
-        pass
-    try:
-        return 날짜값_YYYYMMDD문자열(value)
-    except Exception:
-        return _v5247_text(value)[:10]
-
-
-def _v5247_first_existing(row, candidates):
-    try:
-        for c in candidates:
-            if hasattr(row, 'get') and c in row.index:
-                v = row.get(c, '')
-                if _v5247_text(v) != '':
-                    return v
-    except Exception:
-        pass
-    return ''
-
-
-def _v5247_trade_side(row):
-    text = _v5247_row_text(row)
-    구분텍스트 = ' '.join(_v5247_text(row.get(c, '')) for c in ['구분','거래구분','매매구분','분류','유형','비고','메모'] if hasattr(row, 'get'))
-    if '매도' in 구분텍스트 or '매도' in text:
-        return '매도'
-    if '매수' in 구분텍스트 or '매수' in text:
-        return '매수'
-    return ''
-
-
-def _v5247_trade_name(row):
-    try:
-        raw_name = _v5247_first_existing(row, ['종목명','상품명','자산명','보유종목','name','Name'])
-        raw_code = _v5247_first_existing(row, ['종목코드','코드','ticker','Ticker','symbol','Symbol'])
-        name = asset_name_v518(raw_code, raw_name) if 'asset_name_v518' in globals() else (_v5247_text(raw_name) or _v5247_text(raw_code))
-        return _v5247_text(name)
-    except Exception:
-        return _v5247_text(_v5247_first_existing(row, ['종목명','상품명','자산명']))
-
-
-def _v5247_trade_account(row):
-    return _v5247_text(_v5247_first_existing(row, ['계좌','계좌명','증권사','운용사','보관기관','금융기관']))
-
-
-def _v5247_trade_date_from_row(row):
-    for c in ['날짜','거래일자','거래일','매도일','매수일','체결일','일자','반영일자']:
-        if hasattr(row, 'get') and c in getattr(row, 'index', []):
-            d = _v5247_date(row.get(c, ''))
-            if d:
-                return d
-    return ''
-
-
-def _v5247_qty_price_amount(row, side=''):
-    qty = 0
-    price = 0
-    qty_cols = ['수량','거래수량','매도수량','매수수량','체결수량','보유수량']
-    price_cols = ['단가','거래단가','매도단가','매도가','매수가','체결단가','체결가','가격','현재가']
-    for c in qty_cols:
-        if hasattr(row, 'get') and c in getattr(row, 'index', []):
-            qty = abs(_v5247_money(row.get(c, 0)))
-            if qty:
-                break
-    for c in price_cols:
-        if hasattr(row, 'get') and c in getattr(row, 'index', []):
-            price = abs(_v5247_money(row.get(c, 0)))
-            if price:
-                break
-    return int(qty * price) if qty and price else 0
-
-
-def _v5247_trade_amount(row, side=''):
-    # 매도는 매도대금/체결금액을 우선합니다. 금액 컬럼이 0인 경우 수량*단가와 다른 금액성 컬럼을 계속 탐색합니다.
-    if side == '매도':
-        candidates = ['매도금액','매도대금','매각금액','매도정산금액','정산금액','체결금액','거래금액','매매금액','처분금액','입금액','금액','평가금액']
-    elif side == '매수':
-        candidates = ['매수금액','매입금액','체결금액','거래금액','매매금액','출금액','금액','투자원금']
-    else:
-        candidates = ['금액','거래금액','체결금액','매매금액','매수금액','매도금액','매도대금','투자원금']
-    for c in candidates:
-        if hasattr(row, 'get') and c in getattr(row, 'index', []):
-            v = abs(_v5247_money(row.get(c, 0)))
-            if v > 0:
-                return v
-    qp = _v5247_qty_price_amount(row, side)
-    if qp > 0:
-        return qp
-    return 0
-
-
-def _v5247_principal_pnl(row, amount=0, side=''):
-    principal = 0
-    for c in ['원금부분','원금','투자원금','취득금액','매입금액','매수금액','평균매입금액','매입원금']:
-        if hasattr(row, 'get') and c in getattr(row, 'index', []):
-            v = abs(_v5247_money(row.get(c, 0)))
-            if v > 0:
-                principal = v
-                break
-    pnl = None
-    for c in ['수익손실부분','실현손익','실현수익','실현손실','평가손익','손익','수익','처분손익','매매손익']:
-        if hasattr(row, 'get') and c in getattr(row, 'index', []):
-            raw = _v5247_money(row.get(c, 0))
-            # 명시 손익 컬럼은 0도 의미 있는 값으로 인정합니다.
-            pnl = raw
-            break
-    if principal <= 0 and amount > 0:
-        if pnl is not None and side == '매도':
-            principal = max(0, int(amount - pnl))
-        else:
-            principal = amount
-    if pnl is None:
-        pnl = int(amount - principal) if side == '매도' and amount > 0 and principal > 0 else 0
-    # 금액을 끝내 못 찾았지만 원금만 있는 경우에는 최소한 이동금액을 원금으로 표시합니다.
-    if amount <= 0 and principal > 0:
-        amount = principal + max(0, pnl)
-    return int(amount), int(principal), int(pnl)
-
-
-def _v5247_asset_kind(row, name=''):
-    try:
-        code = _v5247_first_existing(row, ['종목코드','코드','ticker','Ticker','symbol','Symbol'])
-        kind = asset_kind_v518(code, name) if 'asset_kind_v518' in globals() else ''
-        text = f"{code} {name} {_v5247_row_text(row)}".upper()
-        if kind == 'ETF' or any(x in text for x in ['ETF','KODEX','TIGER','0148J0','휴머노이드']):
-            return 'ETF'
-        if 'TDF' in text or 'TARGETDATE' in text:
-            return 'TDF'
-        if kind:
-            return kind
-    except Exception:
-        pass
-    return '주식형자산'
-
-
-def _v5247_cash_name(account=''):
-    a = str(account or '')
-    return '현금성 대기자산' if ('IRP' in a.upper() or '신한' in a) else '예수금'
-
-
-def _v5247_trade_sell_correction_rows(거래df=None):
-    cols = ['날짜','계좌','구분','종목명','자산유형','수량','단가','금액','원금부분','수익손실부분','변화유형','상세설명','자동분석','출처']
-    rows = []
-    try:
-        df = pd.DataFrame(거래df).copy() if 거래df is not None else pd.DataFrame()
-        if df.empty:
-            return pd.DataFrame(rows, columns=cols)
-        for _, r in df.iterrows():
-            side = _v5247_trade_side(r)
-            if side != '매도':
-                continue
-            name = _v5247_trade_name(r)
-            row_text = _v5247_row_text(r)
-            # 이번 보정은 ETF/주식형 매도에 집중합니다. TDF2035 확정 손익은 기존 보호 로직을 우선합니다.
-            if 'TDF2035' in row_text.upper():
-                continue
-            kind = _v5247_asset_kind(r, name)
-            if kind not in ['ETF', '주식', '주식형자산'] and 'ETF' not in row_text.upper() and 'TIGER' not in row_text.upper() and 'KODEX' not in row_text.upper():
-                continue
-            amount = _v5247_trade_amount(r, side)
-            amount, principal, pnl = _v5247_principal_pnl(r, amount, side)
-            if amount <= 0 and principal <= 0:
-                continue
-            date = _v5247_trade_date_from_row(r) or (서울현재시각().strftime('%Y-%m-%d') if '서울현재시각' in globals() else datetime.now().strftime('%Y-%m-%d'))
-            account = _v5247_trade_account(r)
-            cash = _v5247_cash_name(account)
-            if pnl > 0:
-                pnl_txt = f'실현수익 {원화정수포맷(pnl)}' if '원화정수포맷' in globals() else f'실현수익 {pnl:,}원'
-            elif pnl < 0:
-                pnl_txt = f'실현손실 {원화정수포맷(pnl)}' if '원화정수포맷' in globals() else f'실현손실 {pnl:,}원'
-            else:
-                pnl_txt = '손익 0원'
-            rows.append({
-                '날짜': date,
-                '계좌': account,
-                '구분': '매도',
-                '종목명': name,
-                '자산유형': kind,
-                '수량': abs(_v5247_money(_v5247_first_existing(r, ['수량','거래수량','매도수량','체결수량']))),
-                '단가': abs(_v5247_money(_v5247_first_existing(r, ['단가','거래단가','매도단가','매도가','체결가','가격']))),
-                '금액': int(amount),
-                '원금부분': int(principal),
-                '수익손실부분': int(pnl),
-                '변화유형': '매도',
-                '상세설명': f'{name} {kind} 매도 → {cash}',
-                '자동분석': f'원금변화 없음 · {kind} 원금 {원화정수포맷(principal) if "원화정수포맷" in globals() else str(principal)} + {pnl_txt}이 {cash}으로 이동',
-                '출처': 'v5247_ETF매도보정',
-            })
-    except Exception as e:
-        logging.warning('v5247 ETF sell correction rows failed: %s', e, exc_info=True)
-    return pd.DataFrame(rows, columns=cols)
-
-
-try:
-    _자산이동목록통합_v5247_base = 자산이동목록통합_v5225
-except Exception:
-    _자산이동목록통합_v5247_base = None
-
-
-def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
-    try:
-        base = _자산이동목록통합_v5247_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5247_base else pd.DataFrame()
-    except Exception as e:
-        logging.warning('v5247 base movement failed: %s', e, exc_info=True)
-        base = pd.DataFrame()
-    try:
-        corr = _v5247_trade_sell_correction_rows(거래df)
-    except Exception:
-        corr = pd.DataFrame()
-    out = pd.concat([base, corr], ignore_index=True, sort=False)
-    if out.empty:
-        return out
-    for c in ['날짜','계좌','구분','종목명','자산유형','상세설명','금액','원금부분','수익손실부분','출처','자동분석']:
-        if c not in out.columns:
-            out[c] = 0 if c in ['금액','원금부분','수익손실부분'] else ''
-    out['날짜'] = out['날짜'].apply(_v5247_date)
-    for c in ['금액','원금부분','수익손실부분']:
-        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0).astype(float)
-    out['_date_sort_v5247'] = pd.to_datetime(out['날짜'], errors='coerce')
-    out['_src_rank_v5247'] = out['출처'].astype(str).map(lambda x: 0 if x == 'v5247_ETF매도보정' else 5)
-    def _v5247_key(r):
-        desc = str(r.get('상세설명',''))
-        name = str(r.get('종목명',''))
-        if str(r.get('구분','')) == '매도' and name and ('ETF' in str(r.get('자산유형','')) or 'TIGER' in name or 'KODEX' in name or '휴머노이드' in name):
-            return ('SELL', str(r.get('날짜','')), name)
-        return ('BASE', str(r.get('날짜','')), str(r.get('계좌','')), str(r.get('구분','')), desc)
-    out['_key_v5247'] = out.apply(_v5247_key, axis=1)
-    out = out.sort_values(['_date_sort_v5247','_src_rank_v5247','금액'], ascending=[False, True, False])
-    out = out.drop_duplicates('_key_v5247', keep='first')
-    return out.drop(columns=['_date_sort_v5247','_src_rank_v5247','_key_v5247'], errors='ignore').reset_index(drop=True)
-
-
-# 최근자산변화카드표시가 이전 wrapper를 잡고 있어도 최종 통합 함수를 사용하도록 재고정합니다.
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
-    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
-    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
-
-
-# Google Sheets 날짜열을 실제 TEXT로 저장하도록 최종 포맷 함수를 재정의합니다.
-def 구글시트워크시트포맷적용(ws, df):
-    try:
-        열목록 = list(df.columns) if df is not None else []
-        for idx, 열이름 in enumerate(열목록, start=1):
-            col_letter = chr(64 + idx) if idx <= 26 else None
-            if col_letter is None:
-                continue
-            if 열이름 in ['종목코드', '코드', '거래일자', '거래일', '일자', '날짜', '매매일자', '만기일', '반영일자', '기준일']:
-                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'TEXT'}})
-            elif 열이름 in ['원금','평가금액','금액','거래금액','매수금액','매도금액','실현손익','손익']:
-                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}})
-            elif 열이름 in ['예상연수익률','수익률(%)']:
-                ws.format(f'{col_letter}:{col_letter}', {'numberFormat': {'type': 'NUMBER', 'pattern': '0.00'}})
-    except Exception as e:
-        logging.warning('v5247 google sheet final format failed: %s', e, exc_info=True)
-
-
-try:
-    _구글시트저장용정리_v5247_base = 구글시트저장용정리
-except Exception:
-    _구글시트저장용정리_v5247_base = None
-
-
-def 구글시트저장용정리(df, sheet_name=''):
-    작업 = _구글시트저장용정리_v5247_base(df, sheet_name=sheet_name) if _구글시트저장용정리_v5247_base else pd.DataFrame(df).copy()
-    try:
-        날짜열 = ['거래일자','거래일','일자','날짜','매매일자','만기일','반영일자','기준일']
-        for c in 날짜열:
-            if c in 작업.columns:
-                작업[c] = 작업[c].apply(_v5247_date)
-    except Exception as e:
-        logging.warning('v5247 save date cleanup failed: %s', e, exc_info=True)
-    return 작업
-
-
-# 비주식자산 저장 시 v5.24.6 보정 후 날짜를 다시 한 번 문자열로 고정합니다.
-try:
-    _IRP비주식자산저장_v5247_base = IRP비주식자산저장
-except Exception:
-    _IRP비주식자산저장_v5247_base = None
-
-
-def IRP비주식자산저장(df):
-    try:
-        작업 = _v5246_adjust_reflect_dates(df, 구글시트데이터프레임읽기(GOOGLE_SHEETS_NON_STOCK_SHEET) if '구글시트데이터프레임읽기' in globals() else None)
-    except Exception:
-        작업 = pd.DataFrame(df).copy() if df is not None else pd.DataFrame()
-    try:
-        if '반영일자' in 작업.columns:
-            작업['반영일자'] = 작업['반영일자'].apply(_v5247_date)
-        if '만기일' in 작업.columns:
-            작업['만기일'] = 작업['만기일'].apply(_v5247_date)
-    except Exception:
-        pass
-    if _IRP비주식자산저장_v5247_base:
-        return _IRP비주식자산저장_v5247_base(작업)
-    return 구글시트데이터프레임저장(GOOGLE_SHEETS_NON_STOCK_SHEET, 작업)
-
-
-# 최종 버전 고정
-APP_VERSION = "v5.24.7-etf-sell-date-profit-fix"
-# ============================================================
-# end v5.24.7
 # ============================================================
