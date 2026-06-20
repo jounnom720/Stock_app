@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.25.2-realized-kpi-color-ui-fix"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -16377,6 +16377,227 @@ def IRP비주식자산저장(df):
 
 # ============================================================
 # end v5.25.1 master + realized ETF sell cash sync fix
+# ============================================================
+# v5.25.2 verification + display color + realized P/L clean fix
+# 목적:
+# 1) 최근 자산변화 KPI의 실현손익은 실제 매도/수익실현 행만 합산합니다.
+# 2) 휴머노이드 ETF 매도는 69,408원 / 원금 98,010원 / 실현손실 -28,602원 한 행만 우선 표시합니다.
+# 3) 비주식·현금성 자산 입력표에서는 평가금액 자체가 아니라 평가손익/수익률만 상승·하락 색상으로 표시합니다.
+# 4) 증권앱과 유사하게 수익은 빨간색, 손실은 파란색을 더 선명하고 굵게 표시합니다.
+# 5) 화면 문구 '자동분석'은 사용자에게 더 자연스러운 '시스템 해석'으로 표시합니다.
+# ============================================================
+APP_VERSION = "v5.25.2-realized-kpi-color-ui-fix"
+
+# 주식앱과 유사한 상승/하락 색상: 상승/수익=빨강, 하락/손실=파랑
+PROFIT_RED_V5252 = "#e9545f"
+LOSS_BLUE_V5252 = "#3b82f6"
+NEUTRAL_GRAY_V5252 = "#e5e7eb"
+
+
+def 손익색상(값):
+    try:
+        if pd.isna(값):
+            return ""
+        if isinstance(값, str):
+            s = re.sub(r"[^0-9.\-+]", "", 값)
+            if s in ["", ".", "-", "+", "-.", "+."]:
+                return ""
+            값 = float(s)
+        if float(값) > 0:
+            return f"color: {PROFIT_RED_V5252}; font-weight: 800;"
+        if float(값) < 0:
+            return f"color: {LOSS_BLUE_V5252}; font-weight: 800;"
+    except Exception:
+        return ""
+    return ""
+
+
+def 수익률색상(값):
+    return 손익색상(값)
+
+
+def 비주식평가금액색상(row):
+    """평가금액은 중립색으로 두고, 평가손익/수익률만 색상 표시합니다."""
+    styles = [""] * len(row)
+    try:
+        원금 = _v5250_num(row.get("원금", 0), 0) if "_v5250_num" in globals() else float(row.get("원금", 0) or 0)
+        평가 = _v5250_num(row.get("평가금액", 0), 0) if "_v5250_num" in globals() else float(row.get("평가금액", 0) or 0)
+        손익 = 평가 - 원금
+        for 대상열 in ["평가손익", "수익률"]:
+            if 대상열 in row.index:
+                idx = list(row.index).index(대상열)
+                if 손익 > 0:
+                    styles[idx] = f"color: {PROFIT_RED_V5252}; font-weight: 800;"
+                elif 손익 < 0:
+                    styles[idx] = f"color: {LOSS_BLUE_V5252}; font-weight: 800;"
+    except Exception as e:
+        logging.warning("v5252 nonstock color skipped: %s", e, exc_info=True)
+    return styles
+
+
+def IRP비주식자산표시용스타일(df):
+    표시 = IRP비주식자산표준열맞추기(df)
+    if 표시.empty:
+        return 표시
+    표시 = 표시.copy()
+    표시["평가손익"] = pd.to_numeric(표시["평가금액"], errors="coerce").fillna(0) - pd.to_numeric(표시["원금"], errors="coerce").fillna(0)
+    포맷 = {
+        "원금": 원화정수포맷,
+        "평가금액": 원화정수포맷,
+        "평가손익": 손익원화문자열,
+        "예상연수익률": lambda x: 안전소수포맷(x, 2) + "%",
+    }
+    try:
+        # 예상연수익률은 고정 예상치이므로 색상 강조하지 않습니다. 실제 손익 색상은 평가손익/수익률 중심입니다.
+        return 표시.style.format(포맷).map(손익색상, subset=["평가손익"]).apply(비주식평가금액색상, axis=1)
+    except Exception:
+        return 표시
+
+
+def _v5252_is_realized_row(row):
+    try:
+        구분 = str(row.get("구분", ""))
+        상세 = str(row.get("상세설명", ""))
+        출처 = str(row.get("출처", ""))
+        자산유형 = str(row.get("자산유형", ""))
+        text = f"{구분} {상세} {출처} {자산유형}"
+        if "현금대기" in 구분 or "자금이체" in 구분 or "보유" in 상세 or "잔액" in 상세:
+            return False
+        if "매도" in 구분 or "수익실현" in 구분 or "전량매도" in 상세 or "전량 매도" in 상세:
+            return True
+        if "v525" in 출처 and "실현" in text:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _v5252_clean_movement_df(이동df):
+    try:
+        df = pd.DataFrame(이동df).copy()
+        if df.empty:
+            return df
+        for c in ["날짜", "계좌", "구분", "종목코드", "종목명", "상세설명", "자동분석", "출처", "자산유형"]:
+            if c not in df.columns:
+                df[c] = ""
+        for c in ["금액", "원금부분", "수익손실부분"]:
+            if c not in df.columns:
+                df[c] = 0
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df["날짜"] = df["날짜"].apply(_v5250_date if "_v5250_date" in globals() else lambda x: str(x)[:10])
+
+        # 화면용 설명 문구 정리: 내부명 '자동분석' 대신 문장만 남깁니다.
+        df["자동분석"] = df["자동분석"].astype(str).str.replace("자동분석", "시스템 해석", regex=False)
+
+        # 현금대기/자금이체/잔액확인 행은 실현손익 KPI에 들어가면 안 됩니다.
+        realized_mask = df.apply(_v5252_is_realized_row, axis=1)
+        df.loc[~realized_mask, "수익손실부분"] = 0
+
+        # 휴머노이드 ETF 매도 행은 원가계산 확정 행을 우선합니다.
+        def _sell_key(r):
+            text = (str(r.get("종목코드", "")) + " " + str(r.get("종목명", "")) + " " + str(r.get("상세설명", ""))).upper().replace(" ", "")
+            if "매도" in str(r.get("구분", "")) and ("0148J0" in text or "휴머노이드" in text or "코리아휴머노이드" in text):
+                return "SELL|2026-06-19|0148J0"
+            if "매도" in str(r.get("구분", "")):
+                return "SELL|{}|{}|{}".format(r.get("날짜", ""), r.get("종목코드", ""), r.get("종목명", ""))
+            return "ROW|{}|{}|{}|{}|{}".format(r.get("날짜", ""), r.get("계좌", ""), r.get("구분", ""), r.get("상세설명", ""), int(round(float(r.get("금액", 0) or 0))))
+
+        df["_key_v5252"] = df.apply(_sell_key, axis=1)
+        df["_rank_v5252"] = df.apply(lambda r: 0 if "v5251_휴머노이드" in str(r.get("출처", "")) else 1 if "v5250_거래원가" in str(r.get("출처", "")) else 5, axis=1)
+        df["_dt_v5252"] = pd.to_datetime(df["날짜"], errors="coerce")
+        df = df.sort_values(["_dt_v5252", "_rank_v5252", "금액"], ascending=[False, True, False])
+        df = df.drop_duplicates("_key_v5252", keep="first")
+        return df.drop(columns=["_key_v5252", "_rank_v5252", "_dt_v5252"], errors="ignore").reset_index(drop=True)
+    except Exception as e:
+        logging.warning("v5252 movement cleanup failed: %s", e, exc_info=True)
+        return 이동df
+
+
+try:
+    _자산이동목록통합_v5252_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5252_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        base = _자산이동목록통합_v5252_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5252_base else pd.DataFrame()
+        return _v5252_clean_movement_df(base)
+    except Exception as e:
+        logging.warning("v5252 asset movement wrapper failed: %s", e, exc_info=True)
+        return _자산이동목록통합_v5252_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5252_base else pd.DataFrame()
+
+
+try:
+    _최근자산변화표시_v5252_base = 최근자산변화표시_v5224
+except Exception:
+    _최근자산변화표시_v5252_base = None
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=12):
+    df = _v5252_clean_movement_df(이동df)
+    if _최근자산변화표시_v5252_base:
+        return _최근자산변화표시_v5252_base(df, 최대표시=최대표시)
+    return df
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
+# 최근 현금성 자산 이동 해석 카드의 문구와 버그를 함께 수정합니다.
+def 자산이동설명카드표시(이동후보, 제목="최근 자산 변화"):
+    try:
+        이동후보 = 이동후보 or {}
+        if not 이동후보:
+            return
+        금액 = float(이동후보.get("확인금액", 0) or 0)
+        설명 = str(이동후보.get("설명", "")).strip()
+        거래일자 = str(이동후보.get("거래일자", "")).strip()
+        시스템해석 = str(이동후보.get("자동분석", "")).strip() or "원금변화 없음 · 자산군 이동"
+        시스템해석 = 시스템해석.replace("자동분석", "시스템 해석")
+        if not 설명:
+            return
+        st.markdown(f"#### {제목}")
+        with st.container(border=True):
+            st.markdown(f"**{거래일자 or '최근 거래'} · {이동후보.get('표시구분') or 이동후보.get('방향') or '자산 이동'}**")
+            st.markdown(f"### {설명}")
+            st.caption(f"{원화정수포맷(금액)}")
+            st.markdown(
+                f"""
+                <div style="padding:0.75rem 0.9rem;border-radius:10px;background:rgba(59,130,246,0.14);color:#bfdbfe;font-weight:650;line-height:1.45;">
+                    <span style="display:inline-block;color:#93c5fd;font-weight:800;margin-right:.35rem;">시스템 해석</span>{html.escape(시스템해석)}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    except Exception as e:
+        st.caption(f"자산이동 설명 표시 오류: {type(e).__name__}: {e}")
+
+# 표 전체의 글자 굵기와 손익 색상 가시성을 강화합니다.
+def _v5252_global_style_inject():
+    try:
+        st.markdown(f"""
+        <style>
+        .oa-table-wrap table {{ font-weight: 650; }}
+        .oa-table-wrap td, .oa-table-wrap th {{ color: #f8fafc; }}
+        .oa-table-wrap td[style*='{PROFIT_RED_V5252}'], .oa-table-wrap span[style*='{PROFIT_RED_V5252}'] {{ color: {PROFIT_RED_V5252} !important; font-weight: 850 !important; }}
+        .oa-table-wrap td[style*='{LOSS_BLUE_V5252}'], .oa-table-wrap span[style*='{LOSS_BLUE_V5252}'] {{ color: {LOSS_BLUE_V5252} !important; font-weight: 850 !important; }}
+        .profit-pos, .profit-pill-pos {{ color: {PROFIT_RED_V5252} !important; font-weight: 850 !important; }}
+        .profit-neg, .profit-pill-neg {{ color: {LOSS_BLUE_V5252} !important; font-weight: 850 !important; }}
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+_v5252_global_style_inject()
+
+# ============================================================
+# end v5.25.2
+# ============================================================
+
+
 # ============================================================
 
 if 선택섹터 == "포트폴리오 현황":
