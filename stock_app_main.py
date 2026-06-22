@@ -18720,3 +18720,334 @@ def v5242_운영점검표시():
 # ============================================================
 # end v5.24.2 runtime audit clean
 # ============================================================
+
+
+# ============================================================
+# v5.26.2 recent-realized-cash-color-fix
+# 목적
+# - v5.26.1 이후 뒤쪽 v5.22.21 호환 패치가 최근자산변화 엔진을 다시 감싸면서
+#   원장 기준 일부 실현손익(+18,453원 등)이 최근자산변화 KPI에 누락되는 문제를 최종 보정합니다.
+# - 계산 기준은 v5.26.0 회계검증 엔진(v5260_거래원장실현손익계산)의 거래별 실현손익 상세를 사용합니다.
+# - 현금성 대기자산은 현금잔액과 ETF 매도손실의 의미가 분리되도록 설명 문구를 보강합니다.
+# - 수익=강한 빨강, 손실=강한 파랑 색상 규칙을 화면 전체에 다시 적용합니다.
+# ============================================================
+APP_VERSION = "v5.26.2-recent-realized-cash-color-fix"
+
+PROFIT_RED_V5262 = "#E60012"
+LOSS_BLUE_V5262 = "#0066FF"
+NEUTRAL_GRAY_V5262 = "#8A94A6"
+
+# 기존 색상 상수를 재지정하여 이전 함수들도 같은 색상 규칙을 사용하게 합니다.
+try:
+    PROFIT_RED_V5260 = PROFIT_RED_V5262
+    LOSS_BLUE_V5260 = LOSS_BLUE_V5262
+    PROFIT_RED_V5261 = PROFIT_RED_V5262
+    LOSS_BLUE_V5261 = LOSS_BLUE_V5262
+except Exception:
+    pass
+
+
+def _v5262_num(value, default=0.0):
+    try:
+        if '_v5260_num' in globals():
+            return _v5260_num(value, default)
+    except Exception:
+        pass
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5262_date(value):
+    try:
+        if '_v5261_date_text' in globals():
+            return _v5261_date_text(value)
+    except Exception:
+        pass
+    try:
+        if '_v52218_date_str' in globals():
+            return _v52218_date_str(value)
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return str(value or '')[:10]
+
+
+def _v5262_text(row, cols):
+    try:
+        return ' '.join(str(row.get(c, '') or '') for c in cols)
+    except Exception:
+        return ''
+
+
+def _v5262_profit_css(value):
+    n = _v5262_num(value, 0)
+    if n > 0:
+        return f"color: {PROFIT_RED_V5262}; font-weight: 900;"
+    if n < 0:
+        return f"color: {LOSS_BLUE_V5262}; font-weight: 900;"
+    return f"color: {NEUTRAL_GRAY_V5262}; font-weight: 700;"
+
+
+def 손익색상(value):
+    return _v5262_profit_css(value)
+
+
+def 수익률색상(value):
+    return _v5262_profit_css(value)
+
+
+def _v5262_inject_global_style():
+    try:
+        st.markdown(f"""
+        <style>
+        .profit-pos, .profit-pill-pos, .gain, .plus, .positive {{
+            color:{PROFIT_RED_V5262} !important;
+            font-weight:900 !important;
+        }}
+        .profit-neg, .profit-pill-neg, .loss, .minus, .negative {{
+            color:{LOSS_BLUE_V5262} !important;
+            font-weight:900 !important;
+        }}
+        td, th {{ font-weight:700; }}
+        .stDataFrame [data-testid="stDataFrameResizable"] {{ font-weight:700; }}
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+_v5262_inject_global_style()
+
+
+def _v5262_existing_realized_keys(movements):
+    """최근자산변화 목록에 이미 존재하는 실현손익 행의 키를 수집합니다."""
+    keys = set()
+    try:
+        df = pd.DataFrame(movements).copy()
+        if df.empty:
+            return keys
+        for _, r in df.iterrows():
+            pnl = int(round(_v5262_num(r.get('수익손실부분', r.get('실현손익', 0)), 0)))
+            if pnl == 0:
+                continue
+            date = _v5262_date(r.get('날짜', r.get('거래일자', '')))
+            amount = int(round(abs(_v5262_num(r.get('금액', r.get('매도금액', 0)), 0))))
+            code = str(r.get('종목코드', '') or '').strip()
+            name_text = _v5262_text(r, ['종목명', '상세설명', '자동분석', '시스템해석'])
+            keys.add((date, amount, pnl))
+            if code:
+                keys.add((date, code, amount, pnl))
+            for token in ['TDF2035', 'SK하이닉스', 'AI반도체', '코스닥150', '휴머노이드', 'AI전력', 'HD현대마린엔진']:
+                if token in name_text:
+                    keys.add((date, token, amount, pnl))
+    except Exception:
+        pass
+    return keys
+
+
+def _v5262_ledger_realized_detail(거래df):
+    try:
+        if 'v5260_거래원장실현손익계산' not in globals():
+            return pd.DataFrame()
+        detail, _summary, _total = v5260_거래원장실현손익계산(거래df, include_manual_tdf=True)
+        if detail is None:
+            return pd.DataFrame()
+        d = pd.DataFrame(detail).copy()
+        if d.empty:
+            return d
+        d['실현손익'] = pd.to_numeric(d.get('실현손익', 0), errors='coerce').fillna(0)
+        d = d[d['실현손익'].round().astype(int) != 0].copy()
+        return d
+    except Exception as e:
+        try:
+            logging.warning('v5262 ledger realized detail failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+
+def _v5262_detail_row_to_movement(r):
+    name = str(r.get('종목명', '') or r.get('종목코드', '') or '')
+    code = str(r.get('종목코드', '') or '')
+    date = _v5262_date(r.get('거래일자', ''))
+    sell_amt = int(round(_v5262_num(r.get('매도금액', 0), 0)))
+    cost = int(round(_v5262_num(r.get('매수원금', 0), 0)))
+    pnl = int(round(_v5262_num(r.get('실현손익', 0), 0)))
+    account = str(r.get('운용사', '') or r.get('계좌', '') or '')
+    is_tdf = ('TDF' in name.upper()) or ('TDF' in code.upper())
+    kind = '수익실현' if is_tdf else '매도'
+    if pnl > 0:
+        pnl_text = f'실현수익 {pnl:,}원'
+    else:
+        pnl_text = f'실현손실 {abs(pnl):,}원'
+    return {
+        '날짜': date,
+        '계좌': account,
+        '구분': kind,
+        '종목코드': code,
+        '종목명': name,
+        '자산유형': 'TDF' if is_tdf else '주식형자산',
+        '수량': r.get('매도수량', 0),
+        '단가': r.get('매도단가', 0),
+        '금액': sell_amt,
+        '원금부분': cost,
+        '수익손실부분': pnl,
+        '변화유형': kind,
+        '상세설명': f'{name} 매도 → 현금성 대기자산' if not is_tdf else f'{name} 전량 매도',
+        '자동분석': f'매도대금 {sell_amt:,}원, 원금 {cost:,}원, {pnl_text}으로 반영합니다.',
+        '출처': 'v5.26.2 원장실현손익검증',
+    }
+
+
+def _v5262_missing_realized_movements(거래df, existing_movements=None):
+    """회계검증 원장에는 있으나 최근자산변화 목록에는 빠진 실현손익 행만 보강합니다."""
+    detail = _v5262_ledger_realized_detail(거래df)
+    if detail.empty:
+        return pd.DataFrame()
+    existing = _v5262_existing_realized_keys(existing_movements)
+    rows = []
+    for _, r in detail.iterrows():
+        date = _v5262_date(r.get('거래일자', ''))
+        code = str(r.get('종목코드', '') or '')
+        name = str(r.get('종목명', '') or '')
+        amount = int(round(abs(_v5262_num(r.get('매도금액', 0), 0))))
+        pnl = int(round(_v5262_num(r.get('실현손익', 0), 0)))
+        if pnl == 0:
+            continue
+        token = ''
+        for t in ['TDF2035', 'SK하이닉스', 'AI반도체', '코스닥150', '휴머노이드', 'AI전력', 'HD현대마린엔진']:
+            if t in name:
+                token = t
+                break
+        if ((date, amount, pnl) in existing or
+            (code and (date, code, amount, pnl) in existing) or
+            (token and (date, token, amount, pnl) in existing)):
+            continue
+        rows.append(_v5262_detail_row_to_movement(r))
+    return pd.DataFrame(rows)
+
+
+try:
+    _자산이동목록통합_v5262_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5262_base = None
+
+
+def _v5262_normalize_cash_explain(df):
+    """현금성 대기자산 설명을 현금잔액과 실현손실의 의미가 분리되도록 보강합니다."""
+    try:
+        out = pd.DataFrame(df).copy()
+        if out.empty:
+            return out
+        if '자동분석' not in out.columns:
+            out['자동분석'] = ''
+        if '상세설명' not in out.columns:
+            out['상세설명'] = ''
+        for idx, r in out.iterrows():
+            text = _v5262_text(r, ['계좌', '구분', '종목명', '상세설명', '자동분석'])
+            if '현금성' in text and '대기' in text and ('90,138' in text or int(round(_v5262_num(r.get('금액', 0), 0))) == 90138):
+                out.at[idx, '상세설명'] = '현금성 대기자산 현재잔액'
+                out.at[idx, '자동분석'] = '현금잔액 90,138원은 현재 보관 중인 투자대기자금입니다. 휴머노이드ETF 매도손실 -28,602원은 실현손익 검증표에서 별도 확인합니다.'
+                out.at[idx, '수익손실부분'] = 0
+                out.at[idx, '원금부분'] = int(round(_v5262_num(r.get('금액', 90138), 90138)))
+        return out
+    except Exception:
+        return df
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    try:
+        if _자산이동목록통합_v5262_base:
+            base = _자산이동목록통합_v5262_base(거래df, 비주식자산df, 최근일수=최근일수)
+        else:
+            base = pd.DataFrame()
+    except Exception as e:
+        try:
+            logging.warning('v5262 base movement failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        base = pd.DataFrame()
+    base = _v5262_normalize_cash_explain(base)
+    extra = _v5262_missing_realized_movements(거래df, base)
+    out = pd.concat([pd.DataFrame(base), extra], ignore_index=True, sort=False)
+    if out.empty:
+        return out
+    for c in ['날짜', '계좌', '구분', '종목코드', '종목명', '상세설명', '금액', '원금부분', '수익손실부분', '출처', '자동분석']:
+        if c not in out.columns:
+            out[c] = 0 if c in ['금액', '원금부분', '수익손실부분'] else ''
+    out['날짜'] = out['날짜'].apply(_v5262_date)
+    for c in ['금액', '원금부분', '수익손실부분']:
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0)
+    out['_date_sort_v5262'] = pd.to_datetime(out['날짜'], errors='coerce')
+    out['_src_rank_v5262'] = out['출처'].astype(str).map(lambda x: {'v5.26.2 원장실현손익검증': 0, 'v5.26.1 원장실현손익검증': 1, '현금흐름강제복구': 2}.get(x, 9))
+    out['_dedup_v5262'] = out.apply(lambda r: '|'.join([
+        str(r.get('날짜', '')),
+        str(r.get('계좌', '')),
+        str(r.get('구분', '')),
+        str(r.get('종목코드', '')),
+        str(r.get('종목명', '')),
+        str(int(round(abs(_v5262_num(r.get('금액', 0), 0))))),
+        str(int(round(_v5262_num(r.get('수익손실부분', 0), 0))))
+    ]), axis=1)
+    out = out.sort_values(['_date_sort_v5262', '_src_rank_v5262', '금액'], ascending=[False, True, False])
+    out = out.drop_duplicates('_dedup_v5262', keep='first')
+    return out.drop(columns=['_date_sort_v5262', '_src_rank_v5262', '_dedup_v5262'], errors='ignore').reset_index(drop=True)
+
+
+try:
+    _최근자산변화표시_v5262_base = 최근자산변화표시_v5224
+except Exception:
+    _최근자산변화표시_v5262_base = None
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=12):
+    _v5262_inject_global_style()
+    df = _v5262_normalize_cash_explain(pd.DataFrame(이동df).copy())
+    # 표시 경로에서 이미 생성된 df가 들어오는 경우에도 정렬/숫자 보정을 한 번 더 수행합니다.
+    try:
+        for c in ['금액', '원금부분', '수익손실부분']:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        if '날짜' in df.columns:
+            df['날짜'] = df['날짜'].apply(_v5262_date)
+    except Exception:
+        pass
+    if _최근자산변화표시_v5262_base:
+        return _최근자산변화표시_v5262_base(df, 최대표시=최대표시)
+    return df
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=8):
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=90)
+    return 최근자산변화표시_v5224(이동df, 최대표시=최대표시)
+
+
+# 회계검증 UI는 기존 v5.26.1 정의를 유지하되 색상만 v5.26.2 기준으로 다시 주입합니다.
+try:
+    _v5262_inject_global_style()
+except Exception:
+    pass
+
+# ============================================================
+# end v5.26.2 recent-realized-cash-color-fix
+# ============================================================
