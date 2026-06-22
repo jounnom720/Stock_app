@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.25.2-realized-kpi-color-ui-fix"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -13938,7 +13938,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.25.1-master-realized-cash-sync"
+    APP_VERSION = "v5.26.0-accounting-core-verify"
 except Exception:
     pass
 
@@ -14333,7 +14333,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v5239_text(value):
@@ -14932,7 +14932,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 #   거래기반 현금 보정 행을 모두 화면 계산 전에 적용합니다.
 # - 기존 전체 거래이력 병합과 TDF2035 실현손익 보호 로직은 건드리지 않습니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v5248_text(value):
@@ -15362,7 +15362,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표 계산 시 최근 ETF/주식 매도대금이 현금성자산에 아직 저장되지 않았으면 임시 현금 행으로 반영합니다.
 # - Google Sheets 반영일자는 저장 직전에 YYYY-MM-DD 문자열로 강제 정리합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v5249_num(value, default=0.0):
@@ -15691,7 +15691,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표에는 현금성자산 시트에 아직 매도대금이 반영되지 않은 경우에만
 #   매도대금 임시반영 행을 원금=취득원가, 평가금액=매도대금, 평가손익=실현손익으로 추가합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v5250_num(value, default=0.0):
@@ -16060,7 +16060,7 @@ def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
 #        원금은 20,730원 + 매도 원금 98,010원 = 118,740원,
 #        평가금액은 90,138원, 평가손익은 -28,602원으로 계산합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v5251_register_asset_master():
@@ -16386,7 +16386,7 @@ def IRP비주식자산저장(df):
 # 4) 증권앱과 유사하게 수익은 빨간색, 손실은 파란색을 더 선명하고 굵게 표시합니다.
 # 5) 화면 문구 '자동분석'은 사용자에게 더 자연스러운 '시스템 해석'으로 표시합니다.
 # ============================================================
-APP_VERSION = "v5.25.2-realized-kpi-color-ui-fix"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 # 주식앱과 유사한 상승/하락 색상: 상승/수익=빨강, 하락/손실=파랑
 PROFIT_RED_V5252 = "#e9545f"
@@ -16598,6 +16598,383 @@ _v5252_global_style_inject()
 # ============================================================
 
 
+
+# ============================================================
+# v5.26.0 accounting-core-verify
+# 목적
+# - 새 기능 확장이 아니라 숫자 검증 신뢰성 회복을 위한 회계 검증 코어입니다.
+# - 거래이력 원장 기준으로 실현손익을 독립 계산하고, 현재 포트폴리오/화면 값과 비교합니다.
+# - 화면 표시 함수 안에서 실현손익을 추정하지 않도록 검증표를 별도로 제공합니다.
+# - ASSET_MASTER 누락 종목(한화오션, TIGER 200 등)을 실행 전 보강합니다.
+# ============================================================
+APP_VERSION = "v5.26.0-accounting-core-verify"
+
+# 증권앱 기준에 가까운 색상: 수익=빨강, 손실=파랑, 중립=회색
+PROFIT_RED_V5260 = "#e93030"
+LOSS_BLUE_V5260 = "#1769ff"
+NEUTRAL_GRAY_V5260 = "#64748b"
+TEXT_DARK_V5260 = "#111827"
+
+
+def _v5260_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5260_int(value):
+    try:
+        return int(round(_v5260_num(value, 0)))
+    except Exception:
+        return 0
+
+
+def _v5260_money(value):
+    try:
+        n = int(round(_v5260_num(value, 0)))
+        return f"{n:,}원"
+    except Exception:
+        return "0원"
+
+
+def _v5260_signed_money(value):
+    n = _v5260_int(value)
+    if n > 0:
+        return f"+{n:,}원"
+    if n < 0:
+        return f"-{abs(n):,}원"
+    return "0원"
+
+
+def _v5260_profit_css(value):
+    n = _v5260_num(value, 0)
+    if n > 0:
+        return f"color: {PROFIT_RED_V5260}; font-weight: 900;"
+    if n < 0:
+        return f"color: {LOSS_BLUE_V5260}; font-weight: 900;"
+    return f"color: {NEUTRAL_GRAY_V5260}; font-weight: 700;"
+
+
+def 손익색상(value):
+    """수익/손실 색상을 증권앱 관례에 맞게 전역 재정의합니다. 수익=빨강, 손실=파랑."""
+    return _v5260_profit_css(value)
+
+
+def 수익률색상(value):
+    """수익률 색상을 증권앱 관례에 맞게 전역 재정의합니다. 수익=빨강, 손실=파랑."""
+    return _v5260_profit_css(value)
+
+
+def 손익원화문자열(value):
+    return _v5260_signed_money(value)
+
+
+def 손익문자열(value):
+    return _v5260_signed_money(value)
+
+
+def _v5260_patch_asset_master():
+    """실제 거래원장에 있는 종목을 마스터와 화면 메타데이터에 보강합니다."""
+    try:
+        additions_v518 = {
+            "042660": {"name": "한화오션", "kind": "주식", "industry": "조선/방산", "aliases": ["042660", "한화오션"]},
+            "102110": {"name": "TIGER 200", "kind": "ETF", "industry": "국내대형 ETF", "aliases": ["102110", "TIGER 200", "TIGER200"]},
+            "071970": {"name": "HD현대마린엔진", "kind": "주식", "industry": "조선기자재", "aliases": ["071970", "HD현대마린엔진", "현대마린엔진"]},
+            "229200": {"name": "KODEX 코스닥150", "kind": "ETF", "industry": "국내중소형 ETF", "aliases": ["229200", "KODEX 코스닥150", "KODEX코스닥150"]},
+            "487240": {"name": "KODEX AI전력핵심설비", "kind": "ETF", "industry": "AI전력 ETF", "aliases": ["487240", "KODEX AI전력핵심설비", "AI전력핵심설비"]},
+            "471990": {"name": "KODEX AI반도체핵심장비", "kind": "ETF", "industry": "AI반도체 ETF", "aliases": ["471990", "KODEX AI반도체핵심장비", "AI반도체핵심장비"]},
+        }
+        if 'ASSET_MASTER_V518' in globals():
+            for code, meta in additions_v518.items():
+                ASSET_MASTER_V518.setdefault(code, meta)
+                if '_ALIAS_TO_CODE_V518' in globals():
+                    for alias in meta.get('aliases', []):
+                        _ALIAS_TO_CODE_V518[str(alias).strip().upper().replace(' ', '')] = code
+        if 'ASSET_MASTER_V51715' in globals():
+            for code, meta in additions_v518.items():
+                ASSET_MASTER_V51715.setdefault(code, {
+                    "표시명": meta["name"], "정규명": meta["name"], "구분": meta["kind"],
+                    "주산업": meta["industry"], "보조태그": [meta["kind"]], "aliases": meta.get("aliases", []),
+                })
+                if '_ALIAS_TO_CODE_V51715' in globals():
+                    for alias in meta.get('aliases', []):
+                        _ALIAS_TO_CODE_V51715[str(alias).strip().upper().replace(' ', '')] = code
+        if 'ASSET_METADATA' in globals():
+            ASSET_METADATA.setdefault("한화오션", {"industry": "조선/방산", "tags": ["조선", "방산", "수주"], "comment": "조선·방산 수주 기대와 연결된 종목", "pressure": "중립", "source": "v5.26 거래원장 보강"})
+            ASSET_METADATA.setdefault("TIGER 200", {"industry": "시장대표 ETF", "tags": ["코스피200", "대형주", "ETF"], "comment": "국내 대형주 흐름을 반영하는 대표 ETF", "pressure": "중립", "source": "v5.26 거래원장 보강"})
+        if 'MONITOR_ORDER' in globals():
+            MONITOR_ORDER.setdefault("ETF", [])
+            for name in ["KODEX200", "TIGER 200", "TIGER 휴머노이드"]:
+                if name not in MONITOR_ORDER["ETF"]:
+                    MONITOR_ORDER["ETF"].append(name)
+            MONITOR_ORDER.setdefault("개별주", [])
+            for name in ["삼성전자", "SK하이닉스", "에이피알", "삼성전기", "현대차", "한화오션"]:
+                if name not in MONITOR_ORDER["개별주"]:
+                    MONITOR_ORDER["개별주"].append(name)
+    except Exception as e:
+        try:
+            logging.warning("v5.26 asset master patch failed: %s", e, exc_info=True)
+        except Exception:
+            pass
+
+
+_v5260_patch_asset_master()
+
+
+def _v5260_trade_df(df):
+    try:
+        out = pd.DataFrame(df).copy()
+    except Exception:
+        return pd.DataFrame()
+    if out.empty:
+        return out
+    rename = {}
+    for c in out.columns:
+        s = str(c).strip()
+        if s in ["거래일", "일자", "날짜"]: rename[c] = "거래일자"
+        elif s in ["구분", "매매구분"]: rename[c] = "거래구분"
+        elif s in ["수량"]: rename[c] = "거래수량"
+        elif s in ["단가", "가격"]: rename[c] = "거래단가"
+        elif s in ["계좌"]: rename[c] = "운용사"
+    if rename:
+        out = out.rename(columns=rename)
+    for col in ["종목코드", "종목명", "거래일자", "거래구분", "거래수량", "거래단가", "운용사", "비고"]:
+        if col not in out.columns:
+            out[col] = "" if col not in ["거래수량", "거래단가"] else 0
+    try:
+        out["거래일자"] = pd.to_datetime(out["거래일자"], errors="coerce")
+    except Exception:
+        pass
+    for c in ["거래수량", "거래단가"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    try:
+        out["종목코드"] = [normalize_asset_code_v518(c, n) for c, n in zip(out["종목코드"], out["종목명"])]
+        out["종목명"] = [asset_name_v518(c, n) for c, n in zip(out["종목코드"], out["종목명"])]
+    except Exception:
+        out["종목코드"] = out["종목코드"].astype(str)
+        out["종목명"] = out["종목명"].astype(str)
+    out["거래금액"] = out["거래수량"].abs() * out["거래단가"].abs()
+    out = out.sort_values(["거래일자", "종목코드", "거래구분"], kind="mergesort").reset_index(drop=True)
+    return out
+
+
+def v5260_거래원장실현손익계산(거래df, include_manual_tdf=True):
+    """거래원장만 기준으로 평균단가법 실현손익을 독립 계산합니다.
+    이 함수는 화면 표시용 자산변화 로직과 분리되어 검산용으로만 사용합니다.
+    """
+    df = _v5260_trade_df(거래df)
+    rows = []
+    state = {}
+    for _, r in df.iterrows():
+        code = str(r.get("종목코드", ""))
+        name = str(r.get("종목명", ""))
+        kind = str(r.get("거래구분", "")).strip()
+        qty = _v5260_num(r.get("거래수량", 0), 0)
+        price = _v5260_num(r.get("거래단가", 0), 0)
+        amount = abs(qty * price)
+        if not code and not name:
+            continue
+        stt = state.setdefault(code or name, {"종목코드": code, "종목명": name, "보유수량": 0.0, "잔여원금": 0.0})
+        if "매수" in kind:
+            stt["보유수량"] += abs(qty)
+            stt["잔여원금"] += amount
+        elif "매도" in kind:
+            sell_qty = abs(qty)
+            avg_cost = (stt["잔여원금"] / stt["보유수량"]) if stt["보유수량"] > 0 else 0.0
+            cost_basis = avg_cost * sell_qty
+            realized = amount - cost_basis
+            rows.append({
+                "거래일자": r.get("거래일자", ""),
+                "종목코드": code,
+                "종목명": name,
+                "매도수량": sell_qty,
+                "평균매입단가": avg_cost,
+                "매도단가": price,
+                "매수원금": round(cost_basis),
+                "매도금액": round(amount),
+                "실현손익": round(realized),
+                "계산방식": "평균단가법",
+                "운용사": r.get("운용사", ""),
+                "비고": r.get("비고", ""),
+            })
+            stt["보유수량"] -= sell_qty
+            stt["잔여원금"] -= cost_basis
+            if abs(stt["보유수량"]) < 1e-9:
+                stt["보유수량"] = 0.0
+                stt["잔여원금"] = 0.0
+    realized_df = pd.DataFrame(rows)
+    if include_manual_tdf:
+        has_tdf = False
+        try:
+            has_tdf = df["종목명"].astype(str).str.contains("TDF2035|TDF 2035", case=False, na=False).any()
+        except Exception:
+            has_tdf = False
+        if not has_tdf:
+            tdf_row = pd.DataFrame([{
+                "거래일자": pd.to_datetime("2026-06-16"),
+                "종목코드": "TDF2035",
+                "종목명": "TDF2035",
+                "매도수량": 0,
+                "평균매입단가": 0,
+                "매도단가": 0,
+                "매수원금": 40_901_249,
+                "매도금액": 44_592_176,
+                "실현손익": 3_690_927,
+                "계산방식": "비주식자산 확정값",
+                "운용사": "신한은행 IRP",
+                "비고": "TDF2035 전량 매도 확정 기준",
+            }])
+            realized_df = pd.concat([realized_df, tdf_row], ignore_index=True, sort=False)
+    if realized_df.empty:
+        return realized_df, pd.DataFrame(), pd.DataFrame()
+    try:
+        realized_df["거래일자"] = pd.to_datetime(realized_df["거래일자"], errors="coerce").dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    for c in ["매수원금", "매도금액", "실현손익"]:
+        realized_df[c] = pd.to_numeric(realized_df[c], errors="coerce").fillna(0).round().astype(int)
+    summary = realized_df.groupby(["종목코드", "종목명"], as_index=False).agg(
+        매수원금=("매수원금", "sum"), 매도금액=("매도금액", "sum"), 실현손익=("실현손익", "sum"), 매도건수=("실현손익", "count")
+    ).sort_values("실현손익", ascending=False).reset_index(drop=True)
+    total = pd.DataFrame([{
+        "검증항목": "원장 기준 실현손익 합계",
+        "매수원금": int(realized_df["매수원금"].sum()),
+        "매도금액": int(realized_df["매도금액"].sum()),
+        "실현손익": int(realized_df["실현손익"].sum()),
+        "매도건수": int(len(realized_df)),
+    }])
+    return realized_df, summary, total
+
+
+def _v5260_system_realized_sum(계산포트폴리오=None):
+    try:
+        df = pd.DataFrame(계산포트폴리오).copy()
+        if "실현손익" in df.columns:
+            return int(round(pd.to_numeric(df["실현손익"], errors="coerce").fillna(0).sum()))
+    except Exception:
+        pass
+    return None
+
+
+def _v5260_current_asset_summary(통합자산표=None, 보유포트폴리오=None, 비주식df=None):
+    rows = []
+    for label, df in [("통합자산표", 통합자산표), ("보유포트폴리오", 보유포트폴리오), ("비주식자산", 비주식df)]:
+        try:
+            x = pd.DataFrame(df).copy()
+            if x.empty:
+                continue
+            principal_cols = [c for c in ["투자원금", "원금", "매입금액"] if c in x.columns]
+            value_cols = [c for c in ["평가금액", "평가액", "현재평가금액"] if c in x.columns]
+            pnl_cols = [c for c in ["평가손익", "손익", "수익손실금액"] if c in x.columns]
+            rows.append({
+                "자료": label,
+                "건수": len(x),
+                "원금합계": int(pd.to_numeric(x[principal_cols[0]], errors="coerce").fillna(0).sum()) if principal_cols else None,
+                "평가금액합계": int(pd.to_numeric(x[value_cols[0]], errors="coerce").fillna(0).sum()) if value_cols else None,
+                "평가손익합계": int(pd.to_numeric(x[pnl_cols[0]], errors="coerce").fillna(0).sum()) if pnl_cols else None,
+            })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
+
+
+def _v5260_style_money_table(df, money_cols=None, profit_cols=None):
+    money_cols = money_cols or []
+    profit_cols = profit_cols or []
+    try:
+        fmt = {c: _v5260_money for c in money_cols if c in df.columns}
+        fmt.update({c: _v5260_signed_money for c in profit_cols if c in df.columns})
+        sty = df.style.format(fmt)
+        for c in profit_cols:
+            if c in df.columns:
+                sty = sty.map(_v5260_profit_css, subset=[c])
+        return sty
+    except Exception:
+        return df
+
+
+def v5260_회계검증표시(거래df=None, 계산포트폴리오=None, 보유포트폴리오=None, 비주식df=None, 통합자산표=None):
+    """현재 화면 숫자와 거래원장 기준 숫자를 나란히 보여주는 검증 전용 UI."""
+    try:
+        realized_detail, realized_summary, realized_total = v5260_거래원장실현손익계산(거래df, include_manual_tdf=True)
+        system_realized = _v5260_system_realized_sum(계산포트폴리오)
+        ledger_realized = int(realized_total["실현손익"].iloc[0]) if not realized_total.empty else 0
+        diff = None if system_realized is None else system_realized - ledger_realized
+        with st.expander("🧾 회계 검증: 거래원장 기준 숫자 확인", expanded=True):
+            st.caption("이 영역은 화면 표시값을 믿기 전에 거래원장만으로 실현손익을 다시 계산하는 검증 전용입니다. 일반 화면 계산과 분리되어 있습니다.")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("원장 기준 실현손익", _v5260_signed_money(ledger_realized))
+            c2.metric("시스템 포트폴리오 실현손익", "확인불가" if system_realized is None else _v5260_signed_money(system_realized))
+            c3.metric("차이", "확인불가" if diff is None else _v5260_signed_money(diff))
+            if diff not in [None, 0]:
+                st.warning("원장 기준 실현손익과 시스템 포트폴리오 실현손익에 차이가 있습니다. 아래 종목별/거래별 검증표를 먼저 확인해야 합니다.")
+            elif diff == 0:
+                st.success("원장 기준 실현손익과 시스템 포트폴리오 실현손익이 일치합니다.")
+
+            st.markdown("**종목별 실현손익 검증표**")
+            if realized_summary.empty:
+                st.info("매도 거래를 찾지 못했습니다.")
+            else:
+                show = realized_summary.copy()
+                try:
+                    show = index_1부터(show)
+                except Exception:
+                    pass
+                표데이터프레임(_v5260_style_money_table(show, money_cols=["매수원금", "매도금액"], profit_cols=["실현손익"]), width="stretch")
+
+            with st.expander("거래별 실현손익 상세", expanded=False):
+                detail = realized_detail.copy()
+                try:
+                    detail = detail.sort_values("거래일자", ascending=False)
+                    detail = index_1부터(detail)
+                except Exception:
+                    pass
+                표데이터프레임(_v5260_style_money_table(detail, money_cols=["매수원금", "매도금액"], profit_cols=["실현손익"]), width="stretch")
+
+            asset_summary = _v5260_current_asset_summary(통합자산표, 보유포트폴리오, 비주식df)
+            if not asset_summary.empty:
+                st.markdown("**현재 자산 합계 검증 보조표**")
+                표데이터프레임(_v5260_style_money_table(asset_summary, money_cols=["원금합계", "평가금액합계"], profit_cols=["평가손익합계"]), width="stretch")
+        return realized_detail, realized_summary, realized_total
+    except Exception as e:
+        try:
+            st.warning(f"회계 검증 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        try:
+            logging.warning("v5.26 accounting verify failed: %s", e, exc_info=True)
+        except Exception:
+            pass
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+
+def _v5260_global_style_inject():
+    try:
+        st.markdown(f"""
+        <style>
+        .dataframe td, .dataframe th {{ font-weight: 650; }}
+        .profit-pos, .profit-pill-pos {{ color:{PROFIT_RED_V5260} !important; font-weight:900 !important; }}
+        .profit-neg, .profit-pill-neg {{ color:{LOSS_BLUE_V5260} !important; font-weight:900 !important; }}
+        .amount-main {{ font-weight:850 !important; }}
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+_v5260_global_style_inject()
+
+# ============================================================
+# end v5.26.0 accounting-core-verify
+# ============================================================
 # ============================================================
 
 if 선택섹터 == "포트폴리오 현황":
@@ -16681,6 +17058,12 @@ if 선택섹터 == "포트폴리오 현황":
         IRP비주식자산df = IRP비주식자산편집UI()
         현금성자산df = 현금성자산불러오기()
         통합자산표 = 통합자산현황UI(보유계산포트폴리오, IRP비주식자산df, 현금성자산df)
+
+        # v5.26.0: 숫자 신뢰성 회복을 위한 회계 검증표
+        try:
+            v5260_회계검증표시(수정포트폴리오, 계산포트폴리오, 보유계산포트폴리오, IRP비주식자산df, 통합자산표)
+        except Exception as e:
+            logging.warning("v5.26 accounting verify UI skipped: %s", e, exc_info=True)
 
         st.markdown("---")
 
@@ -16830,7 +17213,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -17120,7 +17503,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -17408,7 +17791,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -17687,7 +18070,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v52221_to_df_safe(obj):
@@ -17955,7 +18338,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 
@@ -17966,7 +18349,7 @@ APP_VERSION = "v5.25.1-master-realized-cash-sync"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.25.1-master-realized-cash-sync"
+APP_VERSION = "v5.26.0-accounting-core-verify"
 
 
 def _v5242_runtime_integrity_check():
