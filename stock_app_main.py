@@ -17986,7 +17986,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 KPI의 실현손익은 표시행 기준이 아니라 Google Sheets 거래원장 기준
 #   실현손익 총액과 동기화합니다.
 # ============================================================
-APP_VERSION = "v5.26.8-recent-kpi-ledger-sync"
+APP_VERSION = "v5.26.9-recent-kpi-display-authority"
 
 
 def _v5268_num(value, default=0.0):
@@ -18251,6 +18251,386 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 # ============================================================
 # end v5.26.8 recent-kpi-ledger-sync
+# ============================================================
+
+
+# ============================================================
+# v5.26.9 recent-kpi-display-authority
+# ------------------------------------------------------------
+# 오류 원인:
+# - v5.26.8까지는 최근자산변화 이동목록을 보강했지만, 실제 KPI 표시 함수는
+#   여전히 이동목록의 수익손실부분 합계를 직접 사용했습니다.
+# - 이동목록에는 실제 거래행과 현금대기/설명행이 섞여 있어 표시용 행 합계가
+#   Google Sheets 거래원장 기준 실현손익과 달라질 수 있습니다.
+# - 따라서 거래원장/회계검증은 정상인데, 최근자산변화 KPI만 8,707,568원으로 남았습니다.
+#
+# 수정 방향:
+# - Google Sheets 거래원장을 읽어 계산한 v5260 회계검증 총액을 최근자산변화 KPI의
+#   권위 있는 실현손익 값으로 사용합니다.
+# - 최근자산변화 행 목록은 흐름 설명용으로 유지하되, 실현손익 KPI는 원장 기준으로 동기화합니다.
+# - 누락된 2026-05-15 KODEX AI반도체핵심장비 3주 매도(+18,453원)는
+#   매도금액+실현손익 키 기준으로만 판단하여 없을 때만 보강합니다.
+# ============================================================
+APP_VERSION = "v5.26.9-recent-kpi-display-authority"
+
+
+def _v5269_num(value, default=0.0):
+    try:
+        if '_v5268_num' in globals():
+            return _v5268_num(value, default)
+    except Exception:
+        pass
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5269_date(value):
+    try:
+        if '_v5268_date' in globals():
+            return _v5268_date(value)
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return str(value or '')[:10]
+
+
+def _v5269_ledger_detail_total(거래df):
+    try:
+        if 'v5260_거래원장실현손익계산' not in globals():
+            return pd.DataFrame(), None
+        detail, _summary, total = v5260_거래원장실현손익계산(거래df, include_manual_tdf=True)
+        d = pd.DataFrame(detail).copy() if detail is not None else pd.DataFrame()
+        if not d.empty and '실현손익' in d.columns:
+            d['실현손익'] = pd.to_numeric(d['실현손익'], errors='coerce').fillna(0)
+        total_int = int(round(_v5269_num(total, d['실현손익'].sum() if not d.empty and '실현손익' in d.columns else 0)))
+        return d, total_int
+    except Exception as e:
+        try:
+            logging.warning('v5269 ledger total failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return pd.DataFrame(), None
+
+
+def _v5269_existing_exact_realized_keys(movements):
+    keys = set()
+    try:
+        df = pd.DataFrame(movements).copy()
+        if df.empty:
+            return keys
+        for _, r in df.iterrows():
+            date = _v5269_date(r.get('날짜', r.get('거래일자', '')))
+            amount = int(round(abs(_v5269_num(r.get('금액', r.get('매도금액', r.get('이동금액', 0))), 0))))
+            pnl = int(round(_v5269_num(r.get('수익손실부분', r.get('실현손익', 0)), 0)))
+            code = str(r.get('종목코드', '') or '').strip()
+            name_blob = ' '.join(str(r.get(c, '') or '') for c in ['종목명', '상세설명', '자동분석', '시스템해석'])
+            if pnl == 0:
+                continue
+            # 금액+손익이 모두 같은 경우만 같은 거래로 봅니다.
+            keys.add((date, amount, pnl))
+            if code:
+                keys.add((date, code, amount, pnl))
+            for token in ['TDF2035', 'SK하이닉스', 'AI반도체핵심장비', 'AI전력핵심설비', '코스닥150', '휴머노이드', 'HD현대마린엔진']:
+                if token in name_blob:
+                    keys.add((date, token, amount, pnl))
+    except Exception:
+        pass
+    return keys
+
+
+def _v5269_detail_to_movement(r):
+    code = str(r.get('종목코드', '') or '').strip()
+    name = str(r.get('종목명', '') or code or '').strip()
+    date = _v5269_date(r.get('거래일자', r.get('날짜', '')))
+    sell_amt = int(round(_v5269_num(r.get('매도금액', 0), 0)))
+    cost = int(round(_v5269_num(r.get('매수원금', 0), 0)))
+    pnl = int(round(_v5269_num(r.get('실현손익', 0), 0)))
+    account = str(r.get('운용사', '') or r.get('계좌', '') or '')
+    pnl_word = '수익실현' if pnl > 0 else '손실실현'
+    return {
+        '날짜': date,
+        '계좌': account,
+        '구분': '매도',
+        '종목코드': code,
+        '종목명': name,
+        '자산유형': '주식형자산',
+        '금액': sell_amt,
+        '이동금액': abs(sell_amt),
+        '원금부분': cost,
+        '수익손실부분': pnl,
+        '상세설명': f'{name} 매도 → 현금성 대기자산',
+        '자동분석': f'거래원장 기준 보강: 매도금액 {sell_amt:,}원, 원금 {cost:,}원, {pnl_word} {abs(pnl):,}원으로 반영합니다.',
+        '출처': 'v5.26.9 거래원장실현손익보강',
+    }
+
+
+def _v5269_missing_realized_rows(거래df, movements):
+    detail, ledger_total = _v5269_ledger_detail_total(거래df)
+    try:
+        if ledger_total is not None:
+            st.session_state['v5269_ledger_realized_total'] = int(ledger_total)
+    except Exception:
+        pass
+    if detail.empty:
+        return pd.DataFrame()
+    existing = _v5269_existing_exact_realized_keys(movements)
+    rows = []
+    for _, r in detail.iterrows():
+        pnl = int(round(_v5269_num(r.get('실현손익', 0), 0)))
+        if pnl == 0:
+            continue
+        date = _v5269_date(r.get('거래일자', r.get('날짜', '')))
+        code = str(r.get('종목코드', '') or '').strip()
+        name = str(r.get('종목명', '') or '')
+        amount = int(round(abs(_v5269_num(r.get('매도금액', 0), 0))))
+        token = ''
+        for t in ['TDF2035', 'SK하이닉스', 'AI반도체핵심장비', 'AI전력핵심설비', '코스닥150', '휴머노이드', 'HD현대마린엔진']:
+            if t in name:
+                token = t
+                break
+        if ((date, amount, pnl) in existing or
+            (code and (date, code, amount, pnl) in existing) or
+            (token and (date, token, amount, pnl) in existing)):
+            continue
+        rows.append(_v5269_detail_to_movement(r))
+    try:
+        st.session_state['v5269_missing_realized_rows'] = int(len(rows))
+    except Exception:
+        pass
+    return pd.DataFrame(rows)
+
+
+try:
+    _자산이동목록통합_v5269_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5269_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
+    try:
+        base = _자산이동목록통합_v5269_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5269_base else pd.DataFrame()
+    except Exception as e:
+        try:
+            logging.warning('v5269 base movement failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        base = pd.DataFrame()
+    base = pd.DataFrame(base).copy()
+    extra = _v5269_missing_realized_rows(거래df, base)
+    out = pd.concat([base, extra], ignore_index=True, sort=False)
+    if out.empty:
+        return out
+    for c in ['날짜', '계좌', '구분', '종목코드', '종목명', '상세설명', '금액', '이동금액', '원금부분', '수익손실부분', '출처', '자동분석']:
+        if c not in out.columns:
+            out[c] = 0 if c in ['금액', '이동금액', '원금부분', '수익손실부분'] else ''
+    out['날짜'] = out['날짜'].apply(_v5269_date)
+    for c in ['금액', '이동금액', '원금부분', '수익손실부분']:
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0)
+    out.loc[out['이동금액'].abs() == 0, '이동금액'] = out.loc[out['이동금액'].abs() == 0, '금액'].abs()
+    out['_date_sort_v5269'] = pd.to_datetime(out['날짜'], errors='coerce')
+    out['_src_rank_v5269'] = out['출처'].astype(str).map(lambda x: {'v5.26.9 거래원장실현손익보강': 0, 'v5.26.8 거래원장실현손익보강': 1, 'v5.26.2 원장실현손익검증': 2}.get(x, 9))
+    out['_dedup_v5269'] = out.apply(lambda r: '|'.join([
+        str(r.get('날짜', '')),
+        str(r.get('계좌', '')),
+        str(r.get('구분', '')),
+        str(r.get('종목코드', '')),
+        str(r.get('종목명', '')),
+        str(r.get('상세설명', '')),
+        str(int(round(abs(_v5269_num(r.get('금액', 0), 0))))),
+        str(int(round(_v5269_num(r.get('수익손실부분', 0), 0))))
+    ]), axis=1)
+    out = out.sort_values(['_date_sort_v5269', '_src_rank_v5269', '금액'], ascending=[False, True, False], kind='mergesort')
+    out = out.drop_duplicates('_dedup_v5269', keep='first')
+    try:
+        st.session_state['v5269_recent_rows'] = int(len(out))
+        st.session_state['v5269_recent_row_sum'] = int(round(pd.to_numeric(out.get('수익손실부분', 0), errors='coerce').fillna(0).sum()))
+    except Exception:
+        pass
+    return out.drop(columns=['_date_sort_v5269', '_src_rank_v5269', '_dedup_v5269'], errors='ignore').reset_index(drop=True)
+
+
+def _v5269_display_recent_movements(이동df, 최대표시=80):
+    try:
+        이동df = pd.DataFrame(이동df).copy()
+        최근자산변화표스타일_v5226()
+        st.markdown('<div class="asset-change-head"><div><span class="asset-change-title">🔎 최근 자산변화</span><span class="asset-change-sub">자산 이동·신규 편입·실현손익을 한눈에 보는 자산원장</span></div></div>', unsafe_allow_html=True)
+        if 이동df.empty:
+            st.caption('최근 거래이력에서 자산이동으로 해석할 내역을 찾지 못했습니다.')
+            return 이동df
+        for c in ['금액', '이동금액', '원금부분', '수익손실부분']:
+            if c in 이동df.columns:
+                이동df[c] = pd.to_numeric(이동df[c], errors='coerce').fillna(0)
+        if '금액' not in 이동df.columns:
+            이동df['금액'] = 0
+        if '이동금액' not in 이동df.columns:
+            이동df['이동금액'] = 이동df['금액'].abs()
+        if '원금부분' not in 이동df.columns:
+            이동df['원금부분'] = 이동df['이동금액'].abs()
+        if '수익손실부분' not in 이동df.columns:
+            이동df['수익손실부분'] = 0
+
+        총건수 = len(이동df)
+        현금관리마스크 = pd.Series([False] * len(이동df), index=이동df.index)
+        for _col in ['구분', '변화유형']:
+            if _col in 이동df.columns:
+                현금관리마스크 = 현금관리마스크 | 이동df[_col].astype(str).str.contains('현금대기|자금이체|예수금대기|기존잔액확인', na=False)
+        총금액 = 이동df.loc[~현금관리마스크, '이동금액'].abs().sum() if len(현금관리마스크) == len(이동df) else 이동df['이동금액'].abs().sum()
+
+        표시행손익 = int(round(pd.to_numeric(이동df['수익손실부분'], errors='coerce').fillna(0).sum()))
+        원장손익 = st.session_state.get('v5269_ledger_realized_total', None)
+        총손익 = int(원장손익) if 원장손익 is not None else 표시행손익
+
+        날짜시리즈 = pd.to_datetime(이동df.get('날짜', pd.Series([], dtype=object)), errors='coerce').dropna()
+        if not 날짜시리즈.empty:
+            조회기간표시 = f"{날짜시리즈.min().strftime('%Y-%m-%d')} ~ {날짜시리즈.max().strftime('%Y-%m-%d')}"
+            조회일수표시 = f"{max(1, (날짜시리즈.max() - 날짜시리즈.min()).days + 1):,}일"
+        else:
+            조회기간표시 = '최근 내역'
+            조회일수표시 = '-'
+        구분시리즈 = 이동df['구분'].astype(str) if '구분' in 이동df.columns else pd.Series([], dtype=str)
+        매수건수 = int(구분시리즈.str.contains('매수', na=False).sum()) if len(구분시리즈) else 0
+        매도건수 = int(구분시리즈.str.contains('매도', na=False).sum()) if len(구분시리즈) else 0
+        신규편입 = []
+        try:
+            후보 = 이동df[구분시리즈.str.contains('매수', na=False)] if len(구분시리즈) else 이동df
+            for col in ['종목명', '상품명', '자산명']:
+                if col in 후보.columns:
+                    신규편입 = [x for x in 후보[col].dropna().astype(str).unique().tolist() if x and x.lower() != 'nan'][:5]
+                    if 신규편입:
+                        break
+        except Exception:
+            신규편입 = []
+        손익표시 = 원화정수포맷(총손익) if abs(총손익) >= 1 else '0원'
+        신규표시 = f'{len(신규편입):,}종목' if 신규편입 else '-'
+        손익주석 = 'Google Sheets 원장 기준'
+        if 원장손익 is not None and int(원장손익) != 표시행손익:
+            손익주석 = f'원장 기준 / 표시행 합계 {원화정수포맷(표시행손익)}'
+
+        kpi_html = (
+            '<div class="asset-kpi-box">'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">거래</div><div class="asset-kpi-value">{총건수:,}건</div><div class="asset-kpi-note">매수 {매수건수:,} / 매도 {매도건수:,} · {조회일수표시}</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">이동금액</div><div class="asset-kpi-value">{원화정수포맷(총금액)}</div><div class="asset-kpi-note">조회기간 {조회기간표시}</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">신규편입</div><div class="asset-kpi-value">{_html_escape_v5224(신규표시)}</div><div class="asset-kpi-note">최근 매수 기준</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">실현손익</div><div class="asset-kpi-value">{손익표시}</div><div class="asset-kpi-note">{_html_escape_v5224(손익주석)}</div></div>'
+            '</div>'
+        )
+        st.markdown(kpi_html, unsafe_allow_html=True)
+
+        rows_html = []
+        for _, row in 이동df.head(최대표시).iterrows():
+            날짜메인, 날짜서브 = _거래요약날짜_v5226(row.get('날짜', ''))
+            구분원본 = str(row.get('구분', '자산이동'))
+            자산유형 = str(row.get('자산유형', ''))
+            if '수익실현' in 구분원본:
+                구분표시, badge = '수익실현', 'badge-tdf'
+            elif '손실실현' in 구분원본:
+                구분표시, badge = '손실실현', 'badge-sell'
+            elif '자금이체' in 구분원본 or '자금이체' in str(row.get('변화유형', '')):
+                구분표시, badge = '자금이체', 'badge-transfer'
+            elif any(x in 구분원본 for x in ['현금대기', '예수금대기', '기존잔액확인']) or any(x in str(row.get('변화유형', '')) for x in ['현금대기', '예수금대기', '기존잔액확인']):
+                구분표시, badge = '현금대기', 'badge-cash'
+            elif 'TDF' in 자산유형.upper() or 'TDF' in str(row.get('상세설명', '')).upper():
+                구분표시, badge = 'TDF', 'badge-tdf'
+            elif '매도' in 구분원본:
+                구분표시, badge = '매도', 'badge-sell'
+            elif '매수' in 구분원본:
+                구분표시, badge = '매수', 'badge-buy'
+            else:
+                구분표시, badge = '이동', 'badge-move'
+            상세 = str(row.get('상세설명', '')).replace('  ', ' ').strip()
+            자동 = str(row.get('자동분석', '')).strip()
+            계좌 = _계좌짧게_v5226(row.get('계좌', ''))
+            이동금액 = abs(_v5269_num(row.get('이동금액', row.get('금액', 0))))
+            원금부분 = abs(_v5269_num(row.get('원금부분', 이동금액)))
+            손익부분 = _v5269_num(row.get('수익손실부분', 0))
+            손익배지 = ''
+            if 손익부분 > 0:
+                손익배지 = f'<span class="profit-pill-pos">수익실현 {원화정수포맷(손익부분)}</span>'
+            elif 손익부분 < 0:
+                손익배지 = f'<span class="profit-pill-neg">손실실현 {원화정수포맷(abs(손익부분))}</span>'
+            if '자금이체' in 구분원본 or '자금이체' in str(row.get('변화유형', '')):
+                원금손익표시 = '예수금 이체·보관 / 손익계산 제외'
+            elif any(x in 구분원본 for x in ['현금대기', '예수금대기', '기존잔액확인']) or any(x in str(row.get('변화유형', '')) for x in ['현금대기', '예수금대기', '기존잔액확인']):
+                원금손익표시 = '투자대기 현금 / 손익계산 제외'
+            elif abs(손익부분) >= 1 or abs(원금부분 - 이동금액) >= 1 or 'TDF' in 자산유형.upper():
+                원금손익표시 = _v5228_principal_profit_text(원금부분, 손익부분)
+            else:
+                원금손익표시 = '-'
+            sub = 자동 if 자동 else '자산군 이동'
+            rows_html.append(
+                '<tr>'
+                f'<td><div class="date-main">{_html_escape_v5224(날짜메인)}</div><div class="date-sub hide-mobile">{_html_escape_v5224(날짜서브)}</div></td>'
+                f'<td><span class="badge {badge}">{_html_escape_v5224(구분표시)}</span></td>'
+                f'<td><div class="move-main">{_html_escape_v5224(상세)}{손익배지}</div><div class="move-sub">{_html_escape_v5224(sub)}</div></td>'
+                f'<td class="amount-main">{원화정수포맷(이동금액)}</td>'
+                f'<td class="hide-mobile"><div class="move-sub" style="text-align:right;color:#cbd5e1;font-weight:650;">{_html_escape_v5224(원금손익표시)}</div></td>'
+                f'<td class="hide-mobile"><span class="account-pill">{_html_escape_v5224(계좌)}</span></td>'
+                '</tr>'
+            )
+        table_html = (
+            '<div class="asset-change-wrap">'
+            '<table class="asset-change-table">'
+            '<thead><tr><th style="width:9%">날짜</th><th style="width:8%">구분</th><th>이동내용</th><th style="width:14%;text-align:right">금액</th><th class="hide-mobile" style="width:18%;text-align:right">원금/손익</th><th class="hide-mobile" style="width:10%">계좌</th></tr></thead>'
+            f'<tbody>{"".join(rows_html)}</tbody>'
+            '</table>'
+            '<div class="asset-change-foot">ⓘ 실현손익 KPI는 Google Sheets 거래원장 기준으로 표시합니다. 표시행에는 거래·자금이체·현금대기 설명행이 함께 포함될 수 있습니다.</div>'
+            '</div>'
+        )
+        st.markdown(table_html, unsafe_allow_html=True)
+        if len(이동df) > 최대표시:
+            with st.expander(f'전체 자산 변화 목록 보기 · {len(이동df):,}건', expanded=False):
+                표시열 = [c for c in ['날짜', '구분', '상세설명', '금액', '원금부분', '수익손실부분', '계좌', '자동분석', '출처'] if c in 이동df.columns]
+                표시 = 이동df[표시열].copy()
+                try:
+                    숫자포맷 = {c: 원화정수포맷 for c in ['금액', '원금부분', '수익손실부분'] if c in 표시.columns}
+                    표데이터프레임(표시.style.format(숫자포맷), width='stretch', hide_index=True)
+                except Exception:
+                    표데이터프레임(표시, width='stretch', hide_index=True)
+        return 이동df
+    except Exception as e:
+        st.caption(f'최근 자산변화 v5.26.9 표시 오류: {type(e).__name__}: {e}')
+        try:
+            return 이동df
+        except Exception:
+            return pd.DataFrame()
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return _v5269_display_recent_movements(이동df, 최대표시=max(최대표시, 80))
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    # KPI 기준값을 먼저 세션에 저장한 뒤, 표시용 이동목록을 생성합니다.
+    _detail, ledger_total = _v5269_ledger_detail_total(거래df)
+    try:
+        if ledger_total is not None:
+            st.session_state['v5269_ledger_realized_total'] = int(ledger_total)
+    except Exception:
+        pass
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
+
+# ============================================================
+# end v5.26.9 recent-kpi-display-authority
 # ============================================================
 
 if 선택섹터 == "포트폴리오 현황":
