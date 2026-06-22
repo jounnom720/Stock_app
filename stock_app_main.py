@@ -831,7 +831,7 @@ def 데이터프레임빈값아님_v5223(df):
 # 1) ETF는 KODEX 200 → TIGER 200 → TIGER 코리아휴머노이드 순으로 고정합니다.
 # 2) 개별주식은 투자원금이 큰 순서로 자동 정렬합니다.
 # 3) 최근 자산변화는 카드 반복 대신 요약 KPI + 표 중심으로 표시합니다.
-# 4) TDF 매도 후 현금성자산/주식으로 이동한 경우 이동금액을 원금과 실현손익으로 분리합니다.
+# 4) TDF 매도 후 현금성자산/주식으로 이동한 경우 이동금액을 원금부분과 수익/손실부분으로 분리합니다.
 # ============================================================
 ETF_CODE_ORDER_V5224 = {"069500": 10, "102110": 20, "0148J0": 30}
 ETF_NAME_ORDER_V5224 = {
@@ -989,7 +989,7 @@ def 최근자산변화표스타일_v5224():
 
 
 def _자산변화원금손익계산_v5224(row):
-    """이동금액을 원금과 실현손익으로 분리합니다.
+    """이동금액을 원금부분과 수익/손실부분으로 분리합니다.
     거래이력에 원금/매입금액/평가손익/실현손익 컬럼이 있으면 우선 사용하고,
     없으면 일반 매수·매도는 이동금액 전체를 원금부분으로 간주합니다.
     """
@@ -1020,7 +1020,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=10):
     try:
         이동df = pd.DataFrame(이동df).copy()
         최근자산변화표스타일_v5224()
-        st.markdown('<div class="asset-change-head"><div><span class="asset-change-title">🔎 최근 자산변화</span><span class="asset-change-sub">원금 이동과 실현손익을 분리해서 보는 최근 거래 흐름</span></div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="asset-change-head"><div><span class="asset-change-title">🔎 최근 자산변화</span><span class="asset-change-sub">원금 이동과 수익/손실을 분리해서 보는 최근 거래 흐름</span></div></div>', unsafe_allow_html=True)
         if 이동df.empty:
             st.caption("최근 거래이력에서 자산이동으로 해석할 매수·매도 내역을 찾지 못했습니다.")
             return 이동df
@@ -1053,8 +1053,8 @@ def 최근자산변화표시_v5224(이동df, 최대표시=10):
             '<div class="asset-kpi-box">'
             f'<div class="asset-kpi"><div class="asset-kpi-label">총 이동 건수</div><div class="asset-kpi-value">{총건수:,}건</div><div class="asset-kpi-note">매수 {매수건수:,}건 / 매도 {매도건수:,}건</div></div>'
             f'<div class="asset-kpi"><div class="asset-kpi-label">총 이동 금액</div><div class="asset-kpi-value">{원화정수포맷(총금액)}</div><div class="asset-kpi-note">실제 이동한 총액</div></div>'
-            f'<div class="asset-kpi"><div class="asset-kpi-label">원금</div><div class="asset-kpi-value">{원화정수포맷(총원금)}</div><div class="asset-kpi-note">기존 투자원금 이동분</div></div>'
-            f'<div class="asset-kpi"><div class="asset-kpi-label">실현손익</div><div class="asset-kpi-value {손익클래스}">{원화정수포맷(총손익)}</div><div class="asset-kpi-note">TDF·매도 손익 분리</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">원금 부분</div><div class="asset-kpi-value">{원화정수포맷(총원금)}</div><div class="asset-kpi-note">기존 투자원금 이동분</div></div>'
+            f'<div class="asset-kpi"><div class="asset-kpi-label">수익/손실 부분</div><div class="asset-kpi-value {손익클래스}">{원화정수포맷(총손익)}</div><div class="asset-kpi-note">TDF·매도 손익 분리</div></div>'
             '</div>'
         )
         st.markdown(kpi_html, unsafe_allow_html=True)
@@ -1117,10 +1117,10 @@ def 최근자산변화표시_v5224(이동df, 최대표시=10):
         table_html = (
             '<div class="asset-change-wrap">'
             '<table class="asset-change-table">'
-            '<thead><tr><th style="width:11%">날짜</th><th style="width:11%">구분</th><th>변화내용</th><th style="width:16%;text-align:right">이동금액</th><th class="hide-mobile" style="width:14%;text-align:right">원금</th><th class="hide-mobile" style="width:14%;text-align:right">실현손익</th></tr></thead>'
+            '<thead><tr><th style="width:11%">날짜</th><th style="width:11%">구분</th><th>변화내용</th><th style="width:16%;text-align:right">이동금액</th><th class="hide-mobile" style="width:14%;text-align:right">원금부분</th><th class="hide-mobile" style="width:14%;text-align:right">수익/손실</th></tr></thead>'
             f'<tbody>{"".join(rows_html)}</tbody>'
             '</table>'
-            '<div class="asset-change-foot">ⓘ TDF 원금에서 현금성자산으로 이동한 뒤 주식을 매수한 경우, 전체 이동금액을 새 원금으로 보지 않고 기존 원금과 TDF 실현손익을 나누어 표시합니다.</div>'
+            '<div class="asset-change-foot">ⓘ TDF 원금에서 현금성자산으로 이동한 뒤 주식을 매수한 경우, 전체 이동금액을 새 원금으로 보지 않고 기존 원금부분과 TDF 수익/손실부분을 나누어 표시합니다.</div>'
             '</div>'
         )
         st.markdown(table_html, unsafe_allow_html=True)
@@ -1133,7 +1133,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=10):
             주요자산 = []
         분석문장 = []
         if tdf건수:
-            분석문장.append(f"TDF 관련 이동 {tdf건수:,}건은 원금과 실현손익을 분리해 보아야 합니다.")
+            분석문장.append(f"TDF 관련 이동 {tdf건수:,}건은 원금부분과 수익/손실부분을 분리해 보아야 합니다.")
         if 총손익 > 0:
             분석문장.append(f"최근 거래에 포함된 수익 실현분은 {원화정수포맷(총손익)}입니다.")
         elif 총손익 < 0:
@@ -17394,21 +17394,19 @@ _v5263_global_number_style()
 # ============================================================
 
 
-
 # ============================================================
-# v5.26.5 recent-dedup-cleanup pre-render patch
+# v5.26.6 recent-ledger-targeted-fix
 # ------------------------------------------------------------
-# 적용 위치: 포트폴리오 화면 렌더링 직전
 # 목적:
-# 1) 최근자산변화 표시 전에 활성 엔진을 먼저 확정합니다.
-# 2) 동일일자·동일종목·복수매도 거래를 보존하기 위해 최근자산변화용 drop_duplicates 레이어를 우회합니다.
-# 3) v5.26.1 원장 실현손익 보강은 유지합니다.
-# 4) 내부 컬럼명(원금부분/수익손실부분)은 호환을 위해 유지하고, 화면 표기만 원금/실현손익으로 정리합니다.
+# 1) v5.26.5에서 중복제거를 완전히 우회하여 최근자산변화가 57건으로 늘어난 문제를 되돌립니다.
+# 2) 기존 v5.26.1 계열 중복정리는 유지하되, 회계검증 원장에만 있고 최근자산변화에 없는
+#    실현손익 거래만 정밀 보강합니다.
+# 3) 목표: 최근자산변화 54건 / 실현손익 8,726,021원
 # ============================================================
-APP_VERSION = "v5.26.5-recent-dedup-cleanup"
+APP_VERSION = "v5.26.6-recent-ledger-targeted-fix"
 
 
-def _v5265_num(value, default=0.0):
+def _v5266_num(value, default=0.0):
     try:
         if '_v5260_num' in globals():
             return _v5260_num(value, default)
@@ -17429,7 +17427,7 @@ def _v5265_num(value, default=0.0):
         return default
 
 
-def _v5265_date(value):
+def _v5266_date(value):
     try:
         if '_v5261_date_text' in globals():
             return _v5261_date_text(value)
@@ -17444,66 +17442,192 @@ def _v5265_date(value):
     return str(value or '')[:10]
 
 
-def _v5265_sort_recent_without_dedup(df):
-    """최근자산변화는 중복제거하지 않고 정렬만 수행합니다."""
+def _v5266_text(row, cols):
     try:
-        out = pd.DataFrame(df).copy()
-        if out.empty:
-            return out
-        for c in ['날짜', '계좌', '구분', '종목코드', '종목명', '상세설명', '금액', '원금부분', '수익손실부분', '출처', '자동분석']:
-            if c not in out.columns:
-                out[c] = 0 if c in ['금액', '원금부분', '수익손실부분'] else ''
-        out['날짜'] = out['날짜'].apply(_v5265_date)
-        for c in ['금액', '원금부분', '수익손실부분']:
-            out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0)
-        out['_date_sort_v5265'] = pd.to_datetime(out['날짜'], errors='coerce')
-        if '_ledger_order_v5265' not in out.columns:
-            out['_ledger_order_v5265'] = range(len(out))
-        out = out.sort_values(
-            ['_date_sort_v5265', '_ledger_order_v5265'],
-            ascending=[False, True],
-            kind='mergesort'
-        )
-        return out.drop(columns=['_date_sort_v5265', '_ledger_order_v5265'], errors='ignore').reset_index(drop=True)
+        return ' '.join(str(row.get(c, '') or '') for c in cols)
     except Exception:
-        return df
+        return ''
+
+
+def _v5266_existing_realized_keys(movements):
+    """현재 최근자산변화에 이미 존재하는 실현손익 행을 정밀 키로 수집합니다."""
+    keys = set()
+    try:
+        df = pd.DataFrame(movements).copy()
+        if df.empty:
+            return keys
+        for _, r in df.iterrows():
+            pnl = int(round(_v5266_num(r.get('수익손실부분', r.get('실현손익', 0)), 0)))
+            if pnl == 0:
+                continue
+            date = _v5266_date(r.get('날짜', r.get('거래일자', '')))
+            amount = int(round(abs(_v5266_num(r.get('금액', r.get('매도금액', 0)), 0))))
+            code = str(r.get('종목코드', '') or '').strip()
+            name_text = _v5266_text(r, ['종목명', '상세설명', '자동분석', '시스템해석'])
+            keys.add((date, amount, pnl))
+            if code:
+                keys.add((date, code, amount, pnl))
+            for token in ['TDF2035', 'SK하이닉스', 'AI반도체', '코스닥150', '휴머노이드', 'AI전력', 'HD현대마린엔진']:
+                if token in name_text:
+                    keys.add((date, token, amount, pnl))
+    except Exception:
+        pass
+    return keys
+
+
+def _v5266_detail_row_to_movement(r):
+    name = str(r.get('종목명', '') or r.get('종목코드', '') or '')
+    code = str(r.get('종목코드', '') or '')
+    date = _v5266_date(r.get('거래일자', ''))
+    sell_amt = int(round(_v5266_num(r.get('매도금액', 0), 0)))
+    cost = int(round(_v5266_num(r.get('매수원금', 0), 0)))
+    pnl = int(round(_v5266_num(r.get('실현손익', 0), 0)))
+    account = str(r.get('운용사', '') or r.get('계좌', '') or '')
+    is_tdf = ('TDF' in name.upper()) or ('TDF' in code.upper())
+    kind = '수익실현' if is_tdf else '매도'
+    pnl_text = f"실현수익 {pnl:,}원" if pnl > 0 else f"실현손실 {abs(pnl):,}원"
+    return {
+        '날짜': date,
+        '계좌': account,
+        '구분': kind,
+        '종목코드': code,
+        '종목명': name,
+        '자산유형': 'TDF' if is_tdf else '주식형자산',
+        '수량': r.get('매도수량', 0),
+        '단가': r.get('매도단가', 0),
+        '금액': sell_amt,
+        '원금부분': cost,
+        '수익손실부분': pnl,
+        '변화유형': kind,
+        '상세설명': f'{name} 매도 → 현금성 대기자산' if not is_tdf else f'{name} 전량 매도',
+        '자동분석': f'매도대금 {sell_amt:,}원, 원금 {cost:,}원, {pnl_text}으로 반영합니다.',
+        '출처': 'v5.26.6 원장실현손익정밀보강',
+    }
+
+
+def _v5266_missing_realized_movements(거래df, existing_movements=None):
+    """회계검증 상세에는 있으나 최근자산변화에는 없는 실현손익 행만 추가합니다."""
+    try:
+        if 'v5260_거래원장실현손익계산' not in globals():
+            return pd.DataFrame()
+        detail, _summary, _total = v5260_거래원장실현손익계산(거래df, include_manual_tdf=True)
+        d = pd.DataFrame(detail).copy() if detail is not None else pd.DataFrame()
+        if d.empty:
+            return pd.DataFrame()
+        d['실현손익'] = pd.to_numeric(d.get('실현손익', 0), errors='coerce').fillna(0)
+        d = d[d['실현손익'].round().astype(int) != 0].copy()
+        if d.empty:
+            return pd.DataFrame()
+
+        existing = _v5266_existing_realized_keys(existing_movements)
+        rows = []
+        for _, r in d.iterrows():
+            date = _v5266_date(r.get('거래일자', ''))
+            code = str(r.get('종목코드', '') or '')
+            name = str(r.get('종목명', '') or '')
+            amount = int(round(abs(_v5266_num(r.get('매도금액', 0), 0))))
+            pnl = int(round(_v5266_num(r.get('실현손익', 0), 0)))
+            if pnl == 0:
+                continue
+
+            token = ''
+            for t in ['TDF2035', 'SK하이닉스', 'AI반도체', '코스닥150', '휴머노이드', 'AI전력', 'HD현대마린엔진']:
+                if t in name:
+                    token = t
+                    break
+
+            # 날짜+금액+손익이 일치하면 이미 반영된 거래로 봅니다.
+            # 동일 날짜·동일 종목의 복수 매도는 금액과 손익이 다르므로 별도 거래로 보존됩니다.
+            if ((date, amount, pnl) in existing or
+                (code and (date, code, amount, pnl) in existing) or
+                (token and (date, token, amount, pnl) in existing)):
+                continue
+
+            rows.append(_v5266_detail_row_to_movement(r))
+
+        return pd.DataFrame(rows)
+    except Exception as e:
+        try:
+            logging.warning('v5266 missing realized movements failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
 
 
 try:
-    _자산이동목록통합_v5265_base = _자산이동목록통합_v5261_base
+    _자산이동목록통합_v5266_base = _자산이동목록통합_v5261_base
 except Exception:
-    _자산이동목록통합_v5265_base = 자산이동목록통합_v5225
+    _자산이동목록통합_v5266_base = 자산이동목록통합_v5225
 
 
-def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
-    """v5.26.5 최근자산변화 생성 단일 진입점.
-    기존 원장 기반 생성과 실현손익 보강은 유지하되, 최근자산변화 전용 중복제거는 수행하지 않습니다.
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=90):
+    """v5.26.6 최근자산변화 생성.
+    기존 중복정리는 유지하고, 원장 실현손익 누락분만 정밀 보강합니다.
     """
     try:
-        base = _자산이동목록통합_v5265_base(거래df, 비주식자산df, 최근일수=최근일수)
+        base = _자산이동목록통합_v5266_base(거래df, 비주식자산df, 최근일수=최근일수)
     except Exception as e:
         try:
-            logging.warning('v5265 base movement failed: %s', e, exc_info=True)
+            logging.warning('v5266 base movement failed: %s', e, exc_info=True)
         except Exception:
             pass
         base = pd.DataFrame()
 
-    try:
-        extra = _v5261_realized_movements_from_ledger(거래df, base)
-    except Exception as e:
-        try:
-            logging.warning('v5265 realized supplement failed: %s', e, exc_info=True)
-        except Exception:
-            pass
-        extra = pd.DataFrame()
+    out = pd.DataFrame(base).copy()
+    if out.empty:
+        out = pd.DataFrame()
 
-    out = pd.concat([pd.DataFrame(base), pd.DataFrame(extra)], ignore_index=True, sort=False)
+    for c in ['날짜','계좌','구분','종목코드','종목명','상세설명','금액','원금부분','수익손실부분','출처','자동분석']:
+        if c not in out.columns:
+            out[c] = 0 if c in ['금액','원금부분','수익손실부분'] else ''
+
+    try:
+        out['날짜'] = out['날짜'].apply(_v5266_date)
+    except Exception:
+        pass
+
+    for c in ['금액','원금부분','수익손실부분']:
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0)
+
+    extra = _v5266_missing_realized_movements(거래df, out)
+    out = pd.concat([out, extra], ignore_index=True, sort=False)
+
     if out.empty:
         return out
 
-    out = _v5265_sort_recent_without_dedup(out)
+    for c in ['날짜','계좌','구분','종목코드','종목명','상세설명','금액','원금부분','수익손실부분','출처','자동분석']:
+        if c not in out.columns:
+            out[c] = 0 if c in ['금액','원금부분','수익손실부분'] else ''
 
-    # 검증용 세션 값: 화면에는 영향을 주지 않습니다.
+    out['날짜'] = out['날짜'].apply(_v5266_date)
+    for c in ['금액','원금부분','수익손실부분']:
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0)
+
+    out['_date_sort_v5266'] = pd.to_datetime(out['날짜'], errors='coerce')
+    out['_src_rank_v5266'] = out['출처'].astype(str).map(lambda x: {
+        'v5.26.6 원장실현손익정밀보강': 0,
+        'v5.26.2 원장실현손익검증': 1,
+        'v5.26.1 원장실현손익검증': 2,
+        '현금흐름강제복구': 3
+    }.get(x, 9))
+
+    # 완전중복만 제거합니다. 금액·실현손익이 다른 동일일자 동일종목 매도는 제거하지 않습니다.
+    out['_dedup_v5266'] = out.apply(lambda r: '|'.join([
+        str(r.get('날짜','')),
+        str(r.get('계좌','')),
+        str(r.get('구분','')),
+        str(r.get('종목코드','')),
+        str(r.get('종목명','')),
+        str(int(round(abs(_v5266_num(r.get('금액',0),0))))),
+        str(int(round(_v5266_num(r.get('원금부분',0),0)))),
+        str(int(round(_v5266_num(r.get('수익손실부분',0),0))))
+    ]), axis=1)
+
+    out = out.sort_values(['_date_sort_v5266','_src_rank_v5266','금액'], ascending=[False, True, False])
+    out = out.drop_duplicates('_dedup_v5266', keep='first')
+    out = out.drop(columns=['_date_sort_v5266','_src_rank_v5266','_dedup_v5266'], errors='ignore').reset_index(drop=True)
+
+    # 검증용 세션값
     try:
         joined = out.astype(str).agg(' '.join, axis=1)
         found = joined[
@@ -17511,9 +17635,9 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
             & joined.str.contains('KODEX AI반도체핵심장비', na=False)
             & joined.str.replace(',', '', regex=False).str.contains('18453', na=False)
         ]
-        st.session_state['v5265_recent_rows'] = int(len(out))
-        st.session_state['v5265_kodex_ai_18453_found'] = int(len(found))
-        st.session_state['v5265_recent_realized_sum'] = int(round(pd.to_numeric(out.get('수익손실부분', 0), errors='coerce').fillna(0).sum()))
+        st.session_state['v5266_recent_rows'] = int(len(out))
+        st.session_state['v5266_kodex_ai_18453_found'] = int(len(found))
+        st.session_state['v5266_recent_realized_sum'] = int(round(pd.to_numeric(out.get('수익손실부분', 0), errors='coerce').fillna(0).sum()))
     except Exception:
         pass
 
@@ -17521,16 +17645,25 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 
 
 try:
-    _최근자산변화표시_v5265_base = 최근자산변화표시_v5224
+    _최근자산변화표시_v5266_base = 최근자산변화표시_v5224
 except Exception:
-    _최근자산변화표시_v5265_base = None
+    _최근자산변화표시_v5266_base = None
 
 
 def 최근자산변화표시_v5224(이동df, 최대표시=80):
-    df = _v5265_sort_recent_without_dedup(pd.DataFrame(이동df).copy())
-    if _최근자산변화표시_v5265_base:
-        return _최근자산변화표시_v5265_base(df, 최대표시=max(최대표시, 80))
-    return df
+    """v5.26.6 표시 래퍼. 내부 컬럼은 유지하고 화면 표시만 기존 UI에 맡깁니다."""
+    try:
+        df = pd.DataFrame(이동df).copy()
+        for c in ['금액', '원금부분', '수익손실부분']:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        if '날짜' in df.columns:
+            df['날짜'] = df['날짜'].apply(_v5266_date)
+        if _최근자산변화표시_v5266_base:
+            return _최근자산변화표시_v5266_base(df, 최대표시=max(최대표시, 80))
+        return df
+    except Exception:
+        return 이동df
 
 
 최근자산변화표시_v5226 = 최근자산변화표시_v5224
@@ -17542,8 +17675,9 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
     return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
 
 # ============================================================
-# end v5.26.5 recent-dedup-cleanup pre-render patch
+# end v5.26.6 recent-ledger-targeted-fix
 # ============================================================
+
 
 if 선택섹터 == "포트폴리오 현황":
     # 포트폴리오 계산 결과
