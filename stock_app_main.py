@@ -18633,6 +18633,228 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # end v5.26.9 recent-kpi-display-authority
 # ============================================================
 
+
+# ============================================================
+# v5.27.0 recent-display-cleanup
+# ------------------------------------------------------------
+# 오류 원인:
+# - v5.26.9에서 Google Sheets 거래원장 기준 실현손익 KPI는 8,726,021원으로 복구되었습니다.
+# - 다만 최근자산변화 표시목록에는 실제 매도행과 별도로 만든 "매도 → 현금성 대기자산" 설명행이 함께 남아
+#   거래건수가 58건으로 증가했습니다.
+# - 중복의 특징은 같은 날짜·계좌·종목·금액의 매도 흐름이면서 한 행은 실현손익이 있고,
+#   다른 설명행은 수익손실부분이 0원 또는 비어 있다는 점입니다.
+#
+# 수정 방향:
+# - Google Sheets 거래원장, 회계검증, 통합자산 계산은 건드리지 않습니다.
+# - 최근자산변화 표시목록에서만 "실현손익 있는 실제 매도행"과 중복되는 "손익 0원 설명행"을 숨깁니다.
+# - 2026-05-15 KODEX AI반도체핵심장비 3주 매도 +18,453원 보강행은 유지합니다.
+# ============================================================
+APP_VERSION = "v5.27.0-recent-display-cleanup"
+
+
+def _v5270_num(value, default=0.0):
+    try:
+        if '_v5269_num' in globals():
+            return _v5269_num(value, default)
+    except Exception:
+        pass
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5270_date(value):
+    try:
+        if '_v5268_date' in globals():
+            return _v5268_date(value)
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(value, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return str(value or '')[:10]
+
+
+def _v5270_text(row, cols=None):
+    try:
+        if cols is None:
+            cols = ['종목코드', '종목명', '상세설명', '자동분석', '구분', '계좌']
+        return ' '.join(str(row.get(c, '') or '') for c in cols)
+    except Exception:
+        return ''
+
+
+def _v5270_asset_key(row):
+    """최근자산변화 표시행 비교용 종목키."""
+    try:
+        code = str(row.get('종목코드', '') or '').strip()
+        if code and code.lower() not in ['nan', 'none']:
+            return code
+        name = str(row.get('종목명', '') or '').strip()
+        if name and name.lower() not in ['nan', 'none']:
+            return name.replace(' ', '')
+        text = _v5270_text(row)
+        tokens = [
+            'KODEX AI반도체핵심장비', 'AI반도체핵심장비',
+            'KODEX AI전력핵심설비', 'AI전력핵심설비',
+            'SK하이닉스', 'HD현대마린엔진',
+            'KODEX 코스닥150', 'TIGER 코리아휴머노이드로봇산업',
+            '삼성전자', '현대차', '한화오션', 'TDF2035'
+        ]
+        for t in tokens:
+            if t in text:
+                return t.replace(' ', '')
+        # 종목명이 비어 있는 예외 행은 상세설명 앞부분을 최소 키로 사용
+        return text.replace(' ', '')[:30]
+    except Exception:
+        return ''
+
+
+def _v5270_is_sell_like(row):
+    text = _v5270_text(row, ['구분', '상세설명', '자동분석', '변화유형'])
+    return ('매도' in text) or ('수익실현' in text) or ('손실실현' in text)
+
+
+def _v5270_is_explain_duplicate_candidate(row):
+    """실제 매도행이 아니라, 매도 후 현금/예수금 흐름을 설명하는 보조행 후보."""
+    try:
+        pnl = int(round(_v5270_num(row.get('수익손실부분', row.get('실현손익', 0)), 0)))
+        if pnl != 0:
+            return False
+        if not _v5270_is_sell_like(row):
+            return False
+        text = _v5270_text(row)
+        # 실제 매도행과 중복되는 설명행은 보통 아래 표현을 포함합니다.
+        markers = [
+            '손익 0원으로 분리 반영',
+            '손익 0원',
+            '원금변화 없음',
+            '현금성 대기자산',
+            '예수금',
+            'ETF/주식 매도대금'
+        ]
+        return any(m in text for m in markers)
+    except Exception:
+        return False
+
+
+def _v5270_clean_recent_display_rows(df):
+    """최근자산변화 표시목록에서 실제 매도행과 중복되는 손익 0원 설명행만 제거."""
+    try:
+        out = pd.DataFrame(df).copy()
+        if out.empty:
+            return out
+        for c in ['날짜', '계좌', '구분', '종목코드', '종목명', '상세설명', '금액', '이동금액', '원금부분', '수익손실부분', '자동분석']:
+            if c not in out.columns:
+                out[c] = 0 if c in ['금액', '이동금액', '원금부분', '수익손실부분'] else ''
+        out['_date_v5270'] = out['날짜'].apply(_v5270_date)
+        out['_asset_v5270'] = out.apply(_v5270_asset_key, axis=1)
+        out['_amount_v5270'] = out.apply(lambda r: int(round(abs(_v5270_num(r.get('금액', r.get('이동금액', 0)), 0)))), axis=1)
+        out['_pnl_v5270'] = out.apply(lambda r: int(round(_v5270_num(r.get('수익손실부분', r.get('실현손익', 0)), 0))), axis=1)
+        out['_sell_v5270'] = out.apply(_v5270_is_sell_like, axis=1)
+
+        # 같은 날짜·계좌·종목·금액에 실현손익이 있는 실제 매도행이 존재하는 키
+        real_keys = set()
+        for _, r in out.iterrows():
+            if bool(r.get('_sell_v5270')) and int(r.get('_pnl_v5270', 0)) != 0:
+                real_keys.add((
+                    str(r.get('_date_v5270', '')),
+                    str(r.get('계좌', '') or '').strip(),
+                    str(r.get('_asset_v5270', '')),
+                    int(r.get('_amount_v5270', 0)),
+                ))
+
+        drop_idx = []
+        for idx, r in out.iterrows():
+            key = (
+                str(r.get('_date_v5270', '')),
+                str(r.get('계좌', '') or '').strip(),
+                str(r.get('_asset_v5270', '')),
+                int(r.get('_amount_v5270', 0)),
+            )
+            if key in real_keys and _v5270_is_explain_duplicate_candidate(r):
+                drop_idx.append(idx)
+
+        cleaned = out.drop(index=drop_idx) if drop_idx else out
+        try:
+            st.session_state['v5270_removed_explain_duplicate_rows'] = int(len(drop_idx))
+            st.session_state['v5270_recent_rows_before'] = int(len(out))
+            st.session_state['v5270_recent_rows_after'] = int(len(cleaned))
+            st.session_state['v5270_recent_realized_sum_after'] = int(round(pd.to_numeric(cleaned.get('수익손실부분', 0), errors='coerce').fillna(0).sum()))
+        except Exception:
+            pass
+        return cleaned.drop(columns=['_date_v5270', '_asset_v5270', '_amount_v5270', '_pnl_v5270', '_sell_v5270'], errors='ignore').reset_index(drop=True)
+    except Exception as e:
+        try:
+            logging.warning('v5270 clean recent display rows failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return df
+
+
+try:
+    _자산이동목록통합_v5270_base = 자산이동목록통합_v5225
+except Exception:
+    _자산이동목록통합_v5270_base = None
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
+    try:
+        base = _자산이동목록통합_v5270_base(거래df, 비주식자산df, 최근일수=최근일수) if _자산이동목록통합_v5270_base else pd.DataFrame()
+    except Exception as e:
+        try:
+            logging.warning('v5270 base movement failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        base = pd.DataFrame()
+    return _v5270_clean_recent_display_rows(base)
+
+
+try:
+    _최근자산변화표시_v5270_base = 최근자산변화표시_v5224
+except Exception:
+    _최근자산변화표시_v5270_base = None
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    df = _v5270_clean_recent_display_rows(이동df)
+    if _최근자산변화표시_v5270_base:
+        return _최근자산변화표시_v5270_base(df, 최대표시=max(최대표시, 80))
+    return df
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    # v5.26.9의 원장 기준 KPI 권한은 유지하고, 표시용 중복 설명행만 정리합니다.
+    try:
+        if '_v5269_ledger_detail_total' in globals():
+            _detail, ledger_total = _v5269_ledger_detail_total(거래df)
+            if ledger_total is not None:
+                st.session_state['v5269_ledger_realized_total'] = int(ledger_total)
+    except Exception:
+        pass
+    이동df = 자산이동목록통합_v5225(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
+
+# ============================================================
+# end v5.27.0 recent-display-cleanup
+# ============================================================
+
 if 선택섹터 == "포트폴리오 현황":
     # 포트폴리오 계산 결과
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
