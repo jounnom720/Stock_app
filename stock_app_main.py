@@ -17290,6 +17290,109 @@ _v5261_global_style_inject()
 # end v5.26.1 accounting-core-align-ui
 # ============================================================
 
+
+# ============================================================
+# v5.26.3 number-display-restore
+# 목적
+# - 회계검증/거래별 실현손익 상세 표에서 6.000000, 16335.000000처럼 보이는
+#   원시 float 표시를 사용자 화면용 정수/쉼표 표시로 복원합니다.
+# - 계산값은 변경하지 않고 표시 포맷만 보정합니다.
+# ============================================================
+APP_VERSION = "v5.26.3-number-display-restore"
+
+
+def _v5263_num(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5263_quantity_fmt(value):
+    """수량은 정수이면 소수점 없이, 소수 수량이면 불필요한 0을 제거해 표시합니다."""
+    try:
+        n = _v5263_num(value, 0)
+        if abs(n - round(n)) < 1e-9:
+            return f"{int(round(n)):,}"
+        return f"{n:,.4f}".rstrip('0').rstrip('.')
+    except Exception:
+        return str(value if value is not None else '')
+
+
+def _v5263_price_fmt(value):
+    """단가는 원 표시 없이 쉼표 정수로 표시합니다."""
+    try:
+        n = _v5263_num(value, 0)
+        if abs(n - round(n)) < 1e-9:
+            return f"{int(round(n)):,}"
+        return f"{n:,.2f}".rstrip('0').rstrip('.')
+    except Exception:
+        return str(value if value is not None else '')
+
+
+def _v5263_plain_int_fmt(value):
+    try:
+        n = _v5263_num(value, 0)
+        return f"{int(round(n)):,}"
+    except Exception:
+        return str(value if value is not None else '')
+
+
+# 기존 회계검증 스타일 함수를 덮어써서 모든 검증표 숫자 표시를 통일합니다.
+def _v5260_style_money_table(df, money_cols=None, profit_cols=None):
+    money_cols = money_cols or []
+    profit_cols = profit_cols or []
+    try:
+        fmt = {c: _v5260_money for c in money_cols if c in df.columns}
+        fmt.update({c: _v5260_signed_money for c in profit_cols if c in df.columns})
+
+        quantity_cols = [c for c in ['매도수량', '매수수량', '수량', '보유수량', '총매수수량', '총매도수량'] if c in df.columns]
+        price_cols = [c for c in ['평균매입단가', '매도단가', '매수단가', '단가', '현재가'] if c in df.columns]
+        count_cols = [c for c in ['매도건수', '거래건수', '건수'] if c in df.columns]
+
+        for c in quantity_cols:
+            fmt[c] = _v5263_quantity_fmt
+        for c in price_cols:
+            fmt[c] = _v5263_price_fmt
+        for c in count_cols:
+            fmt[c] = _v5263_plain_int_fmt
+
+        sty = df.style.format(fmt)
+        for c in profit_cols:
+            if c in df.columns:
+                sty = sty.map(_v5260_profit_css, subset=[c])
+        return sty
+    except Exception:
+        return df
+
+
+def _v5263_global_number_style():
+    try:
+        st.markdown(f"""
+        <style>
+        .dataframe td, .dataframe th {{ font-weight: 700 !important; }}
+        .profit-pos, .profit-pill-pos {{ color:{PROFIT_RED_V5260} !important; font-weight:900 !important; }}
+        .profit-neg, .profit-pill-neg {{ color:{LOSS_BLUE_V5260} !important; font-weight:900 !important; }}
+        .amount-main {{ font-weight:900 !important; }}
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+_v5263_global_number_style()
+# ============================================================
+# end v5.26.3 number-display-restore
+# ============================================================
+
 if 선택섹터 == "포트폴리오 현황":
     # 포트폴리오 계산 결과
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
@@ -18731,7 +18834,7 @@ def v5242_운영점검표시():
 # - 현금성 대기자산은 현금잔액과 ETF 매도손실의 의미가 분리되도록 설명 문구를 보강합니다.
 # - 수익=강한 빨강, 손실=강한 파랑 색상 규칙을 화면 전체에 다시 적용합니다.
 # ============================================================
-APP_VERSION = "v5.26.2-recent-realized-cash-color-fix"
+APP_VERSION = "v5.26.3-number-display-restore"
 
 PROFIT_RED_V5262 = "#E60012"
 LOSS_BLUE_V5262 = "#0066FF"
