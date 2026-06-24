@@ -21699,3 +21699,471 @@ except Exception:
 # ============================================================
 # end v5.26.2 recent-realized-cash-color-fix
 # ============================================================
+
+
+# ============================================================
+# v5.28.4 recent-display-number-fix FINAL OVERRIDE
+# ------------------------------------------------------------
+# 목적:
+# - 파일 뒤쪽의 과거 패치가 v5.28.3 정의를 다시 덮어쓴 문제를 최종 차단합니다.
+# - 최근자산변화는 거래원장 실제 거래행을 기준으로 재구성합니다.
+# - 2026-06-23 삼성전자 3회 매수처럼 동일일자 다중거래를 각각 보존합니다.
+# - 숫자 표시에서 31.000000, 315000.000000 같은 표현을 제거합니다.
+# - 회계검증/통합자산/포트폴리오 계산 로직은 수정하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.28.4-recent-display-number-fix"
+
+
+def _v5284_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+def _v5284_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("원", "").replace("%", "").strip()
+            if value == "":
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5284_date(value):
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.notna(ts):
+            return ts.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return _v5284_text(value)
+
+
+def _v5284_pick_col(df, candidates):
+    try:
+        norm = {str(c).strip().replace(" ", ""): c for c in df.columns}
+        for c in candidates:
+            key = str(c).strip().replace(" ", "")
+            if key in norm:
+                return norm[key]
+        for c in df.columns:
+            sc = str(c).strip().replace(" ", "")
+            if any(str(k).replace(" ", "") in sc for k in candidates):
+                return c
+    except Exception:
+        pass
+    return None
+
+
+def _v5284_col_after(df, base_col, offset):
+    try:
+        cols = list(df.columns)
+        if base_col in cols:
+            idx = cols.index(base_col) + offset
+            if 0 <= idx < len(cols):
+                return cols[idx]
+    except Exception:
+        pass
+    return None
+
+
+def _v5284_value(row, col, default=""):
+    try:
+        if col is not None and col in row:
+            return row.get(col, default)
+    except Exception:
+        pass
+    return default
+
+
+def _v5284_realized_detail_map(거래df):
+    """회계검증 상세 실현손익을 최근자산변화 매도행에 붙이기 위한 보조 맵."""
+    m = {}
+    total = None
+    try:
+        if "_v5269_ledger_detail_total" in globals():
+            detail, total = _v5269_ledger_detail_total(거래df)
+        elif "v5260_거래원장실현손익계산" in globals():
+            detail, _summary, total = v5260_거래원장실현손익계산(거래df, include_manual_tdf=True)
+        else:
+            detail = pd.DataFrame()
+        d = pd.DataFrame(detail).copy()
+        if total is not None:
+            try:
+                st.session_state["v5284_ledger_realized_total"] = int(round(_v5284_num(total, 0)))
+                st.session_state["v5269_ledger_realized_total"] = int(round(_v5284_num(total, 0)))
+            except Exception:
+                pass
+        if d.empty:
+            return m
+        for _, r in d.iterrows():
+            date = _v5284_date(r.get("거래일자", r.get("날짜", "")))
+            code = _v5284_text(r.get("종목코드", ""))
+            name = _v5284_text(r.get("종목명", ""))
+            sell_amt = int(round(abs(_v5284_num(r.get("매도금액", 0), 0))))
+            cost = int(round(abs(_v5284_num(r.get("매수원금", 0), 0))))
+            pnl = int(round(_v5284_num(r.get("실현손익", 0), 0)))
+            key1 = (date, code, sell_amt)
+            key2 = (date, name, sell_amt)
+            val = {"원금부분": cost, "수익손실부분": pnl, "매도금액": sell_amt}
+            if sell_amt:
+                m[key1] = val
+                m[key2] = val
+    except Exception as e:
+        try:
+            logging.warning("v5284 realized detail map failed: %s", e, exc_info=True)
+        except Exception:
+            pass
+    return m
+
+
+def _v5284_trade_rows_from_ledger(거래df):
+    try:
+        src = pd.DataFrame(거래df).copy()
+    except Exception:
+        return pd.DataFrame()
+    if src.empty:
+        return pd.DataFrame()
+
+    date_col = _v5284_pick_col(src, ["거래일자", "거래일", "날짜", "일자", "매매일자"])
+    code_col = _v5284_pick_col(src, ["종목코드", "코드", "ticker", "symbol"])
+    name_col = _v5284_pick_col(src, ["종목명", "상품명", "자산명", "보유종목"])
+    type_col = _v5284_pick_col(src, ["거래구분", "구분", "매매구분", "유형"])
+    qty_col = _v5284_pick_col(src, ["수량", "매수수량", "매도수량", "거래수량", "체결수량", "주수"])
+    price_col = _v5284_pick_col(src, ["단가", "매수단가", "매도단가", "거래단가", "체결단가", "평균매입단가", "가격"])
+    amount_col = _v5284_pick_col(src, ["금액", "거래금액", "매수금액", "매도금액", "매입금액", "체결금액", "매매금액", "거래대금", "매수원금"])
+    account_col = _v5284_pick_col(src, ["계좌", "운용사", "증권사"])
+    memo_col = _v5284_pick_col(src, ["비고", "메모", "투자메모", "자동분석"])
+
+    # 기본 거래원장 배열 보조 추출: 종목코드/종목명/날짜/구분/수량/단가/금액/계좌/비고
+    if qty_col is None and type_col is not None:
+        qty_col = _v5284_col_after(src, type_col, 1)
+    if price_col is None and type_col is not None:
+        price_col = _v5284_col_after(src, type_col, 2)
+    if amount_col is None and type_col is not None:
+        amount_col = _v5284_col_after(src, type_col, 3)
+    if account_col is None and amount_col is not None:
+        account_col = _v5284_col_after(src, amount_col, 1)
+    if memo_col is None and account_col is not None:
+        memo_col = _v5284_col_after(src, account_col, 1)
+
+    realized_map = _v5284_realized_detail_map(거래df)
+    rows = []
+    for idx, r in src.iterrows():
+        구분 = _v5284_text(_v5284_value(r, type_col, ""))
+        if 구분 and not any(k in 구분 for k in ["매수", "매도", "배당", "입금", "출금"]):
+            continue
+        날짜 = _v5284_date(_v5284_value(r, date_col, ""))
+        코드 = _v5284_text(_v5284_value(r, code_col, ""))
+        이름 = _v5284_text(_v5284_value(r, name_col, ""))
+        계좌 = _v5284_text(_v5284_value(r, account_col, ""))
+        수량 = abs(_v5284_num(_v5284_value(r, qty_col, 0), 0))
+        단가 = abs(_v5284_num(_v5284_value(r, price_col, 0), 0))
+        금액 = abs(_v5284_num(_v5284_value(r, amount_col, 0), 0))
+
+        if 금액 <= 0 and 수량 > 0 and 단가 > 0:
+            금액 = 수량 * 단가
+
+        메모 = _v5284_text(_v5284_value(r, memo_col, ""))
+        if not 날짜 or (not 이름 and not 코드 and 금액 <= 0):
+            continue
+
+        원금부분 = 금액 if "매수" in 구분 else 0
+        손익부분 = 0
+        if "매도" in 구분:
+            key1 = (날짜, 코드, int(round(금액)))
+            key2 = (날짜, 이름, int(round(금액)))
+            realized = realized_map.get(key1) or realized_map.get(key2)
+            if realized:
+                원금부분 = realized.get("원금부분", 0)
+                손익부분 = realized.get("수익손실부분", 0)
+
+        상세 = f"{계좌 + ' ' if 계좌 else ''}{이름 or 코드} {구분 or '거래'}".strip()
+        if "매수" in 구분 and 계좌:
+            자동 = f"{계좌} 예수금에서 {이름 or 코드} 매수로 이동"
+        elif "매도" in 구분:
+            자동 = "거래원장 기준 매도 거래 반영"
+        else:
+            자동 = "거래원장 기준 실제 거래행 반영"
+        if 메모:
+            자동 = f"{자동} · {메모}"
+
+        rows.append({
+            "날짜": 날짜,
+            "계좌": 계좌,
+            "구분": 구분 or "거래",
+            "종목코드": 코드,
+            "종목명": 이름,
+            "수량": 수량,
+            "단가": 단가,
+            "금액": 금액,
+            "원금부분": 원금부분,
+            "수익손실부분": 손익부분,
+            "상세설명": 상세,
+            "자동분석": 자동,
+            "출처": "v5284_거래원장",
+            "원장행번호": int(idx) + 1,
+        })
+    return pd.DataFrame(rows)
+
+
+def _v5284_explain_rows_from_nonstock(비주식자산df):
+    """비주식/현금성 자산 상태 설명행. 거래행이 아니므로 거래건수에는 섞지 않습니다."""
+    try:
+        src = pd.DataFrame(비주식자산df).copy()
+    except Exception:
+        return pd.DataFrame()
+    if src.empty:
+        return pd.DataFrame()
+    account_col = _v5284_pick_col(src, ["계좌"])
+    group_col = _v5284_pick_col(src, ["자산군"])
+    name_col = _v5284_pick_col(src, ["상품명", "자산명", "종목명"])
+    principal_col = _v5284_pick_col(src, ["원금", "투자원금"])
+    value_col = _v5284_pick_col(src, ["평가금액", "평가액"])
+    date_col = _v5284_pick_col(src, ["반영일자", "날짜", "기준일"])
+    memo_col = _v5284_pick_col(src, ["비고", "메모"])
+    rows = []
+    for _, r in src.iterrows():
+        자산군 = _v5284_text(_v5284_value(r, group_col, ""))
+        상품명 = _v5284_text(_v5284_value(r, name_col, ""))
+        if not any(k in f"{자산군} {상품명}" for k in ["현금", "예수", "대기"]):
+            continue
+        계좌 = _v5284_text(_v5284_value(r, account_col, ""))
+        원금 = _v5284_num(_v5284_value(r, principal_col, 0), 0)
+        평가 = _v5284_num(_v5284_value(r, value_col, 원금), 원금)
+        날짜 = _v5284_date(_v5284_value(r, date_col, ""))
+        메모 = _v5284_text(_v5284_value(r, memo_col, ""))
+        금액 = 평가 if 평가 else 원금
+        if 금액 <= 0:
+            continue
+        rows.append({
+            "날짜": 날짜,
+            "계좌": 계좌,
+            "구분": "현금대기",
+            "종목코드": "",
+            "종목명": 상품명 or 자산군,
+            "수량": 0,
+            "단가": 0,
+            "금액": 금액,
+            "원금부분": 원금,
+            "수익손실부분": 0,
+            "상세설명": f"{상품명 or 자산군} 보유",
+            "자동분석": 메모 or "현금성 자산 상태 설명행입니다. 실제 거래건수에는 포함하지 않습니다.",
+            "출처": "v5284_비주식자산",
+            "원장행번호": 0,
+        })
+    return pd.DataFrame(rows)
+
+
+def _v5284_exact_key(row):
+    try:
+        return "|".join([
+            _v5284_text(row.get("날짜", ""))[:10],
+            _v5284_text(row.get("계좌", "")),
+            _v5284_text(row.get("구분", "")),
+            _v5284_text(row.get("종목코드", "")),
+            _v5284_text(row.get("종목명", "")),
+            str(int(round(abs(_v5284_num(row.get("수량", 0), 0))))),
+            str(int(round(abs(_v5284_num(row.get("단가", 0), 0))))),
+            str(int(round(abs(_v5284_num(row.get("금액", 0), 0))))),
+            str(int(round(abs(_v5284_num(row.get("원장행번호", 0), 0))))),
+        ])
+    except Exception:
+        return ""
+
+
+def 최근자산변화_행유형판정_v5284(row):
+    try:
+        출처 = _v5284_text(row.get("출처", ""))
+        구분 = _v5284_text(row.get("구분", ""))
+        text = " ".join([출처, 구분, _v5284_text(row.get("상세설명", "")), _v5284_text(row.get("자동분석", ""))])
+        if "v5284_거래원장" in 출처:
+            return "실거래"
+        if "v5284_비주식자산" in 출처:
+            return "설명행"
+        if any(k in 구분 for k in ["매수", "매도", "배당", "입금", "출금"]):
+            return "실거래"
+        if any(k in text for k in ["잔액", "보유", "설명행", "현재잔액"]):
+            return "설명행"
+        if any(k in text for k in ["자산이동", "이체", "대기자산", "현금성", "예수금", "매도대금"]):
+            return "자산이동"
+        return "설명행"
+    except Exception:
+        return "미분류"
+
+
+def 최근자산변화_정리_v5284(이동df):
+    try:
+        df = pd.DataFrame(이동df).copy()
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    for c in ["날짜", "계좌", "구분", "종목코드", "종목명", "상세설명", "자동분석", "출처"]:
+        if c not in df.columns:
+            df[c] = ""
+    for c in ["금액", "원금부분", "수익손실부분", "수량", "단가", "원장행번호"]:
+        if c not in df.columns:
+            df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    df["날짜"] = df["날짜"].apply(_v5284_date)
+    df["원금"] = df["원금부분"]
+    df["실현손익"] = df["수익손실부분"]
+    df["행유형"] = df.apply(최근자산변화_행유형판정_v5284, axis=1)
+    try:
+        df["_dt_v5284"] = pd.to_datetime(df["날짜"], errors="coerce")
+        df["_exact_v5284"] = df.apply(_v5284_exact_key, axis=1)
+        df = df.sort_values(["_dt_v5284", "원장행번호", "금액"], ascending=[False, False, False], kind="mergesort")
+        df = df.drop_duplicates("_exact_v5284", keep="first")
+        df = df.drop(columns=["_dt_v5284", "_exact_v5284"], errors="ignore").reset_index(drop=True)
+    except Exception:
+        pass
+    try:
+        st.session_state["v5284_recent_total_rows"] = int(len(df))
+        st.session_state["v5284_recent_type_counts"] = df["행유형"].value_counts().to_dict()
+        st.session_state["v5284_recent_realized_sum"] = int(round(pd.to_numeric(df["수익손실부분"], errors="coerce").fillna(0).sum()))
+    except Exception:
+        pass
+    return df
+
+
+def 최근자산변화_생성_v5284(거래df=None, 비주식자산df=None, 최근일수=3650):
+    ledger_rows = _v5284_trade_rows_from_ledger(거래df)
+    explain_rows = _v5284_explain_rows_from_nonstock(비주식자산df)
+    try:
+        out = pd.concat([ledger_rows, explain_rows], ignore_index=True, sort=False)
+    except Exception:
+        out = ledger_rows if explain_rows.empty else explain_rows
+    out = 최근자산변화_정리_v5284(out)
+    try:
+        st.session_state["v5284_ledger_trade_rows"] = int(len(ledger_rows))
+        st.session_state["v5284_recent_rows_after_merge"] = int(len(out))
+        out_keys = set(out.apply(_v5284_exact_key, axis=1).tolist()) if not out.empty else set()
+        missing = ledger_rows[~ledger_rows.apply(_v5284_exact_key, axis=1).isin(out_keys)] if not ledger_rows.empty else pd.DataFrame()
+        st.session_state["v5284_recent_missing_ledger_rows"] = int(len(missing))
+    except Exception:
+        pass
+    return out
+
+
+def _v5284_money_fmt(x):
+    try:
+        return f"{int(round(_v5284_num(x, 0))):,}원"
+    except Exception:
+        return _v5284_text(x)
+
+
+def _v5284_int_fmt(x):
+    try:
+        return f"{int(round(_v5284_num(x, 0))):,}"
+    except Exception:
+        return _v5284_text(x)
+
+
+def _v5284_number_display_df(df):
+    out = pd.DataFrame(df).copy()
+    for c in ["금액", "원금", "실현손익"]:
+        if c in out.columns:
+            out[c] = out[c].apply(_v5284_money_fmt)
+    for c in ["수량", "단가", "원장행번호"]:
+        if c in out.columns:
+            out[c] = out[c].apply(_v5284_int_fmt)
+    for c in ["종목코드", "종목명", "계좌", "출처"]:
+        if c in out.columns:
+            out[c] = out[c].apply(_v5284_text)
+    return out
+
+
+def 최근자산변화_진단패널_v5284(df=None):
+    try:
+        dfx = 최근자산변화_정리_v5284(df) if df is not None else pd.DataFrame()
+        total = len(dfx) if not dfx.empty else int(st.session_state.get("v5284_recent_total_rows", 0))
+        counts = dfx["행유형"].value_counts().to_dict() if not dfx.empty and "행유형" in dfx.columns else st.session_state.get("v5284_recent_type_counts", {})
+        realized = int(st.session_state.get("v5269_ledger_realized_total", st.session_state.get("v5284_ledger_realized_total", st.session_state.get("v5284_recent_realized_sum", 0))))
+        with st.expander("최근자산변화 진단 v5.28.4", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("전체", f"{int(total):,}건")
+            c2.metric("실거래", f"{int(counts.get('실거래', 0)):,}건")
+            c3.metric("자산이동", f"{int(counts.get('자산이동', 0)):,}건")
+            c4.metric("설명행", f"{int(counts.get('설명행', 0)):,}건")
+            d1, d2, d3 = st.columns(3)
+            d1.metric("원장 거래행", f"{int(st.session_state.get('v5284_ledger_trade_rows', 0)):,}건")
+            d2.metric("최근자산변화", f"{int(st.session_state.get('v5284_recent_rows_after_merge', 0)):,}건")
+            d3.metric("원장 누락", f"{int(st.session_state.get('v5284_recent_missing_ledger_rows', 0)):,}건")
+            st.caption(f"원장 기준 실현손익: {int(realized):,}원")
+    except Exception:
+        pass
+
+
+def 최근자산변화_표시_v5284(이동df, 최대표시=80):
+    try:
+        df = 최근자산변화_정리_v5284(이동df)
+        st.markdown("### 🔎 최근 자산변화")
+        최근자산변화_진단패널_v5284(df)
+        if df.empty:
+            st.caption("최근 자산변화로 표시할 내역이 없습니다.")
+            return df
+        총건수 = len(df)
+        총금액 = int(round(pd.to_numeric(df.get("금액", 0), errors="coerce").fillna(0).abs().sum()))
+        원장실현손익 = int(st.session_state.get("v5269_ledger_realized_total", st.session_state.get("v5284_ledger_realized_total", st.session_state.get("v5284_recent_realized_sum", 0))))
+        c1, c2, c3 = st.columns(3)
+        c1.metric("자산변화", f"{총건수:,}건")
+        c2.metric("이동금액", _v5284_money_fmt(총금액))
+        c3.metric("원장 실현손익", _v5284_money_fmt(원장실현손익))
+        표시열 = [c for c in ["날짜", "행유형", "구분", "상세설명", "금액", "원금", "실현손익", "계좌", "종목코드", "종목명", "수량", "단가", "원장행번호", "자동분석", "출처"] if c in df.columns]
+        표시 = _v5284_number_display_df(df[표시열].head(max(최대표시, 80)).copy())
+        try:
+            if "표데이터프레임" in globals():
+                표데이터프레임(표시, width="stretch", hide_index=True)
+            else:
+                st.dataframe(표시, use_container_width=True, hide_index=True)
+        except Exception:
+            st.dataframe(표시, use_container_width=True, hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 v5.28.4 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
+    return 최근자산변화_생성_v5284(거래df, 비주식자산df, 최근일수=최근일수)
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return 최근자산변화_표시_v5284(이동df, 최대표시=max(최대표시, 80))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    try:
+        if '_v5269_ledger_detail_total' in globals():
+            _detail, ledger_total = _v5269_ledger_detail_total(거래df)
+            if ledger_total is not None:
+                st.session_state['v5269_ledger_realized_total'] = int(ledger_total)
+                st.session_state['v5284_ledger_realized_total'] = int(ledger_total)
+    except Exception:
+        pass
+    이동df = 최근자산변화_생성_v5284(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
+
+# ============================================================
+# end v5.28.4 recent-display-number-fix FINAL OVERRIDE
+# ============================================================
