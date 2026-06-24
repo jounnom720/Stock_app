@@ -14572,6 +14572,686 @@ for idx, 섹터명 in enumerate(섹터목록):
 
 선택섹터 = st.session_state[섹터선택키]
 
+# v5.28.9 recent-realized-direct-calc
+# ------------------------------------------------------------
+# 목적:
+# - 최근 자산변화 리스트의 매도 실현손익이 0원으로 표시되는 오류 수정
+# - 회계검증과 동일한 평균단가 방식으로 거래원장을 직접 순회하여 실현손익 계산
+# - 거래원장 50건은 건별 유지, 설명행은 별도 행유형으로 분리
+# ============================================================
+APP_VERSION = "v5.28.9-recent-realized-direct-calc"
+
+
+def _v5289_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    return s
+
+
+def _v5289_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("원", "").replace("%", "").replace("주", "").strip()
+            if value == "":
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5289_date(value):
+    try:
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.notna(ts):
+            return ts.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return _v5289_text(value)
+
+
+def _v5289_money_fmt(x, signed=False, dash_zero=False):
+    try:
+        n = int(round(_v5289_num(x, 0)))
+        if dash_zero and n == 0:
+            return "-"
+        return f"{n:+,}원" if signed and n != 0 else f"{n:,}원"
+    except Exception:
+        return _v5289_text(x)
+
+
+def _v5289_qty_fmt(x):
+    try:
+        n = _v5289_num(x, 0)
+        if abs(n) < 1e-9:
+            return "-"
+        if abs(n - round(n)) < 1e-9:
+            return f"{int(round(n)):,}주"
+        return f"{n:,.2f}주"
+    except Exception:
+        return _v5289_text(x)
+
+
+def _v5289_price_fmt(x):
+    try:
+        n = _v5289_num(x, 0)
+        if abs(n) < 1e-9:
+            return "-"
+        if abs(n - round(n)) < 1e-9:
+            return f"{int(round(n)):,}원"
+        return f"{n:,.2f}원"
+    except Exception:
+        return _v5289_text(x)
+
+
+def _v5289_profit_css(value):
+    try:
+        n = _v5289_num(str(value).replace("원", "").replace(",", ""), 0)
+        if n > 0:
+            return "color:#ff4d4f;font-weight:900;"
+        if n < 0:
+            return "color:#0b84ff;font-weight:900;"
+    except Exception:
+        pass
+    return ""
+
+
+def _v5289_pick_col(df, candidates):
+    try:
+        cols = list(df.columns)
+        norm = {str(c).strip(): c for c in cols}
+        for cand in candidates:
+            if cand in norm:
+                return norm[cand]
+        lower = {str(c).strip().lower(): c for c in cols}
+        for cand in candidates:
+            if cand.lower() in lower:
+                return lower[cand.lower()]
+    except Exception:
+        pass
+    return None
+
+
+def _v5289_norm_code(code, name=""):
+    try:
+        if "normalize_asset_code_v518" in globals():
+            return _v5289_text(normalize_asset_code_v518(code, name))
+    except Exception:
+        pass
+    return _v5289_text(code)
+
+
+def _v5289_trade_df(거래df):
+    """회계검증과 동일한 표준 거래원장 형태로 정리합니다."""
+    try:
+        if "_v5260_trade_df" in globals():
+            df = _v5260_trade_df(거래df)
+        else:
+            df = pd.DataFrame(거래df).copy()
+    except Exception:
+        df = pd.DataFrame(거래df).copy() if 거래df is not None else pd.DataFrame()
+    if df.empty:
+        return df
+
+    # 표준 컬럼이 없을 때만 최소 보정
+    if "거래구분" not in df.columns:
+        c = _v5289_pick_col(df, ["거래구분", "구분", "매매구분", "유형"])
+        if c is not None:
+            df["거래구분"] = df[c]
+    if "거래일자" not in df.columns:
+        c = _v5289_pick_col(df, ["거래일자", "거래일", "날짜", "일자", "매매일자"])
+        if c is not None:
+            df["거래일자"] = df[c]
+    if "종목코드" not in df.columns:
+        c = _v5289_pick_col(df, ["종목코드", "코드", "ticker", "symbol"])
+        if c is not None:
+            df["종목코드"] = df[c]
+    if "종목명" not in df.columns:
+        c = _v5289_pick_col(df, ["종목명", "상품명", "자산명", "보유종목"])
+        if c is not None:
+            df["종목명"] = df[c]
+    if "거래수량" not in df.columns:
+        c = _v5289_pick_col(df, ["거래수량", "수량", "매수수량", "매도수량", "체결수량", "주수"])
+        if c is not None:
+            df["거래수량"] = df[c]
+    if "거래단가" not in df.columns:
+        c = _v5289_pick_col(df, ["거래단가", "단가", "매수단가", "매도단가", "체결단가", "가격"])
+        if c is not None:
+            df["거래단가"] = df[c]
+    if "운용사" not in df.columns:
+        c = _v5289_pick_col(df, ["운용사", "계좌", "증권사"])
+        if c is not None:
+            df["운용사"] = df[c]
+    if "비고" not in df.columns:
+        c = _v5289_pick_col(df, ["비고", "메모", "투자메모", "자동분석"])
+        if c is not None:
+            df["비고"] = df[c]
+
+    return df
+
+
+def _v5289_ledger_realized_total(거래df):
+    try:
+        if "v5260_거래원장실현손익계산" in globals():
+            _detail, _summary, total = v5260_거래원장실현손익계산(거래df, include_manual_tdf=True)
+            t = pd.DataFrame(total)
+            if not t.empty and "실현손익" in t.columns:
+                return int(round(_v5289_num(t["실현손익"].iloc[0], 0)))
+    except Exception:
+        pass
+    return 0
+
+
+def _v5289_build_ledger_rows(거래df):
+    df = _v5289_trade_df(거래df)
+    if df is None or df.empty:
+        return pd.DataFrame(), 0
+
+    rows = []
+    state = {}
+    trade_no = 0
+
+    for idx, r in df.iterrows():
+        kind = _v5289_text(r.get("거래구분", ""))
+        if not any(k in kind for k in ["매수", "매도", "배당", "입금", "출금"]):
+            continue
+
+        date = _v5289_date(r.get("거래일자", ""))
+        name = _v5289_text(r.get("종목명", ""))
+        code = _v5289_norm_code(r.get("종목코드", ""), name)
+        qty = abs(_v5289_num(r.get("거래수량", 0), 0))
+        price = abs(_v5289_num(r.get("거래단가", 0), 0))
+        amount = abs(qty * price)
+        account = _v5289_text(r.get("운용사", ""))
+        memo = _v5289_text(r.get("비고", ""))
+        if amount <= 0:
+            # 표준화 전 원장에 금액 컬럼이 따로 있는 경우 보조 사용
+            for c in ["금액", "거래금액", "매수금액", "매도금액", "매매금액", "거래대금"]:
+                if c in df.columns:
+                    amount = abs(_v5289_num(r.get(c, 0), 0))
+                    if amount > 0:
+                        break
+
+        if not date or (not name and not code and amount <= 0):
+            continue
+
+        key = code or name
+        stt = state.setdefault(key, {"보유수량": 0.0, "잔여원금": 0.0})
+        principal = amount if "매수" in kind else 0
+        realized = 0
+        calc_note = ""
+
+        if "매수" in kind:
+            stt["보유수량"] += qty
+            stt["잔여원금"] += amount
+        elif "매도" in kind:
+            avg_cost = (stt["잔여원금"] / stt["보유수량"]) if stt["보유수량"] > 0 else 0.0
+            cost_basis = avg_cost * qty
+            realized = int(round(amount - cost_basis))
+            principal = int(round(cost_basis))
+            calc_note = f" · 실현손익 {_v5289_money_fmt(realized, signed=True)}"
+            stt["보유수량"] -= qty
+            stt["잔여원금"] -= cost_basis
+            if abs(stt["보유수량"]) < 1e-9:
+                stt["보유수량"] = 0.0
+                stt["잔여원금"] = 0.0
+
+        trade_no += 1
+        if "매수" in kind and account:
+            auto = f"{account} 예수금에서 {name or code} 매수로 이동"
+        elif "매도" in kind:
+            auto = f"거래원장 기준 매도 거래 반영{calc_note}"
+        else:
+            auto = "거래원장 기준 실제 거래행 반영"
+        if memo:
+            auto = f"{auto} · {memo}"
+
+        rows.append({
+            "날짜": date,
+            "행유형": "실거래",
+            "유형": "실거래",
+            "구분": kind,
+            "종목명": name or code,
+            "종목코드": code,
+            "수량": qty,
+            "단가": price,
+            "금액": int(round(amount)),
+            "원금": int(round(principal)),
+            "원금부분": int(round(principal)),
+            "실현손익": int(round(realized)),
+            "수익손실부분": int(round(realized)),
+            "계좌": account,
+            "자동분석": auto,
+            "상세설명": f"{name or code} {kind}".strip(),
+            "원장행번호": trade_no,
+            "출처": "v5289_거래원장직접계산",
+        })
+
+    ledger_total = _v5289_ledger_realized_total(거래df)
+    try:
+        st.session_state["v5289_ledger_trade_rows"] = len(rows)
+        st.session_state["v5289_recent_trade_realized_sum"] = int(sum(_v5289_num(r.get("실현손익", 0), 0) for r in rows))
+        st.session_state["v5289_ledger_realized_total"] = int(ledger_total)
+        st.session_state["v5288_ledger_realized_total"] = int(ledger_total)
+        st.session_state["v5269_ledger_realized_total"] = int(ledger_total)
+    except Exception:
+        pass
+    return pd.DataFrame(rows), ledger_total
+
+
+def _v5289_explain_rows_from_nonstock(비주식자산df):
+    try:
+        df = pd.DataFrame(비주식자산df).copy()
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in df.iterrows():
+        asset = _v5289_text(r.get("자산군", ""))
+        name = _v5289_text(r.get("상품명", r.get("자산명", "")))
+        memo = _v5289_text(r.get("비고", ""))
+        if not any(k in f"{asset} {name} {memo}" for k in ["현금", "예수금", "대기자산"]):
+            continue
+        amount = _v5289_num(r.get("평가금액", r.get("원금", 0)), 0)
+        if amount <= 0:
+            continue
+        rows.append({
+            "날짜": _v5289_date(r.get("반영일자", r.get("날짜", ""))),
+            "행유형": "설명행",
+            "유형": "설명행",
+            "구분": "현금대기" if "대기" in f"{asset} {name}" else "현금사용",
+            "종목명": name or asset,
+            "종목코드": "",
+            "수량": 0,
+            "단가": 0,
+            "금액": int(round(amount)),
+            "원금": int(round(_v5289_num(r.get("원금", amount), amount))),
+            "원금부분": int(round(_v5289_num(r.get("원금", amount), amount))),
+            "실현손익": 0,
+            "수익손실부분": 0,
+            "계좌": _v5289_text(r.get("계좌", "")),
+            "자동분석": memo or "현금성 자산 상태 설명행입니다.",
+            "상세설명": f"{name or asset} 보유",
+            "원장행번호": 999999,
+            "출처": "비주식자산",
+        })
+    return pd.DataFrame(rows)
+
+
+def 최근자산변화_생성_v5289(거래df=None, 비주식자산df=None, 최근일수=3650):
+    trade_df, ledger_total = _v5289_build_ledger_rows(거래df)
+    explain_df = _v5289_explain_rows_from_nonstock(비주식자산df)
+    out = pd.concat([trade_df, explain_df], ignore_index=True, sort=False) if not explain_df.empty else trade_df.copy()
+    if out.empty:
+        return out
+    for c in ["금액", "원금", "원금부분", "실현손익", "수익손실부분", "수량", "단가", "원장행번호"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    try:
+        out["_dt_v5289"] = pd.to_datetime(out["날짜"], errors="coerce")
+        out = out.sort_values(["_dt_v5289", "원장행번호"], ascending=[False, False], kind="mergesort")
+        out = out.drop(columns=["_dt_v5289"], errors="ignore").reset_index(drop=True)
+    except Exception:
+        pass
+    try:
+        st.session_state["v5289_recent_total_rows"] = int(len(out))
+        st.session_state["v5289_recent_trade_rows"] = int((out["행유형"].astype(str) == "실거래").sum())
+        st.session_state["v5289_recent_explain_rows"] = int((out["행유형"].astype(str) == "설명행").sum())
+        st.session_state["v5289_recent_trade_realized_sum"] = int(pd.to_numeric(out.loc[out["행유형"].astype(str)=="실거래", "실현손익"], errors="coerce").fillna(0).sum())
+        st.session_state["v5289_ledger_realized_total"] = int(ledger_total)
+    except Exception:
+        pass
+    return out
+
+
+def _v5289_display_df(df):
+    d = pd.DataFrame(df).copy()
+    cols = ["날짜", "유형", "구분", "종목명", "수량", "단가", "금액", "실현손익", "계좌", "자동분석"]
+    for c in cols:
+        if c not in d.columns:
+            d[c] = 0 if c in ["수량", "단가", "금액", "실현손익"] else ""
+    d = d[cols].copy()
+    d["수량"] = d["수량"].apply(_v5289_qty_fmt)
+    d["단가"] = d["단가"].apply(_v5289_price_fmt)
+    d["금액"] = d["금액"].apply(_v5289_money_fmt)
+    d["실현손익"] = d["실현손익"].apply(lambda x: _v5289_money_fmt(x, signed=True))
+    for c in ["날짜", "유형", "구분", "종목명", "계좌", "자동분석"]:
+        d[c] = d[c].apply(_v5289_text)
+    return d
+
+
+def 최근자산변화_진단패널_v5289(df):
+    try:
+        d = pd.DataFrame(df).copy()
+        trade = d[d.get("행유형", "").astype(str) == "실거래"] if not d.empty and "행유형" in d.columns else d.iloc[0:0]
+        explain = d[d.get("행유형", "").astype(str) == "설명행"] if not d.empty and "행유형" in d.columns else d.iloc[0:0]
+        trade_realized = int(pd.to_numeric(trade.get("실현손익", 0), errors="coerce").fillna(0).sum()) if not trade.empty else 0
+        ledger_total = int(st.session_state.get("v5289_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", 0)))
+        with st.expander("최근자산변화 검증 v5.28.9", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("총 표시행", f"{len(d):,}건")
+            c2.metric("실거래", f"{len(trade):,}건")
+            c3.metric("설명행", f"{len(explain):,}건")
+            c4.metric("원장 거래행", f"{int(st.session_state.get('v5289_ledger_trade_rows', len(trade))):,}건")
+            d1, d2 = st.columns(2)
+            d1.metric("최근자산변화 거래행 실현손익", _v5289_money_fmt(trade_realized, signed=True))
+            d2.metric("원장 전체 실현손익(TDF 포함)", _v5289_money_fmt(ledger_total, signed=True))
+            st.caption("참고: 원장 전체 실현손익에는 TDF2035 확정 손익이 포함될 수 있고, 거래원장 실거래행 합계와 다를 수 있습니다.")
+    except Exception:
+        pass
+
+
+def 최근자산변화_표시_v5289(이동df, 최대표시=80):
+    try:
+        df = pd.DataFrame(이동df).copy()
+        if df.empty:
+            st.caption("최근 자산변화 표시 대상이 없습니다.")
+            return df
+        st.markdown("### 🔎 최근 자산변화")
+        최근자산변화_진단패널_v5289(df)
+        trade_df = df[df["행유형"].astype(str) == "실거래"] if "행유형" in df.columns else df
+        c1, c2, c3 = st.columns(3)
+        c1.metric("자산변화", f"{len(df):,}건")
+        c2.metric("원장 거래행", f"{len(trade_df):,}건")
+        c3.metric("거래행 실현손익", _v5289_money_fmt(pd.to_numeric(trade_df.get("실현손익", 0), errors="coerce").fillna(0).sum(), signed=True))
+        표시 = _v5289_display_df(df.head(max(최대표시, 80)))
+        try:
+            sty = 표시.style.applymap(lambda v: _v5289_profit_css(v), subset=["실현손익"])
+            표데이터프레임(sty, width="stretch", hide_index=True)
+        except Exception:
+            표데이터프레임(표시, width="stretch", hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근 자산변화 표시 오류 v5.28.9: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return 이동df
+
+
+def _v5289_recent_cash_flow_card(거래df=None):
+    try:
+        df = _v5289_trade_df(거래df)
+        if df.empty or "거래일자" not in df.columns:
+            return
+        df = df.copy()
+        df["_date"] = df["거래일자"].apply(_v5289_date)
+        latest = df["_date"].dropna().max()
+        if not latest:
+            return
+        today = df[df["_date"] == latest].copy()
+        today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
+        if today.empty:
+            return
+        st.markdown("### 최근 현금성 자산 이동 해석")
+        st.caption(f"{latest} 거래이력 {len(today):,}건 · 수량·단가·금액이 다른 거래는 합산하지 않고 건별로 표시합니다.")
+        for _, r in today.sort_index().iterrows():
+            kind = _v5289_text(r.get("거래구분", ""))
+            name = _v5289_text(r.get("종목명", "")) or _v5289_norm_code(r.get("종목코드", ""))
+            qty = _v5289_num(r.get("거래수량", 0), 0)
+            price = _v5289_num(r.get("거래단가", 0), 0)
+            amount = abs(qty * price)
+            account = _v5289_text(r.get("운용사", ""))
+            memo = _v5289_text(r.get("비고", ""))
+            title = f"{account} 예수금 → {name} {kind}" if "매수" in kind else f"{name} {kind} → {account} 예수금"
+            st.markdown(
+                f"""
+                <div style="border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:1rem;margin:.7rem 0;background:rgba(15,23,42,.35);">
+                  <div style="font-weight:800;color:#f8fafc;margin-bottom:.35rem;">{latest} · {kind}</div>
+                  <div style="font-size:1.25rem;font-weight:850;color:#f8fafc;">{title}</div>
+                  <div style="color:#cbd5e1;margin-top:.45rem;">{name} · {_v5289_qty_fmt(qty)} × {_v5289_price_fmt(price)} = {_v5289_money_fmt(amount)}</div>
+                  <div style="background:rgba(37,99,235,.22);border-radius:8px;padding:.55rem;margin-top:.7rem;color:#bfdbfe;font-weight:700;">시스템 해석 {account} 예수금에서 {name} {kind}로 이동 · {memo}</div>
+                </div>
+                """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
+    return 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=최근일수)
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return 최근자산변화_표시_v5289(이동df, 최대표시=max(최대표시, 80))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_생성_v5288 = 최근자산변화_생성_v5289
+최근자산변화_표시_v5288 = 최근자산변화_표시_v5289
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    try:
+        _v5289_recent_cash_flow_card(거래df)
+    except Exception:
+        pass
+    이동df = 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화_표시_v5289(이동df, 최대표시=max(최대표시, 80))
+
+# ============================================================
+# end v5.28.9 recent-realized-direct-calc
+
+
+# ============================================================
+# v5.28.12 recent-final-before-first-ui
+# ------------------------------------------------------------
+# 목적:
+# - 첫 화면 분기 실행 전에 최근자산변화 최종 함수와 포맷 함수를 고정합니다.
+# - v5.28.11에서 _v5288_money_fmt 미정의로 자산변화 내역이 사라진 오류를 수정합니다.
+# - 거래원장 50건 + 설명행 2건, 거래형 실현손익 5,035,094원 구조를 유지합니다.
+# ============================================================
+APP_VERSION = "v5.28.12-recent-final-before-first-ui"
+
+# v5.28.11/과거 래퍼가 참조하는 v5288 포맷명을 v5289 기준으로 안전 연결합니다.
+try:
+    _v5288_money_fmt = _v5289_money_fmt
+    _v5288_display_df = _v5289_display_df
+    _v5288_signed_money_style = _v5289_profit_css
+    _v5288_qty_fmt = _v5289_qty_fmt
+    _v5288_price_fmt = _v5289_price_fmt
+    _v5288_text = _v5289_text
+    _v5288_num = _v5289_num
+    _v5288_date = _v5289_date
+except Exception:
+    pass
+
+
+def _v52812_safe_df(obj):
+    try:
+        return pd.DataFrame(obj).copy()
+    except Exception:
+        return pd.DataFrame()
+
+
+def 최근자산변화_진단패널_v52812(df):
+    try:
+        d = _v52812_safe_df(df)
+        if d.empty:
+            return
+        if "행유형" in d.columns:
+            trade = d[d["행유형"].astype(str) == "실거래"].copy()
+            explain = d[d["행유형"].astype(str) == "설명행"].copy()
+        else:
+            trade = d.copy()
+            explain = pd.DataFrame()
+        recent_realized = int(round(pd.to_numeric(trade.get("실현손익", 0), errors="coerce").fillna(0).sum())) if not trade.empty else 0
+        ledger_realized = int(st.session_state.get("v5289_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", 0)))
+        ledger_rows = int(st.session_state.get("v5289_ledger_trade_rows", len(trade)))
+        diff = ledger_realized - recent_realized
+        with st.expander("최근자산변화 진단 v5.28.12", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("전체 표시행", f"{len(d):,}건")
+            c2.metric("실거래", f"{len(trade):,}건")
+            c3.metric("설명행", f"{len(explain):,}건")
+            c4.metric("원장 거래행", f"{ledger_rows:,}건")
+            d1, d2, d3 = st.columns(3)
+            d1.metric("거래형 실현손익", _v5289_money_fmt(recent_realized, signed=True))
+            d2.metric("원장 기준 전체 실현손익", _v5289_money_fmt(ledger_realized, signed=True))
+            d3.metric("차이", _v5289_money_fmt(diff, signed=True))
+            if abs(diff) == 3690927:
+                st.info("차이는 TDF2035 실현손익 3,690,927원 포함 여부 때문입니다.")
+            elif abs(diff) > 1:
+                st.warning(f"거래형 실현손익과 원장 기준 전체 실현손익 차이 {diff:,}원 확인 필요")
+            else:
+                st.success("거래형 실현손익과 원장 기준 전체 실현손익이 일치합니다.")
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 진단 표시 오류 v5.28.12: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def 최근자산변화_표시_v52812(이동df, 최대표시=80):
+    try:
+        df = _v52812_safe_df(이동df)
+        st.markdown("### 🔎 최근 자산변화")
+        if df.empty:
+            st.caption("최근 자산변화 표시 대상이 없습니다.")
+            return df
+
+        최근자산변화_진단패널_v52812(df)
+        trade_df = df[df["행유형"].astype(str) == "실거래"].copy() if "행유형" in df.columns else df.copy()
+        explain_df = df[df["행유형"].astype(str) == "설명행"].copy() if "행유형" in df.columns else pd.DataFrame()
+        recent_realized = int(round(pd.to_numeric(trade_df.get("실현손익", 0), errors="coerce").fillna(0).sum())) if not trade_df.empty else 0
+        ledger_realized = int(st.session_state.get("v5289_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", 0)))
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("실거래", f"{len(trade_df):,}건")
+        c2.metric("설명행", f"{len(explain_df):,}건")
+        c3.metric("거래형 실현손익", _v5289_money_fmt(recent_realized, signed=True))
+        c4.metric("원장 기준 전체 실현손익", _v5289_money_fmt(ledger_realized, signed=True))
+        st.caption(f"전체 표시행 {len(df):,}건 = 실거래 {len(trade_df):,}건 + 설명행 {len(explain_df):,}건")
+
+        표시 = _v5289_display_df(df.head(max(최대표시, 80)))
+        try:
+            sty = 표시.style.map(lambda v: _v5289_profit_css(v), subset=["실현손익"])
+        except Exception:
+            try:
+                sty = 표시.style.applymap(lambda v: _v5289_profit_css(v), subset=["실현손익"])
+            except Exception:
+                sty = 표시
+        try:
+            if "표데이터프레임" in globals():
+                표데이터프레임(sty, width="stretch", hide_index=True)
+            else:
+                st.dataframe(sty, use_container_width=True, hide_index=True)
+        except Exception:
+            if "표데이터프레임" in globals():
+                표데이터프레임(표시, width="stretch", hide_index=True)
+            else:
+                st.dataframe(표시, use_container_width=True, hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 v5.28.12 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return _v52812_safe_df(이동df)
+
+
+def _v52812_recent_cash_flow_card(거래df=None):
+    try:
+        df = _v5289_trade_df(거래df)
+        if df.empty or "거래일자" not in df.columns:
+            return
+        df = df.copy()
+        df["_date_v52812"] = df["거래일자"].apply(_v5289_date)
+        latest = df["_date_v52812"].dropna().max()
+        if not latest:
+            return
+        today = df[df["_date_v52812"] == latest].copy()
+        if "거래구분" in today.columns:
+            today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
+        if today.empty:
+            return
+        work = []
+        for _, r in today.sort_index().iterrows():
+            kind = _v5289_text(r.get("거래구분", ""))
+            name = _v5289_text(r.get("종목명", "")) or _v5289_norm_code(r.get("종목코드", ""))
+            qty = abs(_v5289_num(r.get("거래수량", r.get("수량", 0)), 0))
+            price = abs(_v5289_num(r.get("거래단가", r.get("단가", 0)), 0))
+            amount = abs(_v5289_num(r.get("거래금액", r.get("금액", 0)), 0))
+            if amount <= 0 and qty > 0 and price > 0:
+                amount = abs(qty * price)
+            account = _v5289_text(r.get("운용사", r.get("계좌", "")))
+            memo = _v5289_text(r.get("비고", r.get("메모", "")))
+            work.append({"kind":kind, "name":name, "qty":qty, "price":price, "amount":amount, "account":account, "memo":memo})
+        total_amt = int(round(sum(x["amount"] for x in work)))
+        buy_count = sum(1 for x in work if "매수" in x["kind"])
+        sell_count = sum(1 for x in work if "매도" in x["kind"])
+        names = []
+        for x in work:
+            if x["name"] and x["name"] not in names:
+                names.append(x["name"])
+        st.markdown("### 최근 현금성 자산 이동 해석")
+        st.caption(f"{latest} 거래이력 {len(work):,}건 · 매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 거래금액 {_v5289_money_fmt(total_amt)} · 종목: {', '.join(names[:5])}")
+        st.markdown(f"""
+        <div style="border:1px solid rgba(148,163,184,.22);border-radius:12px;padding:.85rem 1rem;margin:.6rem 0;background:rgba(15,23,42,.35);">
+          <div style="font-weight:850;color:#f8fafc;margin-bottom:.35rem;">{latest} 당일 거래 요약</div>
+          <div style="color:#cbd5e1;line-height:1.55;">총 {len(work):,}건 · 총 거래금액 <b>{_v5289_money_fmt(total_amt)}</b></div>
+          <div style="color:#94a3b8;font-size:.86rem;margin-top:.2rem;">수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>
+        </div>
+        """, unsafe_allow_html=True)
+        for i, x in enumerate(work, start=1):
+            kind = x["kind"] or "거래"
+            name = x["name"] or "-"
+            account = x["account"] or "-"
+            title = f"{account} 예수금 → {name} 매수" if "매수" in kind else f"{name} 매도 → {account} 예수금" if "매도" in kind else f"{name} {kind}"
+            memo_html = f"<div style='color:#94a3b8;margin-top:.3rem;'>메모: {x['memo']}</div>" if x["memo"] else ""
+            st.markdown(f"""
+            <div style="border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:.9rem 1rem;margin:.55rem 0;background:rgba(15,23,42,.28);">
+              <div style="font-weight:800;color:#e2e8f0;margin-bottom:.25rem;">{latest} · {i}번 거래 · {kind}</div>
+              <div style="font-size:1.08rem;font-weight:850;color:#f8fafc;">{title}</div>
+              <div style="color:#cbd5e1;margin-top:.38rem;">{name} · {_v5289_qty_fmt(x['qty'])} × {_v5289_price_fmt(x['price'])} = <b>{_v5289_money_fmt(x['amount'])}</b></div>
+              {memo_html}
+            </div>
+            """, unsafe_allow_html=True)
+    except Exception as e:
+        try:
+            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.28.12: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
+    return 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=최근일수)
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return 최근자산변화_표시_v52812(이동df, 최대표시=max(최대표시, 80))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_생성_v5288 = 최근자산변화_생성_v5289
+최근자산변화_생성_v5289 = 최근자산변화_생성_v5289
+최근자산변화_표시_v5288 = 최근자산변화_표시_v52812
+최근자산변화_표시_v5289 = 최근자산변화_표시_v52812
+최근자산변화_표시_v52810 = 최근자산변화_표시_v52812
+최근자산변화_표시_v52811 = 최근자산변화_표시_v52812
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    try:
+        _v52812_recent_cash_flow_card(거래df)
+    except Exception:
+        pass
+    이동df = 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화_표시_v52812(이동df, 최대표시=max(최대표시, 80))
+
+# ============================================================
+# end v5.28.12 recent-final-before-first-ui
+# ============================================================
+
 if 선택섹터 == "주요 모니터링":
     # v5.20.0: 첫 화면 = 내 보유종목 시세·수익률 → 시장 지수 순서로 표시
     대시보드기준거래 = 현재거래이력가져오기().copy()
