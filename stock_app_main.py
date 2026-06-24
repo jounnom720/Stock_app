@@ -19909,6 +19909,383 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # end v5.28.3 recent-ledger-reconcile
 # ============================================================
 
+
+# ============================================================
+# v5.28.7 individual-ledger-display-before-ui
+# ------------------------------------------------------------
+# 목적:
+# - 실제 화면 실행 분기 전에 최근 현금성 이동 해석/최근자산변화 표시 함수를 재고정합니다.
+# - 같은 날짜 다중 거래는 합산하지 않고 거래원장 행 단위로 각각 표시합니다.
+# - 최근 자산변화 리스트 컬럼 순서와 숫자 표기를 정리합니다.
+# - 포트폴리오 요약 카드의 '원원' 표기 오류를 제거합니다.
+# - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.28.7-individual-ledger-display-before-ui"
+
+
+def _v5287_text(x):
+    try:
+        if 'pd' in globals() and (x is None or pd.isna(x)):
+            return ""
+    except Exception:
+        if x is None:
+            return ""
+    s = str(x).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    if s.endswith('.0') and s[:-2].replace('-', '').isdigit():
+        s = s[:-2]
+    return s
+
+
+def _v5287_num(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        if isinstance(x, str):
+            x = x.replace(',', '').replace('원', '').replace('%', '').strip()
+            if x == '':
+                return default
+        if 'pd' in globals() and pd.isna(x):
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def _v5287_money(x, signed=False, dash_zero=False):
+    n = int(round(_v5287_num(x, 0)))
+    if dash_zero and n == 0:
+        return '-'
+    if signed and n > 0:
+        return f"+{n:,}원"
+    return f"{n:,}원"
+
+
+def _v5287_qty(x):
+    n = _v5287_num(x, 0)
+    if abs(n) < 1e-9:
+        return '-'
+    if abs(n - round(n)) < 1e-9:
+        return f"{int(round(n)):,}주"
+    return f"{n:,.4f}".rstrip('0').rstrip('.') + '주'
+
+
+def _v5287_price(x):
+    n = _v5287_num(x, 0)
+    if abs(n) < 1e-9:
+        return '-'
+    if abs(n - round(n)) < 1e-9:
+        return f"{int(round(n)):,}원"
+    return f"{n:,.2f}원"
+
+
+def _v5287_date(x):
+    try:
+        ts = pd.to_datetime(x, errors='coerce')
+        if pd.notna(ts):
+            return ts.strftime('%Y-%m-%d')
+    except Exception:
+        pass
+    return _v5287_text(x)[:10]
+
+
+def _v5287_trade_rows_from_ledger(거래df=None):
+    """거래원장을 최근자산변화 표시용 실거래 행으로 변환합니다."""
+    try:
+        if 거래df is None:
+            if '현재거래이력가져오기' in globals():
+                거래df = 현재거래이력가져오기()
+            else:
+                return pd.DataFrame()
+        if '_v5283_trade_rows_from_ledger' in globals():
+            out = _v5283_trade_rows_from_ledger(거래df)
+        else:
+            out = pd.DataFrame(거래df).copy()
+        out = pd.DataFrame(out).copy()
+        if out.empty:
+            return out
+        for c in ['날짜', '계좌', '구분', '종목코드', '종목명', '자동분석', '상세설명']:
+            if c not in out.columns:
+                out[c] = ''
+        for c in ['수량', '단가', '금액', '원금부분', '수익손실부분', '원장행번호']:
+            if c not in out.columns:
+                out[c] = 0
+            out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0)
+        out['날짜'] = out['날짜'].apply(_v5287_date)
+        out['행유형'] = '실거래'
+        out['실현손익'] = pd.to_numeric(out.get('수익손실부분', 0), errors='coerce').fillna(0)
+        out['원금'] = pd.to_numeric(out.get('원금부분', out.get('금액', 0)), errors='coerce').fillna(0)
+        return out
+    except Exception as e:
+        try:
+            logging.warning('v5287 ledger rows failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+
+def _v5287_latest_day_trade_items(거래df=None):
+    """최근 현금성 자산 이동 해석용: 가장 최근 거래일의 모든 거래를 행 단위로 반환합니다."""
+    rows = _v5287_trade_rows_from_ledger(거래df)
+    if rows is None or rows.empty:
+        return []
+    try:
+        rows = rows.copy()
+        rows['_dt_v5287'] = pd.to_datetime(rows['날짜'], errors='coerce')
+        rows = rows.dropna(subset=['_dt_v5287'])
+        rows = rows[rows['구분'].astype(str).str.contains('매수|매도|배당|입금|출금', na=False)].copy()
+        if rows.empty:
+            return []
+        latest_dt = rows['_dt_v5287'].max()
+        latest = rows[rows['_dt_v5287'] == latest_dt].copy()
+        latest['원장행번호'] = pd.to_numeric(latest.get('원장행번호', 0), errors='coerce').fillna(0)
+        latest = latest.sort_values('원장행번호', ascending=True)
+        items = []
+        for _, r in latest.iterrows():
+            구분 = _v5287_text(r.get('구분', '거래'))
+            계좌 = _v5287_text(r.get('계좌', ''))
+            종목명 = _v5287_text(r.get('종목명', '')) or _v5287_text(r.get('종목코드', ''))
+            수량 = _v5287_num(r.get('수량', 0), 0)
+            단가 = _v5287_num(r.get('단가', 0), 0)
+            금액 = _v5287_num(r.get('금액', 0), 0)
+            if '매수' in 구분:
+                설명 = f"{계좌} 예수금 → {종목명} 매수"
+            elif '매도' in 구분:
+                설명 = f"{종목명} 매도 → {계좌} 예수금"
+            else:
+                설명 = f"{계좌} {종목명} {구분}".strip()
+            items.append({
+                '날짜': _v5287_text(r.get('날짜', '')),
+                '구분': 구분,
+                '계좌': 계좌,
+                '종목명': 종목명,
+                '종목코드': _v5287_text(r.get('종목코드', '')),
+                '수량': 수량,
+                '단가': 단가,
+                '금액': 금액,
+                '설명': 설명,
+                '자동분석': _v5287_text(r.get('자동분석', '')),
+                '원장행번호': int(_v5287_num(r.get('원장행번호', 0), 0)),
+            })
+        return items
+    except Exception as e:
+        try:
+            logging.warning('v5287 latest day items failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return []
+
+
+def 자산변화통합최신이동후보_v52212(거래df=None, 비주식자산df=None, 최근일수=90):
+    items = _v5287_latest_day_trade_items(거래df)
+    if items:
+        latest_date = items[-1].get('날짜') or items[0].get('날짜')
+        return {
+            '거래목록': items,
+            '거래일자': latest_date,
+            '확인금액': sum(_v5287_num(i.get('금액', 0), 0) for i in items),
+            '설명': f"{latest_date} 거래이력 {len(items)}건",
+            '표시구분': '최근 거래일 거래이력',
+            '자동분석': '최근 거래일의 거래를 합산하지 않고 거래원장 건별로 표시합니다.',
+        }
+    return {}
+
+
+def 자산이동설명카드표시(이동후보, 제목="최근 자산 변화"):
+    """최근 현금성 자산 이동 해석: 최근 거래일의 거래이력을 건별로 표시합니다."""
+    try:
+        이동후보 = 이동후보 or {}
+        items = 이동후보.get('거래목록') if isinstance(이동후보, dict) else None
+        if items:
+            latest_date = _v5287_text(이동후보.get('거래일자', items[0].get('날짜', '')))
+            st.markdown(f"#### {제목}")
+            st.caption(f"{latest_date} 거래이력 {len(items):,}건 · 수량·단가·금액이 다른 거래는 합산하지 않고 건별로 표시합니다.")
+            for item in items:
+                line = f"{item.get('종목명','')} {item.get('구분','')} · {_v5287_qty(item.get('수량'))} × {_v5287_price(item.get('단가'))} = {_v5287_money(item.get('금액'))}"
+                with st.container(border=True):
+                    st.markdown(f"**{item.get('날짜','')} · {item.get('구분','거래')}**")
+                    st.markdown(f"### {item.get('설명','')}")
+                    st.caption(line)
+                    auto = _v5287_text(item.get('자동분석', '')) or '거래원장 기준 개별 거래입니다.'
+                    st.markdown(
+                        f"""
+                        <div style="padding:0.75rem 0.9rem;border-radius:10px;background:rgba(59,130,246,0.14);color:#bfdbfe;font-weight:650;line-height:1.45;">
+                            <span style="display:inline-block;color:#93c5fd;font-weight:800;margin-right:.35rem;">시스템 해석</span>{html.escape(auto)}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            return
+        # fallback: 기존 단일 후보 형식
+        if not 이동후보:
+            return
+        st.markdown(f"#### {제목}")
+        with st.container(border=True):
+            st.markdown(f"**{_v5287_text(이동후보.get('거래일자','최근 거래'))} · {_v5287_text(이동후보.get('표시구분') or 이동후보.get('방향') or '거래')}**")
+            st.markdown(f"### {_v5287_text(이동후보.get('설명',''))}")
+            st.caption(_v5287_money(이동후보.get('확인금액', 0)))
+    except Exception as e:
+        try:
+            st.caption(f"자산이동 설명 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def _v5287_display_df(df):
+    try:
+        out = pd.DataFrame(df).copy()
+    except Exception:
+        return pd.DataFrame()
+    if out.empty:
+        return out
+    if '행유형' not in out.columns:
+        out['행유형'] = '실거래'
+    if '실현손익' not in out.columns:
+        out['실현손익'] = out['수익손실부분'] if '수익손실부분' in out.columns else 0
+    needed = ['날짜', '행유형', '구분', '종목명', '수량', '단가', '금액', '실현손익', '계좌', '자동분석']
+    for c in needed:
+        if c not in out.columns:
+            out[c] = 0 if c in ['수량', '단가', '금액', '실현손익'] else ''
+    out = out[needed].copy().rename(columns={'행유형': '유형'})
+    out['날짜'] = out['날짜'].apply(lambda x: _v5287_text(x)[:10])
+    for c in ['유형', '구분', '종목명', '계좌', '자동분석']:
+        out[c] = out[c].apply(_v5287_text)
+    out['수량'] = out['수량'].apply(_v5287_qty)
+    out['단가'] = out['단가'].apply(_v5287_price)
+    out['금액'] = out['금액'].apply(_v5287_money)
+    out['실현손익'] = out['실현손익'].apply(lambda v: _v5287_money(v, dash_zero=False))
+    return out
+
+
+def 최근자산변화_생성_v5287(거래df=None, 비주식자산df=None, 최근일수=3650):
+    try:
+        ledger = _v5287_trade_rows_from_ledger(거래df)
+        설명행 = pd.DataFrame()
+        # 비주식/현금성 설명행은 기존 v5.28.3 생성 결과에서 설명행만 가져옵니다.
+        try:
+            if '최근자산변화_생성_v5283' in globals():
+                old = 최근자산변화_생성_v5283(거래df, 비주식자산df, 최근일수=최근일수)
+                old = pd.DataFrame(old).copy()
+                if not old.empty:
+                    if '행유형' in old.columns:
+                        설명행 = old[old['행유형'].astype(str).str.contains('설명행|자산이동', na=False)].copy()
+                    else:
+                        src = old.get('출처', pd.Series([''] * len(old))).astype(str)
+                        설명행 = old[~src.str.contains('v5283_거래원장|거래원장', na=False)].copy()
+        except Exception:
+            설명행 = pd.DataFrame()
+        frames = [ledger]
+        if 설명행 is not None and not 설명행.empty:
+            frames.append(설명행)
+        df = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+        if df.empty:
+            return df
+        for c in ['금액', '원금부분', '수익손실부분', '수량', '단가', '원장행번호']:
+            if c not in df.columns:
+                df[c] = 0
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        if '행유형' not in df.columns:
+            df['행유형'] = '실거래'
+        df.loc[df.get('출처', '').astype(str).str.contains('v5283_거래원장|v5287_거래원장|거래원장', na=False), '행유형'] = '실거래'
+        df['날짜_dt_v5287'] = pd.to_datetime(df.get('날짜', ''), errors='coerce')
+        df['원장행번호_sort_v5287'] = pd.to_numeric(df.get('원장행번호', 0), errors='coerce').fillna(0)
+        df = df.sort_values(['날짜_dt_v5287', '원장행번호_sort_v5287', '금액'], ascending=[False, False, False], kind='mergesort')
+        df = df.drop(columns=['날짜_dt_v5287', '원장행번호_sort_v5287'], errors='ignore').reset_index(drop=True)
+        try:
+            st.session_state['v5287_ledger_rows'] = int(len(ledger))
+            st.session_state['v5287_recent_rows'] = int(len(df))
+        except Exception:
+            pass
+        return df
+    except Exception as e:
+        try:
+            logging.warning('v5287 recent create failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+
+def 최근자산변화_표시_v5287(이동df, 최대표시=80):
+    try:
+        df = pd.DataFrame(이동df).copy()
+        if df.empty:
+            st.markdown('### 🔎 최근 자산변화')
+            st.caption('최근 자산변화로 표시할 내역이 없습니다.')
+            return df
+        st.markdown('### 🔎 최근 자산변화')
+        원장실현손익 = int(st.session_state.get('v5269_ledger_realized_total', st.session_state.get('v5284_ledger_realized_total', 0)))
+        c1, c2, c3 = st.columns(3)
+        c1.metric('자산변화', f"{len(df):,}건")
+        c2.metric('원장 거래행', f"{int(st.session_state.get('v5287_ledger_rows', 0)):,}건")
+        c3.metric('원장 기준 실현손익', _v5287_money(원장실현손익))
+        표시 = _v5287_display_df(df.head(max(최대표시, 80)).copy())
+        if '표데이터프레임' in globals():
+            표데이터프레임(표시, width='stretch', hide_index=True)
+        else:
+            st.dataframe(표시, use_container_width=True, hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 v5.28.7 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return pd.DataFrame(이동df)
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
+    return 최근자산변화_생성_v5287(거래df, 비주식자산df, 최근일수=최근일수)
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return 최근자산변화_표시_v5287(이동df, 최대표시=max(최대표시, 80))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    try:
+        if '_v5269_ledger_detail_total' in globals():
+            _detail, ledger_total = _v5269_ledger_detail_total(거래df)
+            if ledger_total is not None:
+                st.session_state['v5269_ledger_realized_total'] = int(ledger_total)
+                st.session_state['v5284_ledger_realized_total'] = int(ledger_total)
+    except Exception:
+        pass
+    이동df = 최근자산변화_생성_v5287(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
+
+
+def 포트폴리오요약카드표시(요약정보):
+    """v5.28.7: 손익 카드의 '원원' 표시를 제거합니다."""
+    if 모바일여부():
+        카드1, 카드2 = st.columns(2)
+        카드1.metric('총 투자원금', 금액표시(요약정보['총투자원금']))
+        카드2.metric('총 평가금액', 금액표시(요약정보['총평가금액']))
+        카드3, 카드4 = st.columns(2)
+        카드3.metric('미실현 손익', _v5287_money(요약정보['총평가손익'], signed=True))
+        카드4.metric('보유 수익률', 수익률문자열(요약정보['총수익률']))
+        카드5, 카드6 = st.columns(2)
+        카드5.metric('보유 종목 수', f"{요약정보['보유종목수']}개")
+        카드6.metric('최대 비중 종목', 요약정보['최대비중종목명'])
+    else:
+        카드1, 카드2, 카드3, 카드4 = st.columns(4)
+        카드1.metric('총 투자원금', 금액표시(요약정보['총투자원금']))
+        카드2.metric('총 평가금액', 금액표시(요약정보['총평가금액']))
+        카드3.metric('미실현 손익', _v5287_money(요약정보['총평가손익'], signed=True))
+        카드4.metric('보유 수익률', 수익률문자열(요약정보['총수익률']))
+        카드5, 카드6, 카드7, 카드8 = st.columns(4)
+        카드5.metric('실현 손익', _v5287_money(요약정보['총실현손익'], signed=True))
+        카드6.metric('보유 종목 수', f"{요약정보['보유종목수']}개")
+        카드7.metric('최대 비중 종목', 요약정보['최대비중종목명'], f"{요약정보['최대비중']:.2f}%")
+        카드8.metric('보유평가 기준 종목', f"{요약정보['조회실패건수']}개")
+
+# ============================================================
+# end v5.28.7 individual-ledger-display-before-ui
+# ============================================================
+
 if 선택섹터 == "포트폴리오 현황":
     # 포트폴리오 계산 결과
     계산포트폴리오 = 최적화결과["계산포트폴리오"]
