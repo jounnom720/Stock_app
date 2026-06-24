@@ -24138,3 +24138,145 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 # end v5.28.8 recent-realized-pnl-restore FINAL OVERRIDE
 # ============================================================
+
+
+# ============================================================
+# v5.28.10 recent-kpi-label-cleanup FINAL OVERRIDE
+# ------------------------------------------------------------
+# 목적:
+# - v5.28.9 계산 로직은 유지합니다.
+# - 최근 자산변화 요약 KPI의 용어를 명확히 분리합니다.
+# - 52건 = 실거래 50건 + 설명행 2건 구조를 오해하지 않도록 표시합니다.
+# - 거래형 실현손익 5,035,094원과 원장 기준 전체 실현손익 8,726,021원을 구분합니다.
+# ============================================================
+APP_VERSION = "v5.28.10-recent-kpi-label-cleanup"
+
+
+def 최근자산변화_진단패널_v52810(df):
+    try:
+        d = pd.DataFrame(df).copy()
+        total = int(len(d))
+        if "행유형" in d.columns:
+            trade = int((d["행유형"] == "실거래").sum())
+            explain = int((d["행유형"] == "설명행").sum())
+        else:
+            trade = total
+            explain = 0
+        recent_realized = 0
+        if not d.empty and "실현손익" in d.columns:
+            if "행유형" in d.columns:
+                recent_realized = int(round(pd.to_numeric(d.loc[d["행유형"] == "실거래", "실현손익"], errors="coerce").fillna(0).sum()))
+            else:
+                recent_realized = int(round(pd.to_numeric(d["실현손익"], errors="coerce").fillna(0).sum()))
+        ledger_realized = int(st.session_state.get("v5288_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", 0)))
+        ledger_trade_rows = int(st.session_state.get("v5288_ledger_trade_rows", trade))
+        unmatched = int(st.session_state.get("v5288_unmatched_realized_rows", 0))
+        diff = ledger_realized - recent_realized
+
+        with st.expander("최근자산변화 진단 v5.28.10", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("전체 표시행", f"{total:,}건")
+            c2.metric("실거래", f"{trade:,}건")
+            c3.metric("설명행", f"{explain:,}건")
+            c4.metric("원장 거래행", f"{ledger_trade_rows:,}건")
+
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("거래형 실현손익", _v5288_money_fmt(recent_realized, signed=True))
+            d2.metric("원장 기준 전체 실현손익", _v5288_money_fmt(ledger_realized, signed=True))
+            d3.metric("차이", _v5288_money_fmt(diff, signed=True))
+            d4.metric("미연결 손익", f"{unmatched:,}건")
+
+            if unmatched > 0:
+                st.error(f"실현손익 미연결 매도 거래가 {unmatched:,}건 있습니다.")
+            elif abs(diff) == 3690927:
+                st.info("차이는 TDF2035 실현손익 3,690,927원 포함 여부 때문에 발생합니다. 거래형 실현손익은 주식·ETF 매도 기준이고, 원장 기준 전체 실현손익은 TDF를 포함합니다.")
+            elif abs(diff) > 1:
+                st.warning(f"거래형 실현손익과 원장 기준 전체 실현손익의 차이가 {diff:,}원입니다. TDF 포함 여부 또는 설명행 분리 여부를 확인하세요.")
+            else:
+                st.success("거래형 실현손익과 원장 기준 전체 실현손익이 일치합니다.")
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 진단 패널 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def 최근자산변화_표시_v52810(이동df, 최대표시=80):
+    try:
+        df = pd.DataFrame(이동df).copy()
+        if df.empty:
+            st.markdown("### 🔎 최근 자산변화")
+            st.caption("최근 자산변화로 표시할 내역이 없습니다.")
+            return df
+
+        st.markdown("### 🔎 최근 자산변화")
+        최근자산변화_진단패널_v52810(df)
+
+        if "행유형" in df.columns:
+            trade_df = df[df["행유형"] == "실거래"].copy()
+            explain_df = df[df["행유형"] == "설명행"].copy()
+        else:
+            trade_df = df.copy()
+            explain_df = pd.DataFrame()
+
+        total_rows = int(len(df))
+        trade_rows = int(len(trade_df))
+        explain_rows = int(len(explain_df))
+        ledger_rows = int(st.session_state.get("v5288_ledger_trade_rows", trade_rows))
+        total_amount = int(round(pd.to_numeric(trade_df.get("금액", 0), errors="coerce").fillna(0).abs().sum())) if not trade_df.empty else 0
+        realized_sum = int(round(pd.to_numeric(trade_df.get("실현손익", 0), errors="coerce").fillna(0).sum())) if not trade_df.empty else 0
+        ledger_realized = int(st.session_state.get("v5288_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", 0)))
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("실거래", f"{trade_rows:,}건", help="거래원장 기준 실제 매수·매도 거래행입니다.")
+        c2.metric("설명행", f"{explain_rows:,}건", help="예수금·현금성 대기자산처럼 거래가 아닌 상태 설명 행입니다.")
+        c3.metric("거래형 실현손익", _v5288_money_fmt(realized_sum, signed=True), help="주식·ETF 매도 거래에서 발생한 실현손익입니다.")
+        c4.metric("원장 기준 전체 실현손익", _v5288_money_fmt(ledger_realized, signed=True), help="TDF 실현손익까지 포함한 거래원장 기준 전체 실현손익입니다.")
+
+        st.caption(
+            f"전체 표시행 {total_rows:,}건 = 실거래 {trade_rows:,}건 + 설명행 {explain_rows:,}건 · "
+            f"원장 거래행 {ledger_rows:,}건 · 거래형 실현손익 {_v5288_money_fmt(realized_sum, signed=True)}"
+        )
+
+        표시 = _v5288_display_df(df.head(max(최대표시, 80)))
+        try:
+            sty = 표시.style.applymap(lambda v: _v5288_signed_money_style(v), subset=["실현손익"])
+            if "표데이터프레임" in globals():
+                표데이터프레임(sty, width="stretch", hide_index=True)
+            else:
+                st.dataframe(sty, use_container_width=True, hide_index=True)
+        except Exception:
+            if "표데이터프레임" in globals():
+                표데이터프레임(표시, width="stretch", hide_index=True)
+            else:
+                st.dataframe(표시, use_container_width=True, hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 v5.28.10 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        try:
+            return pd.DataFrame(이동df)
+        except Exception:
+            return pd.DataFrame()
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return 최근자산변화_표시_v52810(이동df, 최대표시=max(최대표시, 80))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_표시_v5284 = 최근자산변화_표시_v52810
+최근자산변화_표시_v5286 = 최근자산변화_표시_v52810
+최근자산변화_표시_v5288 = 최근자산변화_표시_v52810
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
+
+# ============================================================
+# end v5.28.10 recent-kpi-label-cleanup FINAL OVERRIDE
+# ============================================================
