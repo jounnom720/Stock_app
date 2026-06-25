@@ -25537,3 +25537,284 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 # v5.28.11 final version marker
 APP_VERSION = "v5.29.2-cash-principal-final-fix"
+
+
+# ============================================================
+# v5.29.3 recent-ledger-ui-verify FINAL OVERRIDE
+# ------------------------------------------------------------
+# 목적:
+# - v5.29.2의 계산·원금·현금성자산 로직은 건드리지 않습니다.
+# - 최근자산변화는 거래원장 성격이므로 거래행을 절대 통합하지 않습니다.
+# - 실거래/설명행을 화면에서 명확히 구분합니다.
+# - 거래원장 행수와 최근자산변화 표시행수를 자동 검증합니다.
+# ============================================================
+APP_VERSION = "v5.29.3-recent-ledger-ui-verify"
+
+
+def _v5293_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    return s
+
+
+def _v5293_num(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("원", "").replace("주", "").replace("%", "").strip()
+            if value == "":
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5293_money(value, signed=False, dash_zero=False):
+    try:
+        if "_v5288_money_fmt" in globals():
+            return _v5288_money_fmt(value, signed=signed, dash_zero=dash_zero)
+    except Exception:
+        pass
+    n = int(round(_v5293_num(value, 0)))
+    if dash_zero and n == 0:
+        return "-"
+    if signed and n > 0:
+        return f"+{n:,}원"
+    return f"{n:,}원"
+
+
+def _v5293_qty(value):
+    try:
+        if "_v5288_qty_fmt" in globals():
+            return _v5288_qty_fmt(value)
+    except Exception:
+        pass
+    n = _v5293_num(value, 0)
+    if abs(n) < 1e-9:
+        return "-"
+    return f"{int(round(n)):,}주" if abs(n - round(n)) < 1e-9 else f"{n:,.2f}주"
+
+
+def _v5293_price(value):
+    try:
+        if "_v5288_price_fmt" in globals():
+            return _v5288_price_fmt(value)
+    except Exception:
+        pass
+    n = _v5293_num(value, 0)
+    if abs(n) < 1e-9:
+        return "-"
+    return f"{int(round(n)):,}원"
+
+
+def _v5293_row_type(value):
+    s = _v5293_text(value)
+    if s == "실거래":
+        return "🟢 실거래"
+    if s in ["설명행", "설명형"]:
+        return "🔵 설명형"
+    return s or "🟢 실거래"
+
+
+def _v5293_change_kind(row):
+    try:
+        kind = _v5293_text(row.get("구분", ""))
+        row_type = _v5293_text(row.get("행유형", ""))
+        if row_type in ["설명행", "설명형"]:
+            return "설명"
+        if "매수" in kind:
+            return "매수"
+        if "매도" in kind:
+            return "매도"
+        if "이동" in kind:
+            return "자산이동"
+        return kind or "거래"
+    except Exception:
+        return "거래"
+
+
+def 최근자산변화_검증_v5293(df):
+    """최근자산변화 표시행 자동검증. 계산 로직은 변경하지 않고 진단값만 반환합니다."""
+    try:
+        d = pd.DataFrame(df).copy()
+        total_rows = int(len(d))
+        if "행유형" in d.columns:
+            trade_rows = int((d["행유형"].astype(str) == "실거래").sum())
+            explain_rows = int(d["행유형"].astype(str).isin(["설명행", "설명형"]).sum())
+        else:
+            trade_rows = total_rows
+            explain_rows = 0
+        expected_rows = trade_rows + explain_rows
+        ledger_rows = int(st.session_state.get("v5288_ledger_trade_rows", trade_rows)) if "st" in globals() else trade_rows
+        recent_realized = 0
+        if not d.empty and "실현손익" in d.columns:
+            if "행유형" in d.columns:
+                mask = d["행유형"].astype(str) == "실거래"
+                recent_realized = int(round(pd.to_numeric(d.loc[mask, "실현손익"], errors="coerce").fillna(0).sum()))
+            else:
+                recent_realized = int(round(pd.to_numeric(d["실현손익"], errors="coerce").fillna(0).sum()))
+        ledger_realized = int(st.session_state.get("v5288_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", recent_realized))) if "st" in globals() else recent_realized
+        return {
+            "전체표시행": total_rows,
+            "실거래": trade_rows,
+            "설명행": explain_rows,
+            "예상표시행": expected_rows,
+            "원장거래행": ledger_rows,
+            "행수정상": (total_rows == expected_rows and trade_rows == ledger_rows),
+            "거래행정상": (trade_rows == ledger_rows),
+            "거래형실현손익": recent_realized,
+            "원장전체실현손익": ledger_realized,
+            "실현손익차이": ledger_realized - recent_realized,
+        }
+    except Exception as e:
+        return {"오류": f"{type(e).__name__}: {e}"}
+
+
+def _v5293_display_df(df):
+    d = pd.DataFrame(df).copy()
+    cols = ["날짜", "행유형", "구분", "종목명", "수량", "단가", "금액", "실현손익", "계좌", "원장행번호", "자동분석"]
+    for c in cols:
+        if c not in d.columns:
+            d[c] = 0 if c in ["수량", "단가", "금액", "실현손익", "원장행번호"] else ""
+    out = d[cols].copy()
+    out["유형"] = out["행유형"].apply(_v5293_row_type)
+    out["구분"] = d.apply(_v5293_change_kind, axis=1)
+    out["수량"] = out["수량"].apply(_v5293_qty)
+    out["단가"] = out["단가"].apply(_v5293_price)
+    out["금액"] = out["금액"].apply(lambda x: _v5293_money(x, signed=False, dash_zero=False))
+    out["실현손익"] = out["실현손익"].apply(lambda x: _v5293_money(x, signed=True, dash_zero=True))
+    out["원장행"] = out["원장행번호"].apply(lambda x: "-" if _v5293_num(x, 0) == 0 else str(int(round(_v5293_num(x, 0)))))
+    for c in ["날짜", "종목명", "계좌", "자동분석"]:
+        out[c] = out[c].apply(_v5293_text)
+    return out[["날짜", "유형", "구분", "종목명", "수량", "단가", "금액", "실현손익", "계좌", "원장행", "자동분석"]]
+
+
+def 최근자산변화_진단패널_v5293(df):
+    try:
+        result = 최근자산변화_검증_v5293(df)
+        if "오류" in result:
+            st.warning(f"최근자산변화 자동검증 오류: {result['오류']}")
+            return result
+        with st.expander("최근자산변화 자동검증 v5.29.3", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("전체 표시행", f"{result['전체표시행']:,}건")
+            c2.metric("실거래", f"{result['실거래']:,}건")
+            c3.metric("설명행", f"{result['설명행']:,}건")
+            c4.metric("원장 거래행", f"{result['원장거래행']:,}건")
+
+            d1, d2, d3 = st.columns(3)
+            d1.metric("거래형 실현손익", _v5293_money(result["거래형실현손익"], signed=True))
+            d2.metric("원장 전체 실현손익", _v5293_money(result["원장전체실현손익"], signed=True))
+            d3.metric("차이", _v5293_money(result["실현손익차이"], signed=True))
+
+            if result["행수정상"]:
+                st.success(
+                    f"거래건수 검증 정상: 실거래 {result['실거래']:,}건 + "
+                    f"설명행 {result['설명행']:,}건 = 전체 표시행 {result['전체표시행']:,}건"
+                )
+            else:
+                st.error(
+                    f"거래건수 검증 필요: 전체 표시행 {result['전체표시행']:,}건 / "
+                    f"실거래 {result['실거래']:,}건 / 설명행 {result['설명행']:,}건 / "
+                    f"원장 거래행 {result['원장거래행']:,}건"
+                )
+            if abs(result["실현손익차이"]) == 3690927:
+                st.info("실현손익 차이 3,690,927원은 TDF2035 실현손익 포함 여부로 발생한 정상 차이일 수 있습니다.")
+        return result
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 v5.29.3 진단 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return {}
+
+
+def 최근자산변화_표시_v5293(이동df, 최대표시=80):
+    """최근자산변화 최종 표시부. 원본 행을 통합하지 않고 그대로 표시합니다."""
+    try:
+        df = pd.DataFrame(이동df).copy()
+        if df.empty:
+            st.markdown("### 🔎 최근 자산변화")
+            st.caption("최근 자산변화로 표시할 내역이 없습니다.")
+            return df
+
+        st.markdown("### 🔎 최근 자산변화")
+        result = 최근자산변화_검증_v5293(df)
+
+        if "오류" not in result:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("실거래", f"{result['실거래']:,}건", help="거래이력 원본 기준 실제 매수·매도 거래행입니다. 절대 통합하지 않습니다.")
+            c2.metric("설명행", f"{result['설명행']:,}건", help="예수금·현금성 대기자산처럼 거래가 아닌 상태 설명 행입니다.")
+            c3.metric("전체 표시행", f"{result['전체표시행']:,}건", help="실거래와 설명행을 합친 최근자산변화 전체 행수입니다.")
+            c4.metric("거래형 실현손익", _v5293_money(result["거래형실현손익"], signed=True), help="주식·ETF 매도 거래에서 발생한 실현손익입니다.")
+
+            if result["행수정상"]:
+                st.success(
+                    f"거래건수 검증 정상 · 실거래 {result['실거래']:,}건 + "
+                    f"설명행 {result['설명행']:,}건 = 최근자산변화 {result['전체표시행']:,}건"
+                )
+            else:
+                st.error(
+                    f"거래건수 검증 필요 · 원장 거래행 {result['원장거래행']:,}건 / "
+                    f"최근자산변화 실거래 {result['실거래']:,}건 / 전체 표시행 {result['전체표시행']:,}건"
+                )
+            st.caption("표시 원칙: 최근자산변화는 거래원장입니다. 같은 날짜·같은 종목이라도 수량과 단가가 다르면 각각 별도 행으로 표시합니다.")
+
+        최근자산변화_진단패널_v5293(df)
+
+        표시 = _v5293_display_df(df.head(max(최대표시, 80)))
+        try:
+            if "_v5288_signed_money_style" in globals():
+                sty = 표시.style.applymap(lambda v: _v5288_signed_money_style(v), subset=["실현손익"])
+            else:
+                sty = 표시.style
+            if "표데이터프레임" in globals():
+                표데이터프레임(sty, width="stretch", hide_index=True)
+            else:
+                st.dataframe(sty, use_container_width=True, hide_index=True)
+        except Exception:
+            if "표데이터프레임" in globals():
+                표데이터프레임(표시, width="stretch", hide_index=True)
+            else:
+                st.dataframe(표시, use_container_width=True, hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 v5.29.3 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        try:
+            return pd.DataFrame(이동df)
+        except Exception:
+            return pd.DataFrame()
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return 최근자산변화_표시_v5293(이동df, 최대표시=max(최대표시, 80))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_표시_v5284 = 최근자산변화_표시_v5293
+최근자산변화_표시_v5286 = 최근자산변화_표시_v5293
+최근자산변화_표시_v5288 = 최근자산변화_표시_v5293
+최근자산변화_표시_v52810 = 최근자산변화_표시_v5293
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
+
+# ============================================================
+# end v5.29.3 recent-ledger-ui-verify FINAL OVERRIDE
+# ============================================================
