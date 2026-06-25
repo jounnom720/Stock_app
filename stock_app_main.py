@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.27.1-recent-explain-split-cleanup"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -13938,7 +13938,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.26.1-accounting-core-align-ui"
+    APP_VERSION = "v5.29.0-final-ui-polish"
 except Exception:
     pass
 
@@ -14333,7 +14333,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5239_text(value):
@@ -14579,7 +14579,7 @@ for idx, 섹터명 in enumerate(섹터목록):
 # - 회계검증과 동일한 평균단가 방식으로 거래원장을 직접 순회하여 실현손익 계산
 # - 거래원장 50건은 건별 유지, 설명행은 별도 행유형으로 분리
 # ============================================================
-APP_VERSION = "v5.28.9-recent-realized-direct-calc"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5289_text(value):
@@ -15049,7 +15049,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - v5.28.11에서 _v5288_money_fmt 미정의로 자산변화 내역이 사라진 오류를 수정합니다.
 # - 거래원장 50건 + 설명행 2건, 거래형 실현손익 5,035,094원 구조를 유지합니다.
 # ============================================================
-APP_VERSION = "v5.28.12-recent-final-before-first-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 # v5.28.11/과거 래퍼가 참조하는 v5288 포맷명을 v5289 기준으로 안전 연결합니다.
 try:
@@ -15251,6 +15251,315 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 # end v5.28.12 recent-final-before-first-ui
 # ============================================================
+
+
+
+# ============================================================
+# v5.29.0 final-ui-polish BEFORE UI
+# ------------------------------------------------------------
+# 목적:
+# - v5.28.12에서 안정화된 회계/실현손익/거래원장 계산은 건드리지 않습니다.
+# - 최근 자산변화 KPI와 최근 현금성 자산 이동 해석의 표시만 정리합니다.
+# - 실거래/설명행 구분, 거래형 실현손익, 원장 기준 전체 실현손익을 명확히 표시합니다.
+# ============================================================
+
+APP_VERSION = "v5.29.0-final-ui-polish"
+
+
+def _v529_safe_df(obj):
+    try:
+        return pd.DataFrame(obj).copy()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _v529_money(value, signed=False):
+    try:
+        return _v5289_money_fmt(value, signed=signed)
+    except Exception:
+        try:
+            v = float(value or 0)
+            prefix = "+" if signed and v > 0 else ""
+            return f"{prefix}{int(round(v)):,}원"
+        except Exception:
+            return "0원"
+
+
+def _v529_qty(value):
+    try:
+        return _v5289_qty_fmt(value)
+    except Exception:
+        try:
+            v = float(value or 0)
+            return f"{int(round(v)):,}주" if abs(v) >= 1 else "-"
+        except Exception:
+            return "-"
+
+
+def _v529_price(value):
+    try:
+        return _v5289_price_fmt(value)
+    except Exception:
+        try:
+            v = float(value or 0)
+            return f"{int(round(v)):,}원" if abs(v) >= 1 else "-"
+        except Exception:
+            return "-"
+
+
+def _v529_text(value):
+    try:
+        return _v5289_text(value)
+    except Exception:
+        try:
+            if value is None or pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        return str(value or "").strip()
+
+
+def _v529_profit_css(value):
+    try:
+        return _v5289_profit_css(value)
+    except Exception:
+        s = str(value)
+        if s.startswith("+"):
+            return "color:#22c55e;font-weight:700;"
+        if s.startswith("-"):
+            return "color:#ef4444;font-weight:700;"
+        return "color:#94a3b8;"
+
+
+def _v529_display_df(df):
+    d = _v529_safe_df(df)
+    cols = ["날짜", "유형", "구분", "종목명", "수량", "단가", "금액", "실현손익", "계좌", "자동분석"]
+    for c in cols:
+        if c not in d.columns:
+            d[c] = 0 if c in ["수량", "단가", "금액", "실현손익"] else ""
+    d = d[cols].copy()
+    d["수량"] = d["수량"].apply(_v529_qty)
+    d["단가"] = d["단가"].apply(_v529_price)
+    d["금액"] = d["금액"].apply(_v529_money)
+    d["실현손익"] = d["실현손익"].apply(lambda x: _v529_money(x, signed=True))
+    for c in ["날짜", "유형", "구분", "종목명", "계좌", "자동분석"]:
+        d[c] = d[c].apply(_v529_text)
+    return d
+
+
+def _v529_recent_summary_numbers(df):
+    d = _v529_safe_df(df)
+    if d.empty:
+        return 0, 0, 0, 0, 0, 0
+    if "행유형" in d.columns:
+        trade = d[d["행유형"].astype(str) == "실거래"].copy()
+        explain = d[d["행유형"].astype(str) == "설명행"].copy()
+    else:
+        trade = d.copy()
+        explain = pd.DataFrame()
+    trade_realized = 0
+    if not trade.empty and "실현손익" in trade.columns:
+        trade_realized = int(round(pd.to_numeric(trade["실현손익"], errors="coerce").fillna(0).sum()))
+    ledger_realized = int(st.session_state.get("v5289_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", 0)))
+    diff = ledger_realized - trade_realized
+    return len(d), len(trade), len(explain), trade_realized, ledger_realized, diff
+
+
+def 최근자산변화_진단패널_v529(df):
+    try:
+        total, trade_count, explain_count, trade_realized, ledger_realized, diff = _v529_recent_summary_numbers(df)
+
+        with st.expander("최근자산변화 진단 v5.29", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("실거래", f"{trade_count:,}건")
+            c2.metric("설명행", f"{explain_count:,}건")
+            c3.metric("거래형 실현손익", _v529_money(trade_realized, signed=True))
+            c4.metric("원장 기준 전체 실현손익", _v529_money(ledger_realized, signed=True))
+
+            if explain_count:
+                st.caption(f"전체 표시행 {total:,}건 = 실거래 {trade_count:,}건 + 설명행 {explain_count:,}건")
+            if abs(diff) == 3690927:
+                st.info("거래형 실현손익과 원장 기준 전체 실현손익의 차이는 TDF2035 실현손익 3,690,927원 포함 여부입니다.")
+            elif abs(diff) > 1:
+                st.warning(f"거래형 실현손익과 원장 기준 전체 실현손익 차이: {_v529_money(diff, signed=True)}")
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 진단 표시 오류 v5.29: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def 최근자산변화_표시_v529(이동df, 최대표시=80):
+    try:
+        df = _v529_safe_df(이동df)
+        st.markdown("### 🔎 최근 자산변화")
+        if df.empty:
+            st.caption("최근 자산변화 표시 대상이 없습니다.")
+            return df
+
+        total, trade_count, explain_count, trade_realized, ledger_realized, diff = _v529_recent_summary_numbers(df)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("실거래", f"{trade_count:,}건")
+        c2.metric("설명행", f"{explain_count:,}건")
+        c3.metric("거래형 실현손익", _v529_money(trade_realized, signed=True))
+        c4.metric("원장 기준 전체 실현손익", _v529_money(ledger_realized, signed=True))
+
+        if abs(diff) == 3690927:
+            st.caption("거래형 실현손익은 주식·ETF 매도 기준이며, 원장 기준 전체 실현손익은 TDF2035 실현손익 3,690,927원을 포함합니다.")
+        elif abs(diff) > 1:
+            st.warning(f"거래형 실현손익과 원장 기준 전체 실현손익 차이: {_v529_money(diff, signed=True)}")
+        else:
+            st.caption(f"전체 표시행 {total:,}건 = 실거래 {trade_count:,}건 + 설명행 {explain_count:,}건")
+
+        최근자산변화_진단패널_v529(df)
+
+        show_explain = False
+        if explain_count:
+            show_explain = st.checkbox("설명행 포함해서 보기", value=False, key="v529_recent_show_explain")
+        if "행유형" in df.columns and not show_explain:
+            view = df[df["행유형"].astype(str) == "실거래"].copy()
+        else:
+            view = df.copy()
+
+        표시 = _v529_display_df(view.head(max(최대표시, 80)))
+        try:
+            sty = 표시.style.map(lambda v: _v529_profit_css(v), subset=["실현손익"])
+        except Exception:
+            try:
+                sty = 표시.style.applymap(lambda v: _v529_profit_css(v), subset=["실현손익"])
+            except Exception:
+                sty = 표시
+        try:
+            if "표데이터프레임" in globals():
+                표데이터프레임(sty, width="stretch", hide_index=True)
+            else:
+                st.dataframe(sty, use_container_width=True, hide_index=True)
+        except Exception:
+            if "표데이터프레임" in globals():
+                표데이터프레임(표시, width="stretch", hide_index=True)
+            else:
+                st.dataframe(표시, use_container_width=True, hide_index=True)
+
+        if explain_count and not show_explain:
+            with st.expander(f"설명행 {explain_count:,}건 보기", expanded=False):
+                explain_df = df[df["행유형"].astype(str) == "설명행"].copy() if "행유형" in df.columns else pd.DataFrame()
+                if not explain_df.empty:
+                    ex_display = _v529_display_df(explain_df)
+                    if "표데이터프레임" in globals():
+                        표데이터프레임(ex_display, width="stretch", hide_index=True)
+                    else:
+                        st.dataframe(ex_display, use_container_width=True, hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 표시 오류 v5.29: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return _v529_safe_df(이동df)
+
+
+def _v529_latest_cash_flow_card(거래df=None):
+    try:
+        df = _v5289_trade_df(거래df)
+        if df.empty or "거래일자" not in df.columns:
+            return
+        df = df.copy()
+        df["_date_v529"] = df["거래일자"].apply(_v5289_date)
+        latest = df["_date_v529"].dropna().max()
+        if not latest:
+            return
+        today = df[df["_date_v529"] == latest].copy()
+        if "거래구분" in today.columns:
+            today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
+        if today.empty:
+            return
+
+        work = []
+        for _, r in today.sort_index().iterrows():
+            kind = _v529_text(r.get("거래구분", ""))
+            name = _v529_text(r.get("종목명", "")) or _v529_text(r.get("종목코드", ""))
+            qty = abs(_v5289_num(r.get("거래수량", r.get("수량", 0)), 0))
+            price = abs(_v5289_num(r.get("거래단가", r.get("단가", 0)), 0))
+            amount = abs(_v5289_num(r.get("거래금액", r.get("금액", 0)), 0))
+            if amount <= 0 and qty > 0 and price > 0:
+                amount = abs(qty * price)
+            account = _v529_text(r.get("운용사", r.get("계좌", "")))
+            memo = _v529_text(r.get("비고", r.get("메모", "")))
+            work.append({"kind": kind, "name": name, "qty": qty, "price": price, "amount": amount, "account": account, "memo": memo})
+
+        total_amt = int(round(sum(x["amount"] for x in work)))
+        total_qty = int(round(sum(x["qty"] for x in work)))
+        buy_count = sum(1 for x in work if "매수" in x["kind"])
+        sell_count = sum(1 for x in work if "매도" in x["kind"])
+        names = []
+        for x in work:
+            if x["name"] and x["name"] not in names:
+                names.append(x["name"])
+        main_name = names[0] if len(names) == 1 else ", ".join(names[:3])
+
+        st.markdown("### 최근 현금성 자산 이동 해석")
+        st.markdown(f"""
+        <div style="border:1px solid rgba(148,163,184,.22);border-radius:14px;padding:1rem 1.1rem;margin:.7rem 0;background:rgba(15,23,42,.35);">
+          <div style="font-weight:850;color:#f8fafc;margin-bottom:.35rem;">{latest} 당일 거래 요약</div>
+          <div style="color:#e2e8f0;font-size:1.05rem;font-weight:800;">{main_name} · 총 {len(work):,}건</div>
+          <div style="color:#cbd5e1;line-height:1.65;margin-top:.35rem;">
+            매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 수량 {_v529_qty(total_qty)} · 총 거래금액 <b>{_v529_money(total_amt)}</b>
+          </div>
+          <div style="color:#94a3b8;font-size:.86rem;margin-top:.25rem;">수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for x in work:
+            kind = x["kind"] or "거래"
+            name = x["name"] or "-"
+            account = x["account"] or "-"
+            direction = f"{account} 예수금 → {name} 매수" if "매수" in kind else f"{name} 매도 → {account} 예수금" if "매도" in kind else f"{name} {kind}"
+            memo_html = f"<div style='color:#94a3b8;margin-top:.25rem;'>메모: {x['memo']}</div>" if x["memo"] else ""
+            st.markdown(f"""
+            <div style="border:1px solid rgba(148,163,184,.20);border-radius:12px;padding:.85rem 1rem;margin:.5rem 0;background:rgba(15,23,42,.25);">
+              <div style="font-size:.82rem;color:#94a3b8;font-weight:700;margin-bottom:.18rem;">{latest} · {kind}</div>
+              <div style="font-size:1.02rem;font-weight:820;color:#f8fafc;">{direction}</div>
+              <div style="color:#cbd5e1;margin-top:.35rem;">{name} · {_v529_qty(x['qty'])} × {_v529_price(x['price'])} = <b>{_v529_money(x['amount'])}</b></div>
+              {memo_html}
+            </div>
+            """, unsafe_allow_html=True)
+    except Exception as e:
+        try:
+            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.29: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
+    return 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=최근일수)
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=80):
+    return 최근자산변화_표시_v529(이동df, 최대표시=max(최대표시, 80))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_표시_v52812 = 최근자산변화_표시_v529
+최근자산변화_표시_v52811 = 최근자산변화_표시_v529
+최근자산변화_표시_v52810 = 최근자산변화_표시_v529
+최근자산변화_표시_v5289 = 최근자산변화_표시_v529
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    try:
+        _v529_latest_cash_flow_card(거래df)
+    except Exception:
+        pass
+    이동df = 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화_표시_v529(이동df, 최대표시=max(최대표시, 80))
+
+
+# ============================================================
+# end v5.29.0 final-ui-polish BEFORE UI
+# ============================================================
+
 
 if 선택섹터 == "주요 모니터링":
     # v5.20.0: 첫 화면 = 내 보유종목 시세·수익률 → 시장 지수 순서로 표시
@@ -15612,7 +15921,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 #   거래기반 현금 보정 행을 모두 화면 계산 전에 적용합니다.
 # - 기존 전체 거래이력 병합과 TDF2035 실현손익 보호 로직은 건드리지 않습니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5248_text(value):
@@ -16042,7 +16351,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표 계산 시 최근 ETF/주식 매도대금이 현금성자산에 아직 저장되지 않았으면 임시 현금 행으로 반영합니다.
 # - Google Sheets 반영일자는 저장 직전에 YYYY-MM-DD 문자열로 강제 정리합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5249_num(value, default=0.0):
@@ -16371,7 +16680,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표에는 현금성자산 시트에 아직 매도대금이 반영되지 않은 경우에만
 #   매도대금 임시반영 행을 원금=취득원가, 평가금액=매도대금, 평가손익=실현손익으로 추가합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5250_num(value, default=0.0):
@@ -16740,7 +17049,7 @@ def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
 #        원금은 20,730원 + 매도 원금 98,010원 = 118,740원,
 #        평가금액은 90,138원, 평가손익은 -28,602원으로 계산합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5251_register_asset_master():
@@ -17066,7 +17375,7 @@ def IRP비주식자산저장(df):
 # 4) 증권앱과 유사하게 수익은 빨간색, 손실은 파란색을 더 선명하고 굵게 표시합니다.
 # 5) 화면 문구 '자동분석'은 사용자에게 더 자연스러운 '시스템 해석'으로 표시합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 # 주식앱과 유사한 상승/하락 색상: 상승/수익=빨강, 하락/손실=파랑
 PROFIT_RED_V5252 = "#e9545f"
@@ -17287,7 +17596,7 @@ _v5252_global_style_inject()
 # - 화면 표시 함수 안에서 실현손익을 추정하지 않도록 검증표를 별도로 제공합니다.
 # - ASSET_MASTER 누락 종목(한화오션, TIGER 200 등)을 실행 전 보강합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 # 증권앱 기준에 가까운 색상: 수익=빨강, 손실=파랑, 중립=회색
 PROFIT_RED_V5260 = "#e93030"
@@ -17668,7 +17977,7 @@ _v5260_global_style_inject()
 #   현금잔액과 ETF 실현손실을 분리해 설명합니다.
 # - 색상은 국내 증권앱 관례에 맞게 수익=빨강, 손실=파랑을 더 선명하게 적용합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 PROFIT_RED_V5261 = "#E60012"   # 국내 증권앱에 가까운 강한 빨강
 LOSS_BLUE_V5261 = "#0066FF"    # 국내 증권앱에 가까운 강한 파랑
@@ -17978,7 +18287,7 @@ _v5261_global_style_inject()
 #   원시 float 표시를 사용자 화면용 정수/쉼표 표시로 복원합니다.
 # - 계산값은 변경하지 않고 표시 포맷만 보정합니다.
 # ============================================================
-APP_VERSION = "v5.26.3-number-display-restore"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5263_num(value, default=0.0):
@@ -18083,7 +18392,7 @@ _v5263_global_number_style()
 #    실현손익 거래만 정밀 보강합니다.
 # 3) 목표: 최근자산변화 54건 / 실현손익 8,726,021원
 # ============================================================
-APP_VERSION = "v5.26.6-recent-ledger-targeted-fix"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5266_num(value, default=0.0):
@@ -18372,7 +18681,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 #   실제 누락된 매도 실현손익 행만 정확한 키로 추가합니다.
 # - KPI의 실현손익 기준은 화면 이동목록 합계가 아니라 원장 검증 실현손익입니다.
 # ============================================================
-APP_VERSION = "v5.26.7-sheet-ledger-truth-fix"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5267_num(value, default=0.0):
@@ -18666,7 +18975,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 KPI의 실현손익은 표시행 기준이 아니라 Google Sheets 거래원장 기준
 #   실현손익 총액과 동기화합니다.
 # ============================================================
-APP_VERSION = "v5.26.9-recent-kpi-display-authority"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5268_num(value, default=0.0):
@@ -18951,7 +19260,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 누락된 2026-05-15 KODEX AI반도체핵심장비 3주 매도(+18,453원)는
 #   매도금액+실현손익 키 기준으로만 판단하여 없을 때만 보강합니다.
 # ============================================================
-APP_VERSION = "v5.26.9-recent-kpi-display-authority"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5269_num(value, default=0.0):
@@ -19329,7 +19638,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 표시목록에서만 "실현손익 있는 실제 매도행"과 중복되는 "손익 0원 설명행"을 숨깁니다.
 # - 2026-05-15 KODEX AI반도체핵심장비 3주 매도 +18,453원 보강행은 유지합니다.
 # ============================================================
-APP_VERSION = "v5.27.0-recent-display-cleanup"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5270_num(value, default=0.0):
@@ -19552,7 +19861,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 동일 날짜·계좌·자산·금액의 실현손익 있는 매도행이 있으면 손익 0원 설명행만 숨깁니다.
 # - Google Sheets 원장 기준 실현손익 KPI 8,726,021원과 +18,453원 행은 유지합니다.
 # ============================================================
-APP_VERSION = "v5.27.1-recent-explain-split-cleanup"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5271_num(value, default=0.0):
@@ -19834,7 +20143,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장 실제 행을 우선 반영하여 동일 날짜 삼성전자 3회 매수 같은 다중거래를 보존합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.28.2-recent-trend-restore"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 try:
     _자산이동목록통합_v5282_legacy_base = 자산이동목록통합_v5225
@@ -20209,7 +20518,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 원장 수량/단가/금액 컬럼명이 다르거나 일부 보정된 DataFrame이어도 위치 기반 보조 추출을 적용합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.28.3-recent-ledger-reconcile"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 try:
     _자산이동목록통합_v5283_legacy_base = _자산이동목록통합_v5282_legacy_base
@@ -20600,7 +20909,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 포트폴리오 요약 카드의 '원원' 표기 오류를 제거합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.28.7-individual-ledger-display-before-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5287_text(x):
@@ -20975,7 +21284,7 @@ def 포트폴리오요약카드표시(요약정보):
 # - 회계검증과 동일한 평균단가 방식으로 거래원장을 직접 순회하여 실현손익 계산
 # - 거래원장 50건은 건별 유지, 설명행은 별도 행유형으로 분리
 # ============================================================
-APP_VERSION = "v5.28.9-recent-realized-direct-calc"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5289_text(value):
@@ -21447,7 +21756,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근 현금성 자산 이동 해석은 최신 거래일의 거래를 건별로 표시하고, 당일 요약을 함께 표시합니다.
 # - 매수/매도 건별 수량·단가·금액은 절대 합산하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.28.11-core-unified-before-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v52811_safe_df(obj):
@@ -21944,7 +22253,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -22234,7 +22543,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -22522,7 +22831,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -22801,7 +23110,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v52221_to_df_safe(obj):
@@ -23069,7 +23378,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 
@@ -23080,7 +23389,7 @@ APP_VERSION = "v5.26.1-accounting-core-align-ui"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.26.1-accounting-core-align-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5242_runtime_integrity_check():
@@ -23149,7 +23458,7 @@ def v5242_운영점검표시():
 # - 현금성 대기자산은 현금잔액과 ETF 매도손실의 의미가 분리되도록 설명 문구를 보강합니다.
 # - 수익=강한 빨강, 손실=강한 파랑 색상 규칙을 화면 전체에 다시 적용합니다.
 # ============================================================
-APP_VERSION = "v5.26.3-number-display-restore"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 PROFIT_RED_V5262 = "#E60012"
 LOSS_BLUE_V5262 = "#0066FF"
@@ -23481,7 +23790,7 @@ except Exception:
 # - 숫자 표시에서 31.000000, 315000.000000 같은 표현을 제거합니다.
 # - 회계검증/통합자산/포트폴리오 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.28.4-recent-display-number-fix"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5284_text(value):
@@ -23948,7 +24257,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않음
 # ============================================================
 
-APP_VERSION = "v5.28.5-recent-cash-card-and-list-cleanup"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5285_money_fmt(x, dash_zero=False):
@@ -24261,7 +24570,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
 
-APP_VERSION = "v5.28.6-individual-trade-display-fix"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5286_text(x):
@@ -24586,7 +24895,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 설명행은 별도 행유형으로 분리하여 실거래 건수와 혼합하지 않음
 # - 회계검증/통합자산/포트폴리오 계산 로직은 수정하지 않음
 # ============================================================
-APP_VERSION = "v5.28.9-recent-realized-direct-calc"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def _v5288_text(value):
@@ -25071,7 +25380,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 52건 = 실거래 50건 + 설명행 2건 구조를 오해하지 않도록 표시합니다.
 # - 거래형 실현손익 5,035,094원과 원장 기준 전체 실현손익 8,726,021원을 구분합니다.
 # ============================================================
-APP_VERSION = "v5.28.10-recent-kpi-label-cleanup"
+APP_VERSION = "v5.29.0-final-ui-polish"
 
 
 def 최근자산변화_진단패널_v52810(df):
@@ -25205,4 +25514,4 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 
 # v5.28.11 final version marker
-APP_VERSION = "v5.28.11-core-unified-before-ui"
+APP_VERSION = "v5.29.0-final-ui-polish"
