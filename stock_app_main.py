@@ -26050,7 +26050,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 
 try:
-    APP_VERSION = "v5.29.6-ui-polish"
+    APP_VERSION = "v5.29.9-cash-ui-hierarchy-system-note"
 except Exception:
     pass
 
@@ -26911,7 +26911,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 현금성 자산 이동 해석 화면의 제목/본문/해석 박스 크기와 색상 위계를 재정리합니다.
 # - 계산·원금·실현손익·거래 생성 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.29.8-duplicate-kpi-cash-ui-cleanup"
+APP_VERSION = "v5.29.9-cash-ui-hierarchy-system-note"
 
 
 def _v5298_css():
@@ -27252,4 +27252,261 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 # ============================================================
 # end v5.29.8 duplicate-kpi-cleanup + cash-move-compact-ui
+# ============================================================
+
+
+# ============================================================
+# v5.29.9 cash-ui-hierarchy-system-note
+# 목적:
+# - 현금성 자산 이동 해석에서 상위 요약과 건별 거래의 시각적 위계를 명확히 분리합니다.
+# - 동일한 시스템 해석을 거래 카드마다 반복하지 않고 하단 공통 해석으로 1회만 표시합니다.
+# - 최근자산변화/자산변동 계산 로직은 변경하지 않습니다.
+# ============================================================
+try:
+    APP_VERSION = "v5.29.9-cash-ui-hierarchy-system-note"
+except Exception:
+    pass
+
+
+def _v5299_css():
+    try:
+        _v5298_css()
+        st.markdown("""
+        <style>
+        .v5299-cash-section{
+            margin: .15rem 0 .72rem 0;
+        }
+        .v5299-cash-title{
+            font-size:1.18rem;
+            line-height:1.25;
+            font-weight:820;
+            color:#f8fafc;
+            letter-spacing:-.035em;
+            margin-bottom:.28rem;
+        }
+        .v5299-cash-subtitle{
+            font-size:.73rem;
+            color:#8fa1b8;
+            line-height:1.45;
+        }
+        .v5299-summary-banner{
+            border:1px solid rgba(56,189,248,.24);
+            border-left:4px solid rgba(56,189,248,.78);
+            background:linear-gradient(90deg,rgba(8,47,73,.42),rgba(15,23,42,.36));
+            border-radius:12px;
+            padding:.62rem .78rem;
+            margin:.58rem 0 .78rem 0;
+        }
+        .v5299-summary-kicker{
+            display:inline-flex;
+            align-items:center;
+            gap:.28rem;
+            padding:.13rem .42rem;
+            border-radius:999px;
+            background:rgba(56,189,248,.14);
+            color:#bae6fd;
+            font-size:.68rem;
+            font-weight:850;
+            margin-bottom:.30rem;
+        }
+        .v5299-summary-main{
+            font-size:.86rem;
+            color:#f8fafc;
+            font-weight:820;
+            line-height:1.42;
+            letter-spacing:-.015em;
+        }
+        .v5299-summary-sub{
+            margin-top:.18rem;
+            font-size:.70rem;
+            color:#9fb1c8;
+            line-height:1.42;
+        }
+        .v5299-detail-head{
+            display:flex;
+            align-items:center;
+            gap:.45rem;
+            margin:.54rem 0 .36rem 0;
+            color:#cbd5e1;
+            font-size:.78rem;
+            font-weight:820;
+        }
+        .v5299-detail-head::before{
+            content:"";
+            width:.45rem;
+            height:.45rem;
+            border-radius:50%;
+            background:rgba(148,163,184,.75);
+        }
+        .v5299-cash-card{
+            border:1px solid rgba(148,163,184,.16);
+            background:rgba(15,23,42,.25);
+            border-radius:11px;
+            padding:.54rem .68rem;
+            margin:.38rem 0;
+        }
+        .v5299-cash-meta{
+            font-size:.67rem;
+            color:#93c5fd;
+            font-weight:800;
+            margin-bottom:.24rem;
+        }
+        .v5299-cash-main{
+            font-size:.92rem;
+            color:#f8fafc;
+            font-weight:800;
+            line-height:1.34;
+            letter-spacing:-.025em;
+            margin-bottom:.18rem;
+        }
+        .v5299-cash-amount{
+            font-size:.70rem;
+            color:#9fb1c8;
+            line-height:1.35;
+            font-weight:650;
+        }
+        .v5299-common-note{
+            margin:.58rem 0 .25rem 0;
+            border:1px solid rgba(96,165,250,.13);
+            background:rgba(30,64,175,.13);
+            border-radius:10px;
+            padding:.46rem .58rem;
+            color:#bdd7ff;
+            font-size:.72rem;
+            line-height:1.45;
+        }
+        .v5299-common-note b{
+            color:#93c5fd;
+            font-weight:850;
+            margin-right:.3rem;
+        }
+        .v5299-common-note ul{
+            margin:.28rem 0 0 1.05rem;
+            padding:0;
+        }
+        .v5299-common-note li{
+            margin:.12rem 0;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+def _v5299_cash_summary_html(items):
+    try:
+        if not items:
+            return ""
+        first = items[0]
+        date = _v5296_html(first.get('거래일자', '') or first.get('날짜', '') or '최근 거래')
+        count = len(items)
+        buy_count = sum(1 for x in items if '매수' in str(x.get('표시구분') or x.get('방향') or x.get('구분') or ''))
+        sell_count = sum(1 for x in items if '매도' in str(x.get('표시구분') or x.get('방향') or x.get('구분') or ''))
+        total = sum(abs(_v5296_num(x.get('확인금액', x.get('금액', 0)), 0)) for x in items)
+        kinds = []
+        if buy_count:
+            kinds.append(f'매수 {buy_count:,}건')
+        if sell_count:
+            kinds.append(f'매도 {sell_count:,}건')
+        kind_text = ' · '.join(kinds) if kinds else f'{count:,}건'
+        return (
+            '<div class="v5299-summary-banner">'
+            '<div class="v5299-summary-kicker">상위 요약</div>'
+            f'<div class="v5299-summary-main">{date} 당일 거래 요약 · 총 {count:,}건 · {kind_text} · 총 거래금액 {_v5296_money(total)}</div>'
+            '<div class="v5299-summary-sub">이 영역은 당일 묶음 요약입니다. 아래 건별 이동 해석은 수량·단가·금액이 다른 거래를 합산하지 않고 개별 거래로 표시합니다.</div>'
+            '</div>'
+        )
+    except Exception:
+        return ""
+
+
+def _v5299_unique_notes(items):
+    notes = []
+    try:
+        for item in items or []:
+            note = str(item.get('자동분석', '') or '').strip()
+            if note and note not in notes:
+                notes.append(note)
+        return notes
+    except Exception:
+        return notes
+
+
+def _v5299_common_note_html(items):
+    try:
+        notes = _v5299_unique_notes(items)
+        if not notes:
+            return (
+                '<div class="v5299-common-note"><b>공통 해석</b>'
+                '거래원장 기준 개별 거래이며, 같은 날짜의 분할거래도 합산하지 않고 건별로 표시합니다.'
+                '</div>'
+            )
+        if len(notes) == 1:
+            return f'<div class="v5299-common-note"><b>공통 해석</b>{_v5296_html(notes[0])}</div>'
+        lis = ''.join(f'<li>{_v5296_html(x)}</li>' for x in notes[:5])
+        return f'<div class="v5299-common-note"><b>공통 해석</b><ul>{lis}</ul></div>'
+    except Exception:
+        return ""
+
+
+def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산 이동 해석"):
+    """v5.29.9: 상위 요약 배너와 건별 거래 카드의 위계를 분리하고 시스템 해석 반복을 제거합니다."""
+    try:
+        _v5299_css()
+        이동후보 = 이동후보 or {}
+        if not 이동후보:
+            return
+        items = 이동후보.get('거래목록') if isinstance(이동후보, dict) else None
+        st.markdown(
+            '<div class="v5299-cash-section">'
+            f'<div class="v5299-cash-title">{_v5296_html(제목)}</div>'
+            '<div class="v5299-cash-subtitle">상단은 당일 거래 묶음 요약, 아래는 실제 거래원장 기준 건별 이동 해석입니다.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if items:
+            st.markdown(_v5299_cash_summary_html(items), unsafe_allow_html=True)
+            st.markdown('<div class="v5299-detail-head">건별 이동 해석</div>', unsafe_allow_html=True)
+            for idx, item in enumerate(items, start=1):
+                금액 = _v5296_num(item.get('확인금액', 0), 0)
+                설명 = str(item.get('설명', '') or '').strip()
+                거래일자 = str(item.get('거래일자', '') or '').strip()
+                표시구분 = str(item.get('표시구분') or item.get('방향') or '거래').strip()
+                st.markdown(
+                    '<div class="v5299-cash-card">'
+                    f'<div class="v5299-cash-meta">{_v5296_html(거래일자 or "최근 거래")} · {idx}번 거래 · {_v5296_html(표시구분)}</div>'
+                    f'<div class="v5299-cash-main">{_v5296_html(설명)}</div>'
+                    f'<div class="v5299-cash-amount">{_v5296_money(금액)}</div>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            st.markdown(_v5299_common_note_html(items), unsafe_allow_html=True)
+            return
+
+        금액 = _v5296_num(이동후보.get('확인금액', 0), 0)
+        설명 = str(이동후보.get('설명', '') or '').strip()
+        거래일자 = str(이동후보.get('거래일자', '') or '').strip()
+        표시구분 = str(이동후보.get('표시구분') or 이동후보.get('방향') or '자산 이동').strip()
+        시스템해석 = str(이동후보.get('자동분석', '') or '').strip() or '거래 후 남은 현금성 잔액 반영입니다.'
+        if not 설명:
+            return
+        st.markdown(
+            '<div class="v5299-cash-card">'
+            f'<div class="v5299-cash-meta">{_v5296_html(거래일자 or "최근 거래")} · {_v5296_html(표시구분)}</div>'
+            f'<div class="v5299-cash-main">{_v5296_html(설명)}</div>'
+            f'<div class="v5299-cash-amount">{_v5296_money(금액)}</div>'
+            '</div>'
+            f'<div class="v5299-common-note"><b>공통 해석</b>{_v5296_html(시스템해석)}</div>',
+            unsafe_allow_html=True,
+        )
+    except Exception as e:
+        try:
+            st.caption(f"자산이동 설명 표시 오류 v5.29.9: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+# 최종 오버라이드: 최근자산변화 화면은 v5.29.8 정리본을 유지하고,
+# 현금성 자산 이동 해석만 v5.29.9 위계 정리본으로 교체합니다.
+# ============================================================
+# end v5.29.9 cash-ui-hierarchy-system-note
 # ============================================================
