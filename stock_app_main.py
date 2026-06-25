@@ -26901,3 +26901,355 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 # end v5.29.7 UI HIERARCHY CLEANUP FINAL OVERRIDE
 # ============================================================
+
+# ============================================================
+# v5.29.8 duplicate-kpi-cleanup + cash-move-compact-ui FINAL OVERRIDE
+# ------------------------------------------------------------
+# 목적:
+# - 최근자산변화 화면의 중복 진단 KPI를 제거하고 1줄 요약만 남깁니다.
+# - 과거 v5.28.10/v5.28.11 진단 expander가 먼저 출력되는 문제를 차단합니다.
+# - 현금성 자산 이동 해석 화면의 제목/본문/해석 박스 크기와 색상 위계를 재정리합니다.
+# - 계산·원금·실현손익·거래 생성 로직은 변경하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.29.8-duplicate-kpi-cash-ui-cleanup"
+
+
+def _v5298_css():
+    """v5.29.8: 중복 KPI 제거 및 현금성 이동 해석 화면 압축 UI."""
+    try:
+        st.markdown("""
+        <style>
+        /* 최근자산변화 상단 요약 */
+        .v5298-ledger-oneline{
+            border:1px solid rgba(148,163,184,.18);
+            background:rgba(15,23,42,.42);
+            border-radius:13px;
+            padding:.62rem .78rem;
+            margin:.50rem 0 .70rem 0;
+            color:#cbd5e1;
+            font-size:.82rem;
+            line-height:1.45;
+        }
+        .v5298-ledger-oneline b{color:#f8fafc;font-weight:760;}
+        .v5298-mini-chip{
+            display:inline-flex;align-items:center;gap:.25rem;
+            border-radius:999px;
+            border:1px solid rgba(148,163,184,.18);
+            background:rgba(148,163,184,.09);
+            padding:.12rem .43rem;
+            margin:.10rem .24rem .10rem 0;
+            color:#dbeafe;
+            font-size:.74rem;
+            font-weight:720;
+            white-space:nowrap;
+        }
+        .v5298-mini-chip.good{background:rgba(22,163,74,.14);border-color:rgba(74,222,128,.23);color:#bbf7d0;}
+        .v5298-mini-chip.blue{background:rgba(37,99,235,.14);border-color:rgba(96,165,250,.23);color:#bfdbfe;}
+        .v5298-ledger-rule{
+            border:1px solid rgba(59,130,246,.16);
+            background:rgba(30,64,175,.13);
+            color:#bfdbfe;
+            border-radius:11px;
+            padding:.46rem .64rem;
+            margin:.42rem 0 .65rem 0;
+            font-size:.78rem;
+            line-height:1.45;
+        }
+
+        /* 현금성 자산 이동 해석 */
+        .v5298-cash-section{margin:1.0rem 0 .55rem 0;}
+        .v5298-cash-title{
+            font-size:1.18rem;
+            font-weight:800;
+            color:#f8fafc;
+            letter-spacing:-.03em;
+            margin-bottom:.22rem;
+        }
+        .v5298-cash-subtitle{
+            font-size:.78rem;
+            color:#94a3b8;
+            line-height:1.45;
+        }
+        .v5298-summary-box{
+            border:1px solid rgba(96,165,250,.22);
+            background:linear-gradient(180deg,rgba(30,64,175,.18),rgba(15,23,42,.38));
+            border-radius:13px;
+            padding:.62rem .78rem;
+            margin:.62rem 0 .78rem 0;
+        }
+        .v5298-summary-label{
+            display:inline-flex;
+            border-radius:999px;
+            background:rgba(59,130,246,.17);
+            border:1px solid rgba(96,165,250,.28);
+            color:#bfdbfe;
+            font-size:.70rem;
+            font-weight:800;
+            padding:.13rem .46rem;
+            margin-bottom:.36rem;
+        }
+        .v5298-summary-main{
+            font-size:.92rem;
+            color:#f8fafc;
+            font-weight:760;
+            line-height:1.45;
+        }
+        .v5298-summary-note{
+            font-size:.75rem;
+            color:#9fb1c8;
+            line-height:1.45;
+            margin-top:.22rem;
+        }
+        .v5298-detail-title{
+            font-size:.88rem;
+            color:#dbeafe;
+            font-weight:800;
+            margin:.50rem 0 .38rem 0;
+            padding-left:.15rem;
+        }
+        .v5298-cash-card{
+            border:1px solid rgba(148,163,184,.18);
+            background:rgba(15,23,42,.36);
+            border-radius:13px;
+            padding:.72rem .82rem;
+            margin:.48rem 0;
+        }
+        .v5298-cash-meta{
+            font-size:.72rem;
+            color:#bfdbfe;
+            font-weight:760;
+            margin-bottom:.34rem;
+        }
+        .v5298-cash-main{
+            font-size:1.02rem;
+            color:#f8fafc;
+            font-weight:800;
+            line-height:1.35;
+            margin-bottom:.30rem;
+            letter-spacing:-.025em;
+        }
+        .v5298-cash-amount{
+            font-size:.77rem;
+            color:#a8b7cc;
+            font-weight:650;
+            margin-bottom:.42rem;
+        }
+        .v5298-system-note{
+            border-radius:9px;
+            background:rgba(30,64,175,.18);
+            border:1px solid rgba(96,165,250,.12);
+            color:#c7ddff;
+            padding:.42rem .56rem;
+            font-size:.76rem;
+            font-weight:620;
+            line-height:1.42;
+        }
+        .v5298-system-note b{color:#93c5fd;margin-right:.28rem;font-weight:800;}
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+def _v5298_ledger_summary_html(df):
+    """중복 KPI 대신 한 줄 요약만 생성합니다."""
+    try:
+        d = pd.DataFrame(df).copy()
+        total = int(len(d))
+        if "행유형" in d.columns:
+            trade = int((d["행유형"] == "실거래").sum())
+            explain = int((d["행유형"] == "설명행").sum())
+        else:
+            trade = total
+            explain = 0
+        recent_pnl = 0
+        if "실현손익" in d.columns:
+            target = d[d["행유형"] == "실거래"] if "행유형" in d.columns else d
+            recent_pnl = int(round(pd.to_numeric(target["실현손익"], errors="coerce").fillna(0).sum()))
+        ledger_pnl = int(st.session_state.get("v5288_ledger_realized_total", st.session_state.get("v5269_ledger_realized_total", recent_pnl)))
+        diff = ledger_pnl - recent_pnl
+        normal = (total == trade + explain)
+        diff_note = ""
+        if abs(diff) == 3690927:
+            diff_note = " · TDF2035 실현손익 포함 차이"
+        elif abs(diff) > 1:
+            diff_note = f" · 실현손익 차이 {_v5296_money(diff, signed=True)}"
+        return (
+            '<div class="v5298-ledger-oneline">'
+            '<b>최근자산변화 요약</b><br>'
+            f'<span class="v5298-mini-chip {"good" if normal else ""}">전체 {total:,}건 = 실거래 {trade:,}건 + 잔액설명 {explain:,}건</span>'
+            f'<span class="v5298-mini-chip blue">거래 실현손익 {_v5296_money(recent_pnl, signed=True)}</span>'
+            f'<span class="v5298-mini-chip blue">원장 전체 실현손익 {_v5296_money(ledger_pnl, signed=True)}</span>'
+            f'<span style="color:#94a3b8;font-size:.76rem;">{_v5296_html(diff_note)}</span>'
+            '</div>'
+        )
+    except Exception:
+        return ""
+
+
+# 과거 진단 패널은 중복 노출 원인이므로 화면 출력하지 않습니다.
+def 최근자산변화_진단패널_v52810(df):
+    return None
+
+
+def 최근자산변화_진단패널_v52811(df):
+    return None
+
+
+def 최근자산변화_표시_v5298(이동df, 최대표시=100):
+    """v5.29.8: 최근자산변화 중복 KPI 제거 최종 표시부."""
+    try:
+        _v5298_css()
+        df = pd.DataFrame(이동df).copy()
+        st.markdown(
+            '<div class="v5296-page-title">'
+            '<div><div class="v5296-title-main">🔎 최근 자산변화</div>'
+            '<div class="v5296-title-sub">실거래와 잔액 설명행을 구분하되, 중복 진단 지표는 한 줄 요약으로 정리합니다.</div></div>'
+            '<div class="v5296-version-pill">v5.29.8 UI cleanup</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if df.empty:
+            st.caption('최근 자산변화로 표시할 내역이 없습니다.')
+            return df
+
+        st.markdown(_v5298_ledger_summary_html(df), unsafe_allow_html=True)
+        st.markdown(
+            '<div class="v5298-ledger-rule"><b>표시 원칙</b> · 최근자산변화는 거래원장입니다. '
+            '같은 날짜·같은 종목이라도 수량·단가·금액이 다르면 각각 별도 행으로 표시합니다. '
+            '잔액 설명행은 매수/매도 실행이 아니라 거래 후 남은 현금성 잔액 반영입니다.</div>',
+            unsafe_allow_html=True,
+        )
+
+        summary_html = _v5296_split_summary_html(df) if '_v5296_split_summary_html' in globals() else ''
+        if summary_html:
+            st.markdown(summary_html, unsafe_allow_html=True)
+
+        표시건수 = max(int(최대표시 or 100), 100)
+        st.caption(f'원장 상세표 · 현재 화면 표시 {min(len(df), 표시건수):,}건 / 전체 {len(df):,}건')
+        st.markdown(_v5296_make_table(df, 표시건수), unsafe_allow_html=True)
+        if len(df) > 표시건수:
+            with st.expander(f'전체 원장행 보기 · {len(df):,}건', expanded=False):
+                st.markdown(_v5296_make_table(df, len(df)), unsafe_allow_html=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f'최근자산변화 v5.29.8 표시 오류: {type(e).__name__}: {e}')
+        except Exception:
+            pass
+        try:
+            return 최근자산변화_표시_v5297(이동df, 최대표시=최대표시)
+        except Exception:
+            return pd.DataFrame(이동df)
+
+
+def _v5298_cash_summary_html(items):
+    try:
+        if not items:
+            return ""
+        first = items[0]
+        date = _v5296_html(first.get('거래일자', '') or first.get('날짜', '') or '최근 거래')
+        count = len(items)
+        buy_count = sum(1 for x in items if '매수' in str(x.get('표시구분') or x.get('방향') or x.get('구분') or ''))
+        sell_count = sum(1 for x in items if '매도' in str(x.get('표시구분') or x.get('방향') or x.get('구분') or ''))
+        total = sum(abs(_v5296_num(x.get('확인금액', x.get('금액', 0)), 0)) for x in items)
+        trade_txt = []
+        if buy_count:
+            trade_txt.append(f'매수 {buy_count}건')
+        if sell_count:
+            trade_txt.append(f'매도 {sell_count}건')
+        trade_txt = ' · '.join(trade_txt) if trade_txt else f'{count}건'
+        return (
+            '<div class="v5298-summary-box">'
+            '<div class="v5298-summary-label">거래 요약</div>'
+            f'<div class="v5298-summary-main">{date} · 거래 {count:,}건 · {trade_txt} · 총 거래금액 {_v5296_money(total)}</div>'
+            '<div class="v5298-summary-note">이 영역은 묶음 요약입니다. 아래 건별 이동 해석에서는 수량·단가·금액이 다른 거래를 합산하지 않고 각각 따로 표시합니다.</div>'
+            '</div>'
+        )
+    except Exception:
+        return ""
+
+
+def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산 이동 해석"):
+    """v5.29.8: 현금성 자산 이동 해석 화면의 크기·색상·위계 재정리."""
+    try:
+        _v5298_css()
+        이동후보 = 이동후보 or {}
+        if not 이동후보:
+            return
+        items = 이동후보.get('거래목록') if isinstance(이동후보, dict) else None
+        st.markdown(
+            '<div class="v5298-cash-section">'
+            f'<div class="v5298-cash-title">{_v5296_html(제목)}</div>'
+            '<div class="v5298-cash-subtitle">요약은 상단에 작게 묶고, 실제 거래는 아래에서 건별로 분리해 표시합니다.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if items:
+            st.markdown(_v5298_cash_summary_html(items), unsafe_allow_html=True)
+            st.markdown('<div class="v5298-detail-title">건별 이동 해석</div>', unsafe_allow_html=True)
+            for idx, item in enumerate(items, start=1):
+                금액 = _v5296_num(item.get('확인금액', 0), 0)
+                설명 = str(item.get('설명', '') or '').strip()
+                거래일자 = str(item.get('거래일자', '') or '').strip()
+                표시구분 = str(item.get('표시구분') or item.get('방향') or '거래').strip()
+                시스템해석 = str(item.get('자동분석', '') or '').strip() or '거래원장 기준 개별 거래입니다.'
+                st.markdown(
+                    '<div class="v5298-cash-card">'
+                    f'<div class="v5298-cash-meta">{_v5296_html(거래일자 or "최근 거래")} · {idx}번 거래 · {_v5296_html(표시구분)}</div>'
+                    f'<div class="v5298-cash-main">{_v5296_html(설명)}</div>'
+                    f'<div class="v5298-cash-amount">{_v5296_money(금액)}</div>'
+                    f'<div class="v5298-system-note"><b>시스템 해석</b>{_v5296_html(시스템해석)}</div>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            return
+
+        금액 = _v5296_num(이동후보.get('확인금액', 0), 0)
+        설명 = str(이동후보.get('설명', '') or '').strip()
+        거래일자 = str(이동후보.get('거래일자', '') or '').strip()
+        표시구분 = str(이동후보.get('표시구분') or 이동후보.get('방향') or '자산 이동').strip()
+        시스템해석 = str(이동후보.get('자동분석', '') or '').strip() or '거래 후 남은 현금성 잔액 반영입니다.'
+        if not 설명:
+            return
+        st.markdown(
+            '<div class="v5298-cash-card">'
+            f'<div class="v5298-cash-meta">{_v5296_html(거래일자 or "최근 거래")} · {_v5296_html(표시구분)}</div>'
+            f'<div class="v5298-cash-main">{_v5296_html(설명)}</div>'
+            f'<div class="v5298-cash-amount">{_v5296_money(금액)}</div>'
+            f'<div class="v5298-system-note"><b>시스템 해석</b>{_v5296_html(시스템해석)}</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    except Exception as e:
+        try:
+            st.caption(f"자산이동 설명 표시 오류 v5.29.8: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+# 최종 오버라이드: 과거 표시부까지 모두 v5.29.8로 연결합니다.
+def 최근자산변화표시_v5224(이동df, 최대표시=100):
+    return 최근자산변화_표시_v5298(이동df, 최대표시=max(최대표시, 100))
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_표시_v5284 = 최근자산변화_표시_v5298
+최근자산변화_표시_v5286 = 최근자산변화_표시_v5298
+최근자산변화_표시_v5288 = 최근자산변화_표시_v5298
+최근자산변화_표시_v52810 = 최근자산변화_표시_v5298
+최근자산변화_표시_v52811 = 최근자산변화_표시_v5298
+최근자산변화_표시_v5293 = 최근자산변화_표시_v5298
+최근자산변화_표시_v5294 = 최근자산변화_표시_v5298
+최근자산변화_표시_v5295 = 최근자산변화_표시_v5298
+최근자산변화_표시_v5296 = 최근자산변화_표시_v5298
+최근자산변화_표시_v5297 = 최근자산변화_표시_v5298
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=100):
+    이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 100))
+
+# ============================================================
+# end v5.29.8 duplicate-kpi-cleanup + cash-move-compact-ui
+# ============================================================
