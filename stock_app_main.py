@@ -26050,7 +26050,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 
 try:
-    APP_VERSION = "v5.29.5-auto-analysis-balance-fix"
+    APP_VERSION = "v5.29.6-ui-polish"
 except Exception:
     pass
 
@@ -26308,4 +26308,317 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 # ============================================================
 # end v5.29.5 auto-analysis-balance-fix FINAL OVERRIDE
+# ============================================================
+
+
+# ============================================================
+# v5.29.6 UI POLISH FINAL OVERRIDE
+# - 계산·원금·거래건수 로직은 변경하지 않습니다.
+# - 최근자산변화 화면의 폰트, 여백, 카드 구성, 설명문 가독성만 개선합니다.
+# - 거래이력 건별 표시 원칙은 그대로 유지합니다.
+# ============================================================
+
+def _v5296_css():
+    """v5.29.6 화면 가독성 전용 CSS. 계산 로직에는 관여하지 않습니다."""
+    try:
+        st.markdown("""
+        <style>
+        :root{
+            --ledger-bg:#0b1220;
+            --ledger-card:rgba(15,23,42,.72);
+            --ledger-card-soft:rgba(15,23,42,.46);
+            --ledger-line:rgba(148,163,184,.22);
+            --ledger-text:#f8fafc;
+            --ledger-sub:#94a3b8;
+            --ledger-blue:#38bdf8;
+            --ledger-green:#86efac;
+            --ledger-red:#fca5a5;
+            --ledger-yellow:#fde68a;
+            --ledger-purple:#e9d5ff;
+        }
+        html, body, [class*="css"]{
+            font-family:"Pretendard","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+            letter-spacing:-.025em;
+        }
+        .block-container{padding-top:1.3rem;padding-bottom:2.4rem;max-width:1520px;}
+        .v5296-page-title{
+            display:flex;align-items:center;justify-content:space-between;gap:1rem;
+            border-bottom:1px solid var(--ledger-line);padding:.25rem 0 .85rem 0;margin:.1rem 0 1rem 0;
+        }
+        .v5296-title-main{font-size:1.58rem;font-weight:820;color:var(--ledger-text);line-height:1.25;}
+        .v5296-title-sub{font-size:.86rem;color:var(--ledger-sub);margin-top:.28rem;font-weight:560;}
+        .v5296-version-pill{
+            display:inline-flex;align-items:center;border:1px solid rgba(56,189,248,.28);
+            background:rgba(14,165,233,.12);color:#bae6fd;border-radius:999px;
+            padding:.36rem .72rem;font-size:.78rem;font-weight:760;white-space:nowrap;
+        }
+        .v5296-kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.78rem;margin:.9rem 0 .75rem 0;}
+        .v5296-kpi-card{
+            border:1px solid var(--ledger-line);border-radius:16px;background:linear-gradient(180deg,rgba(15,23,42,.76),rgba(15,23,42,.42));
+            padding:.9rem 1rem;min-height:92px;box-shadow:0 10px 28px rgba(2,6,23,.16);
+        }
+        .v5296-kpi-label{font-size:.77rem;color:var(--ledger-sub);font-weight:720;margin-bottom:.26rem;}
+        .v5296-kpi-value{font-size:1.42rem;color:var(--ledger-text);font-weight:860;line-height:1.15;}
+        .v5296-kpi-note{font-size:.75rem;color:var(--ledger-sub);margin-top:.32rem;line-height:1.35;}
+        .v5296-good{color:var(--ledger-green)!important}.v5296-bad{color:var(--ledger-red)!important}.v5296-blue{color:var(--ledger-blue)!important}
+        .v5296-panel{
+            border:1px solid var(--ledger-line);border-radius:16px;background:var(--ledger-card-soft);
+            padding:.78rem .9rem;margin:.75rem 0;color:#cbd5e1;font-size:.86rem;line-height:1.52;
+        }
+        .v5296-panel strong{color:var(--ledger-text)}
+        .v5296-warning{border-color:rgba(250,204,21,.25);background:rgba(113,63,18,.12);color:#fde68a;}
+        .v5296-table-wrap{border:1px solid var(--ledger-line);border-radius:16px;overflow:hidden;margin-top:.7rem;background:rgba(2,6,23,.28);}
+        table.v5296-ledger{width:100%;border-collapse:collapse;font-size:.86rem;}
+        table.v5296-ledger th{
+            background:rgba(15,23,42,.94);color:#dbeafe;text-align:left;font-weight:790;
+            padding:.62rem .66rem;border-bottom:1px solid var(--ledger-line);white-space:nowrap;
+        }
+        table.v5296-ledger td{padding:.58rem .66rem;border-bottom:1px solid rgba(148,163,184,.13);vertical-align:middle;color:var(--ledger-text);line-height:1.34;}
+        table.v5296-ledger tr:hover td{background:rgba(59,130,246,.07);}
+        .v5296-date{font-weight:820;white-space:nowrap;color:#e2e8f0;}
+        .v5296-type{display:inline-flex;border-radius:999px;padding:.2rem .46rem;font-size:.72rem;font-weight:830;white-space:nowrap;border:1px solid transparent;}
+        .v5296-type-real{background:rgba(22,163,74,.17);border-color:rgba(74,222,128,.22);color:#bbf7d0;}
+        .v5296-type-desc{background:rgba(100,116,139,.18);border-color:rgba(148,163,184,.24);color:#e2e8f0;}
+        .v5296-badge-buy{background:rgba(22,163,74,.22);border-color:rgba(74,222,128,.23);color:#bbf7d0;}
+        .v5296-badge-sell{background:rgba(220,38,38,.20);border-color:rgba(248,113,113,.23);color:#fecaca;}
+        .v5296-badge-cash{background:rgba(37,99,235,.20);border-color:rgba(96,165,250,.23);color:#bfdbfe;}
+        .v5296-name{font-weight:810;color:#f8fafc;white-space:normal;}
+        .v5296-analysis{color:#cbd5e1;font-size:.80rem;line-height:1.42;max-width:560px;}
+        .v5296-money{text-align:right;font-weight:830;white-space:nowrap;color:#e2e8f0;}
+        .v5296-profit-pos{color:#86efac!important}.v5296-profit-neg{color:#60a5fa!important}.v5296-profit-zero{color:#94a3b8!important}
+        .v5296-muted{color:#94a3b8;font-size:.76rem;}
+        @media(max-width:1050px){.v5296-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.v5296-hide-md{display:none;}}
+        @media(max-width:720px){.v5296-kpi-grid{grid-template-columns:1fr;}table.v5296-ledger{font-size:.78rem;}table.v5296-ledger th,table.v5296-ledger td{padding:.48rem .42rem}.v5296-hide-sm{display:none;}}
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+def _v5296_html(value):
+    try:
+        return html.escape(str(value if value is not None else ""))
+    except Exception:
+        return str(value if value is not None else "")
+
+
+def _v5296_money(value, signed=False):
+    try:
+        if "_v5293_money" in globals():
+            return _v5293_money(value, signed=signed)
+    except Exception:
+        pass
+    try:
+        n = float(str(value).replace(',', '').replace('원', '').strip() or 0)
+    except Exception:
+        n = 0.0
+    if signed:
+        return f"{n:+,.0f}원"
+    return f"{n:,.0f}원"
+
+
+def _v5296_num(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        return float(str(value).replace(',', '').replace('원', '').replace('%','').strip() or default)
+    except Exception:
+        return default
+
+
+def _v5296_kind_class(row):
+    try:
+        row_type = str(row.get('행유형', '')).strip()
+        gubun = str(row.get('구분', '')).strip()
+        if row_type in ['설명형','설명행'] or gubun == '설명':
+            return '설명형', 'v5296-type-desc'
+        return '실거래', 'v5296-type-real'
+    except Exception:
+        return '실거래', 'v5296-type-real'
+
+
+def _v5296_trade_badge(row):
+    try:
+        g = str(row.get('구분','')).strip()
+        name = str(row.get('종목명',''))
+        if g == '설명' or str(row.get('행유형','')) in ['설명형','설명행']:
+            return '잔액반영', 'v5296-badge-cash'
+        if '매수' in g:
+            return '매수', 'v5296-badge-buy'
+        if '매도' in g:
+            return '매도', 'v5296-badge-sell'
+        if '현금' in name or '예수' in name or '대기' in name:
+            return '현금', 'v5296-badge-cash'
+        return g or '거래', 'v5296-badge-cash'
+    except Exception:
+        return '거래', 'v5296-badge-cash'
+
+
+def _v5296_make_table(df, max_rows=100):
+    try:
+        src = pd.DataFrame(df).copy().head(max_rows)
+        disp = _v5295_display_df(src) if '_v5295_display_df' in globals() else src.copy()
+        rows = []
+        for i, row in disp.iterrows():
+            raw = src.iloc[i] if i < len(src) else row
+            row_kind, row_kind_cls = _v5296_kind_class(raw)
+            trade_label, trade_cls = _v5296_trade_badge(raw)
+            date = _v5296_html(row.get('날짜',''))
+            name = _v5296_html(row.get('종목명',''))
+            qty = _v5296_html(row.get('수량','-'))
+            price = _v5296_html(row.get('단가','-'))
+            amount = _v5296_html(row.get('금액',''))
+            pnl_raw = raw.get('실현손익', row.get('실현손익', 0)) if hasattr(raw, 'get') else 0
+            pnl_num = _v5296_num(pnl_raw, 0)
+            pnl_cls = 'v5296-profit-pos' if pnl_num > 0 else 'v5296-profit-neg' if pnl_num < 0 else 'v5296-profit-zero'
+            pnl = _v5296_html(row.get('실현손익','0원'))
+            acct = _v5296_html(row.get('계좌',''))
+            analysis = _v5296_html(row.get('자동분석',''))
+            rows.append(
+                '<tr>'
+                f'<td><div class="v5296-date">{date}</div></td>'
+                f'<td><span class="v5296-type {row_kind_cls}">{row_kind}</span></td>'
+                f'<td><span class="v5296-type {trade_cls}">{_v5296_html(trade_label)}</span></td>'
+                f'<td><div class="v5296-name">{name}</div></td>'
+                f'<td class="v5296-money v5296-hide-sm">{qty}</td>'
+                f'<td class="v5296-money v5296-hide-md">{price}</td>'
+                f'<td class="v5296-money">{amount}</td>'
+                f'<td class="v5296-money {pnl_cls} v5296-hide-sm">{pnl}</td>'
+                f'<td class="v5296-hide-md"><span class="v5296-muted">{acct}</span></td>'
+                f'<td><div class="v5296-analysis">{analysis}</div></td>'
+                '</tr>'
+            )
+        return (
+            '<div class="v5296-table-wrap"><table class="v5296-ledger">'
+            '<thead><tr>'
+            '<th>날짜</th><th>유형</th><th>구분</th><th>종목명</th><th class="v5296-hide-sm" style="text-align:right">수량</th>'
+            '<th class="v5296-hide-md" style="text-align:right">단가</th><th style="text-align:right">금액</th>'
+            '<th class="v5296-hide-sm" style="text-align:right">실현손익</th><th class="v5296-hide-md">계좌</th><th>자동분석</th>'
+            '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div>'
+        )
+    except Exception as e:
+        return f'<div class="v5296-panel v5296-warning">표 생성 오류: {_v5296_html(type(e).__name__)} {_v5296_html(e)}</div>'
+
+
+def _v5296_split_summary_html(df):
+    """동일일자·동일종목 복수 매수/매도 요약. 원장행은 절대 통합하지 않습니다."""
+    try:
+        src = pd.DataFrame(df).copy()
+        if src.empty or not {'날짜','종목명','구분','금액'}.issubset(set(src.columns)):
+            return ''
+        real = src[~src.apply(lambda r: _v5296_kind_class(r)[0] == '설명형', axis=1)].copy()
+        if real.empty:
+            return ''
+        rows = []
+        for (d,n,g), part in real.groupby(['날짜','종목명','구분'], dropna=False):
+            if len(part) < 2:
+                continue
+            qty = pd.to_numeric(part.get('수량', 0), errors='coerce').fillna(0).sum() if '수량' in part.columns else 0
+            amt = pd.to_numeric(part.get('금액', 0), errors='coerce').fillna(0).sum()
+            avg = abs(amt / qty) if qty else 0
+            rows.append((str(d), str(n), str(g), len(part), qty, amt, avg))
+        if not rows:
+            return ''
+        items = []
+        for d,n,g,c,qty,amt,avg in rows[:4]:
+            avg_txt = f' · 평균단가 {avg:,.0f}원' if avg else ''
+            qty_txt = f'{qty:,.0f}주' if qty else '-'
+            items.append(f'<div><strong>{_v5296_html(d)} {_v5296_html(n)}</strong> · {_v5296_html(g)} {c}건 · {qty_txt} · {_v5296_money(amt)}{avg_txt}</div>')
+        return '<div class="v5296-panel"><strong>분할거래 요약</strong><br>' + ''.join(items) + '<div class="v5296-muted">요약은 참고용이며, 아래 원장 상세표는 모든 거래를 건별로 유지합니다.</div></div>'
+    except Exception:
+        return ''
+
+
+def 최근자산변화_표시_v5296(이동df, 최대표시=100):
+    """v5.29.6 최근자산변화 UI 개선 최종 표시부."""
+    try:
+        _v5296_css()
+        df = pd.DataFrame(이동df).copy()
+        st.markdown(
+            '<div class="v5296-page-title">'
+            '<div><div class="v5296-title-main">🔎 최근 자산변화</div>'
+            '<div class="v5296-title-sub">거래원장 기준으로 실거래와 잔액 설명행을 분리해 표시합니다.</div></div>'
+            '<div class="v5296-version-pill">v5.29.6 UI polish</div>'
+            '</div>',
+            unsafe_allow_html=True
+        )
+        if df.empty:
+            st.caption('최근 자산변화로 표시할 내역이 없습니다.')
+            return df
+
+        result = 최근자산변화_검증_v5293(df) if '최근자산변화_검증_v5293' in globals() else {}
+        if result and '오류' not in result:
+            status_cls = 'v5296-good' if result.get('행수정상') else 'v5296-bad'
+            kpi = (
+                '<div class="v5296-kpi-grid">'
+                f'<div class="v5296-kpi-card"><div class="v5296-kpi-label">실거래</div><div class="v5296-kpi-value">{result.get("실거래",0):,}건</div><div class="v5296-kpi-note">매수·매도 원본 거래행</div></div>'
+                f'<div class="v5296-kpi-card"><div class="v5296-kpi-label">설명행</div><div class="v5296-kpi-value">{result.get("설명행",0):,}건</div><div class="v5296-kpi-note">예수금·현금성 잔액 반영</div></div>'
+                f'<div class="v5296-kpi-card"><div class="v5296-kpi-label">전체 표시행</div><div class="v5296-kpi-value">{result.get("전체표시행",len(df)):,}건</div><div class="v5296-kpi-note">실거래 + 설명행</div></div>'
+                f'<div class="v5296-kpi-card"><div class="v5296-kpi-label">거래형 실현손익</div><div class="v5296-kpi-value v5296-blue">{_v5296_money(result.get("거래형실현손익",0), signed=True)}</div><div class="v5296-kpi-note">매도 거래 손익 기준</div></div>'
+                '</div>'
+                f'<div class="v5296-panel"><strong>거래건수 검증</strong> · <span class="{status_cls}">{"정상" if result.get("행수정상") else "확인 필요"}</span> '
+                f'· 실거래 {result.get("실거래",0):,}건 + 설명행 {result.get("설명행",0):,}건 = 최근자산변화 {result.get("전체표시행",len(df)):,}건</div>'
+            )
+            st.markdown(kpi, unsafe_allow_html=True)
+
+        st.markdown(
+            '<div class="v5296-panel v5296-warning"><strong>표시 원칙</strong> · 최근자산변화는 거래원장입니다. '
+            '같은 날짜·같은 종목이라도 수량과 단가가 다르면 각각 별도 행으로 표시합니다. '
+            '설명형 행은 매수/매도 실행이 아니라 거래 후 남은 잔액 반영으로 표시합니다.</div>',
+            unsafe_allow_html=True
+        )
+
+        summary_html = _v5296_split_summary_html(df)
+        if summary_html:
+            st.markdown(summary_html, unsafe_allow_html=True)
+
+        try:
+            with st.expander('최근자산변화 진단 보기', expanded=False):
+                최근자산변화_진단패널_v5293(df)
+        except Exception:
+            pass
+
+        표시건수 = max(int(최대표시 or 100), 100)
+        st.caption(f'원장 상세표 · 현재 화면 표시 {min(len(df), 표시건수):,}건 / 전체 {len(df):,}건')
+        st.markdown(_v5296_make_table(df, 표시건수), unsafe_allow_html=True)
+
+        if len(df) > 표시건수:
+            with st.expander(f'전체 원장행 보기 · {len(df):,}건', expanded=False):
+                st.markdown(_v5296_make_table(df, len(df)), unsafe_allow_html=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f'최근자산변화 v5.29.6 표시 오류: {type(e).__name__}: {e}')
+        except Exception:
+            pass
+        try:
+            return 최근자산변화_표시_v5295(이동df, 최대표시=최대표시)
+        except Exception:
+            return pd.DataFrame(이동df)
+
+
+# 최종 오버라이드: 기존 호출부는 유지하고 표시부만 v5.29.6으로 연결합니다.
+def 최근자산변화표시_v5224(이동df, 최대표시=100):
+    return 최근자산변화_표시_v5296(이동df, 최대표시=max(최대표시, 100))
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_표시_v5284 = 최근자산변화_표시_v5296
+최근자산변화_표시_v5286 = 최근자산변화_표시_v5296
+최근자산변화_표시_v5288 = 최근자산변화_표시_v5296
+최근자산변화_표시_v52810 = 최근자산변화_표시_v5296
+최근자산변화_표시_v5293 = 최근자산변화_표시_v5296
+최근자산변화_표시_v5294 = 최근자산변화_표시_v5296
+최근자산변화_표시_v5295 = 최근자산변화_표시_v5296
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=100):
+    이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 100))
+
+# ============================================================
+# end v5.29.6 UI POLISH FINAL OVERRIDE
 # ============================================================
