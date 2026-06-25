@@ -26039,3 +26039,273 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 # end v5.29.4 recent-ledger-readability FINAL OVERRIDE
 # ============================================================
+
+# ============================================================
+# v5.29.5 auto-analysis-balance-fix FINAL OVERRIDE
+# 목적:
+# - v5.29.4 정상 실행 기준선을 유지합니다.
+# - 숫자 계산, 원금 계산, 현금성 대기자산 계산, 최근자산변화 생성 로직은 변경하지 않습니다.
+# - 설명형 행의 자동분석 문구를 '거래 실행'이 아니라 '거래 후 잔액 반영'으로 표시합니다.
+# - 실거래 행은 기존 자동분석을 유지합니다.
+# ============================================================
+
+try:
+    APP_VERSION = "v5.29.5-auto-analysis-balance-fix"
+except Exception:
+    pass
+
+
+def _v5295_text(value):
+    try:
+        if "_v5293_text" in globals():
+            return _v5293_text(value)
+    except Exception:
+        pass
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    return s
+
+
+def _v5295_short_account(value):
+    s = _v5295_text(value)
+    if not s:
+        return ""
+    try:
+        if "_계좌짧게_v5226" in globals():
+            return _계좌짧게_v5226(s)
+    except Exception:
+        pass
+    return (s.replace("미래에셋증권", "미래에셋")
+             .replace("미래에셋/증권계좌", "미래에셋")
+             .replace("신한은행 IRP", "신한IRP")
+             .replace("증권계좌", "").strip())
+
+
+def _v5295_find_trade_asset(text):
+    """설명형 행 자동분석 문장 안에서 원인이 된 거래자산명을 추정합니다.
+    표시문구 보정용이며 계산에는 사용하지 않습니다.
+    """
+    t = _v5295_text(text)
+    compact = t.replace(" ", "")
+    candidates = [
+        ("TIGER코리아휴머노이드", "TIGER 휴머노이드 ETF"),
+        ("코리아휴머노이드", "TIGER 휴머노이드 ETF"),
+        ("휴머노이드", "TIGER 휴머노이드 ETF"),
+        ("삼성전자", "삼성전자"),
+        ("SK하이닉스", "SK하이닉스"),
+        ("현대차", "현대차"),
+        ("한화오션", "한화오션"),
+        ("삼성전기", "삼성전기"),
+        ("에이피알", "에이피알"),
+        ("KODEX200", "KODEX 200"),
+        ("KODEX 200", "KODEX 200"),
+        ("TIGER200", "TIGER 200"),
+        ("TIGER 200", "TIGER 200"),
+        ("코스닥150", "코스닥150 ETF"),
+        ("AI반도체핵심장비", "AI반도체핵심장비 ETF"),
+        ("AI전력핵심설비", "AI전력핵심설비 ETF"),
+        ("HD현대마린엔진", "HD현대마린엔진"),
+        ("TDF2035", "TDF2035"),
+    ]
+    for key, label in candidates:
+        if key.replace(" ", "") in compact:
+            return label
+    return ""
+
+
+def _v5295_is_desc_row(row):
+    try:
+        row_type = _v5295_text(row.get("행유형", "")) if hasattr(row, "get") else ""
+        kind = _v5295_text(row.get("구분", "")) if hasattr(row, "get") else ""
+        return row_type in ["설명행", "설명형"] or kind == "설명"
+    except Exception:
+        return False
+
+
+def _v5295_balance_autoanalysis(row):
+    """설명형 행의 자동분석을 잔액 반영 문장으로 보정합니다.
+
+    핵심 원칙:
+    - 실거래 행: 매수/매도 실행 설명 가능
+    - 설명형 행: 거래 실행이 아니라 거래 후 남은 예수금/현금성 대기자산 잔액 반영 설명
+    """
+    try:
+        if not hasattr(row, "get"):
+            return _v5295_text(row)
+
+        original = _v5295_text(row.get("자동분석", ""))
+        if not _v5295_is_desc_row(row):
+            return original
+
+        asset = _v5295_text(row.get("종목명", ""))
+        account = _v5295_short_account(row.get("계좌", ""))
+        target = _v5295_find_trade_asset(" ".join([
+            original,
+            _v5295_text(row.get("상세설명", "")),
+            asset,
+            account,
+        ]))
+        text_all = " ".join([asset, account, original]).replace(" ", "")
+
+        # 예수금 설명행: 주식·ETF 매수 후 남은 증권 예수금 잔액입니다.
+        if "예수금" in text_all or "예수" in text_all:
+            if not target:
+                target = "투자자산"
+            acct = account or "예수금"
+            return f"{target} 매수 후 {acct} 예수금 잔액 반영"
+
+        # 현금성 대기자산 설명행: 매도 후 남은 IRP/현금성 대기자산 잔액입니다.
+        if "현금성대기자산" in text_all or "현금대기" in text_all or "대기자산" in text_all:
+            if not target:
+                target = "투자자산"
+            acct = account or "현금성 대기자산"
+            if "매수" in original and "매도" not in original:
+                # 과거 잘못 생성된 문장 방어: 설명형 대기자산은 매수 실행 문장으로 쓰지 않습니다.
+                return f"{target} 거래 후 {acct} 현금성 대기자산 잔액 반영"
+            return f"{target} 매도 후 {acct} 현금성 대기자산 잔액 반영"
+
+        # 기타 설명형 행은 거래 실행 문장이 아니라 상태/잔액 반영 문장으로 완화합니다.
+        if "매수" in original or "매도" in original or "반영" in original:
+            if target:
+                return f"{target} 거래 후 잔액 반영"
+            return "거래 후 잔액 반영"
+        return original or "설명형 잔액 반영"
+    except Exception:
+        try:
+            return _v5295_text(row.get("자동분석", ""))
+        except Exception:
+            return ""
+
+
+def _v5295_display_df(df):
+    """v5.29.4 표시표를 유지하되 설명형 행 자동분석만 보정합니다."""
+    try:
+        raw = pd.DataFrame(df).copy().reset_index(drop=True)
+        if "_v5294_display_df" in globals():
+            base = _v5294_display_df(raw)
+        elif "_v5293_display_df" in globals():
+            base = _v5293_display_df(raw)
+        else:
+            base = raw.copy()
+        base = pd.DataFrame(base).copy().reset_index(drop=True)
+        if "자동분석" in base.columns and not raw.empty:
+            fixed = raw.apply(_v5295_balance_autoanalysis, axis=1).tolist()
+            # v5.29.4와 같은 표 가독성 기준을 유지합니다.
+            base["자동분석"] = [x if len(str(x)) <= 70 else str(x)[:67] + "..." for x in fixed[:len(base)]]
+        return base
+    except Exception:
+        try:
+            return _v5294_display_df(df)
+        except Exception:
+            return pd.DataFrame(df).copy()
+
+
+def 최근자산변화_표시_v5295(이동df, 최대표시=100):
+    """최근자산변화 v5.29.5 최종 표시부.
+    원본 행 통합 금지, 계산 로직 변경 금지, 설명형 자동분석 문장만 보정합니다.
+    """
+    try:
+        df = pd.DataFrame(이동df).copy()
+        if df.empty:
+            st.markdown("### 🔎 최근 자산변화")
+            st.caption("최근 자산변화로 표시할 내역이 없습니다.")
+            return df
+
+        st.markdown("### 🔎 최근 자산변화")
+        result = 최근자산변화_검증_v5293(df) if "최근자산변화_검증_v5293" in globals() else {}
+
+        if result and "오류" not in result:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("실거래", f"{result['실거래']:,}건", help="거래이력 원본 기준 실제 매수·매도 거래행입니다. 절대 통합하지 않습니다.")
+            c2.metric("설명행", f"{result['설명행']:,}건", help="예수금·현금성 대기자산처럼 거래가 아닌 상태 설명 행입니다.")
+            c3.metric("전체 표시행", f"{result['전체표시행']:,}건", help="실거래와 설명행을 합친 최근자산변화 전체 행수입니다.")
+            c4.metric("거래형 실현손익", _v5293_money(result["거래형실현손익"], signed=True), help="주식·ETF 매도 거래에서 발생한 실현손익입니다.")
+
+            if result.get("행수정상"):
+                st.success(
+                    f"거래건수 검증 정상 · 실거래 {result['실거래']:,}건 + "
+                    f"설명행 {result['설명행']:,}건 = 최근자산변화 {result['전체표시행']:,}건"
+                )
+            else:
+                st.error(
+                    f"거래건수 검증 필요 · 원장 거래행 {result['원장거래행']:,}건 / "
+                    f"최근자산변화 실거래 {result['실거래']:,}건 / 전체 표시행 {result['전체표시행']:,}건"
+                )
+
+        st.info("표시 원칙: 최근자산변화는 거래원장입니다. 같은 날짜·같은 종목이라도 수량과 단가가 다르면 각각 별도 행으로 표시합니다.")
+        st.caption("설명형 행 원칙: 예수금·현금성 대기자산 행은 매수/매도 실행이 아니라 거래 후 남은 잔액 반영으로 표시합니다.")
+
+        try:
+            최근자산변화_분할거래요약_v5294(df)
+        except Exception:
+            pass
+
+        try:
+            최근자산변화_진단패널_v5293(df)
+        except Exception:
+            pass
+
+        표시건수 = max(int(최대표시 or 100), 100)
+        표시 = _v5295_display_df(df.head(표시건수))
+        st.caption(f"원장 상세표 · 현재 화면 표시 {min(len(df), 표시건수):,}건 / 전체 {len(df):,}건")
+        try:
+            if "_v5288_signed_money_style" in globals() and "실현손익" in 표시.columns:
+                sty = 표시.style.applymap(lambda v: _v5288_signed_money_style(v), subset=["실현손익"])
+            else:
+                sty = 표시.style
+            if "표데이터프레임" in globals():
+                표데이터프레임(sty, width="stretch", hide_index=True)
+            else:
+                st.dataframe(sty, use_container_width=True, hide_index=True)
+        except Exception:
+            if "표데이터프레임" in globals():
+                표데이터프레임(표시, width="stretch", hide_index=True)
+            else:
+                st.dataframe(표시, use_container_width=True, hide_index=True)
+
+        if len(df) > 표시건수:
+            with st.expander(f"전체 원장행 보기 · {len(df):,}건", expanded=False):
+                full = _v5295_display_df(df)
+                if "표데이터프레임" in globals():
+                    표데이터프레임(full, width="stretch", hide_index=True)
+                else:
+                    st.dataframe(full, use_container_width=True, hide_index=True)
+        return df
+    except Exception as e:
+        try:
+            st.caption(f"최근자산변화 v5.29.5 표시 오류: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+        try:
+            return 최근자산변화_표시_v5294(이동df, 최대표시=최대표시)
+        except Exception:
+            return pd.DataFrame(이동df)
+
+
+def 최근자산변화표시_v5224(이동df, 최대표시=100):
+    return 최근자산변화_표시_v5295(이동df, 최대표시=max(최대표시, 100))
+
+
+최근자산변화표시_v5226 = 최근자산변화표시_v5224
+최근자산변화표시_v5223 = 최근자산변화표시_v5224
+최근자산변화_표시_v5284 = 최근자산변화_표시_v5295
+최근자산변화_표시_v5286 = 최근자산변화_표시_v5295
+최근자산변화_표시_v5288 = 최근자산변화_표시_v5295
+최근자산변화_표시_v52810 = 최근자산변화_표시_v5295
+최근자산변화_표시_v5293 = 최근자산변화_표시_v5295
+최근자산변화_표시_v5294 = 최근자산변화_표시_v5295
+
+
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=100):
+    이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 100))
+
+# ============================================================
+# end v5.29.5 auto-analysis-balance-fix FINAL OVERRIDE
+# ============================================================
