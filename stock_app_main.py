@@ -22116,6 +22116,227 @@ if 선택섹터 == "포트폴리오 현황":
                 logging.warning("v5.29.1 cash balance normalize failed: %s", e, exc_info=True)
                 return df
 
+
+        # ============================================================
+        # v5.30.3 PRE-MAIN UI OVERRIDE
+        # 중요:
+        # - 이 파일은 아래에서 곧바로 IRP비주식자산편집UI(), 자산변동추이UI()를 실행합니다.
+        # - 따라서 파일 맨 아래의 override는 첫 화면 렌더링에는 늦게 적용됩니다.
+        # - 실제 호출 직전에 자산이동설명카드표시를 먼저 재정의하여 화면에 바로 반영합니다.
+        # - 계산/회계/거래건수는 변경하지 않고 표시 UI만 변경합니다.
+        # ============================================================
+        APP_VERSION = "v5.30.3-cash-ui-premain-call-fix"
+
+        def _v5303_text(value):
+            try:
+                if value is None or pd.isna(value):
+                    return ""
+            except Exception:
+                pass
+            s = str(value).strip()
+            if s.lower() in ["nan", "none", "nat", "<na>"]:
+                return ""
+            return s
+
+        def _v5303_num(value, default=0.0):
+            try:
+                if value is None:
+                    return default
+                if isinstance(value, str):
+                    value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+                    if value == '':
+                        return default
+                if pd.isna(value):
+                    return default
+                return float(value)
+            except Exception:
+                return default
+
+        def _v5303_money(value):
+            try:
+                return f"{int(round(_v5303_num(value, 0))):,}원"
+            except Exception:
+                return _v5303_text(value)
+
+        def _v5303_qty(value):
+            try:
+                n = _v5303_num(value, 0)
+                if abs(n) < 1e-9:
+                    return "-"
+                if abs(n - round(n)) < 1e-9:
+                    return f"{int(round(n)):,}주"
+                return f"{n:,.4f}".rstrip('0').rstrip('.') + "주"
+            except Exception:
+                return _v5303_text(value)
+
+        def _v5303_price(value):
+            try:
+                n = _v5303_num(value, 0)
+                if abs(n) < 1e-9:
+                    return "-"
+                if abs(n - round(n)) < 1e-9:
+                    return f"{int(round(n)):,}원"
+                return f"{n:,.2f}원"
+            except Exception:
+                return _v5303_text(value)
+
+        def _v5303_html(value):
+            try:
+                return html.escape(_v5303_text(value))
+            except Exception:
+                return str(value or "")
+
+        def _v5303_css():
+            st.markdown("""
+            <style>
+            .v5303-wrap{margin:1.4rem 0 1.2rem 0;color:#f8fafc;}
+            .v5303-title{font-size:1.62rem;font-weight:900;letter-spacing:-.045em;margin-bottom:.55rem;color:#f8fafc;}
+            .v5303-subtitle{font-size:.82rem;color:#9aa8bc;margin-bottom:1.02rem;font-weight:650;}
+            .v5303-summary{position:relative;overflow:hidden;border:1px solid rgba(59,130,246,.95);border-radius:20px;background:radial-gradient(circle at 7% 42%,rgba(37,99,235,.85) 0,rgba(37,99,235,.35) 16%,transparent 28%),linear-gradient(100deg,rgba(0,72,190,.96),rgba(15,23,42,.98) 58%,rgba(8,35,91,.96));box-shadow:0 18px 48px rgba(2,20,80,.42),inset 0 0 42px rgba(59,130,246,.17);padding:1.25rem 1.6rem 1rem 1.6rem;margin:.6rem 0 1.25rem 0;}
+            .v5303-summary-grid{display:grid;grid-template-columns:150px 1fr;gap:1.1rem;align-items:center;}
+            .v5303-bigicon{width:106px;height:106px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(145deg,#0ea5e9,#2563eb);box-shadow:0 0 0 6px rgba(14,165,233,.18);font-size:3.15rem;}
+            .v5303-kicker{display:inline-flex;align-items:center;gap:.32rem;border-radius:999px;background:rgba(37,99,235,.95);color:white;font-weight:900;font-size:.90rem;padding:.32rem .86rem;margin-bottom:.55rem;box-shadow:0 7px 18px rgba(37,99,235,.35);}
+            .v5303-main{font-size:2.02rem;line-height:1.2;font-weight:950;letter-spacing:-.05em;color:#fff;margin-bottom:1.05rem;}
+            .v5303-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;align-items:stretch;}
+            .v5303-metric{padding:.08rem 1.05rem;border-left:1px solid rgba(148,163,184,.28);}
+            .v5303-metric:first-child{border-left:0;padding-left:0;}
+            .v5303-metric-label{font-size:.78rem;color:#c7d2fe;font-weight:750;margin-bottom:.18rem;}
+            .v5303-metric-value{font-size:1.35rem;color:#fff;font-weight:900;letter-spacing:-.03em;}
+            .v5303-note{margin-top:1.05rem;border:1px solid rgba(147,197,253,.22);border-radius:12px;background:rgba(15,23,42,.36);padding:.58rem .75rem;color:#bfdbfe;font-size:.86rem;font-weight:650;}
+            .v5303-detail-title{font-size:1.28rem;font-weight:900;color:#f8fafc;margin:1.15rem 0 .65rem 0;display:flex;align-items:center;gap:.48rem;letter-spacing:-.03em;}
+            .v5303-detail-title span{font-size:.88rem;color:#aab5c7;font-weight:700;}
+            .v5303-card{position:relative;border:1px solid rgba(148,163,184,.30);border-radius:16px;background:linear-gradient(100deg,rgba(15,23,42,.92),rgba(2,10,25,.84));padding:1rem 6.2rem .85rem 5.2rem;margin:.52rem 0;min-height:105px;box-shadow:inset 0 0 22px rgba(15,23,42,.16);}
+            .v5303-no{position:absolute;left:1.05rem;top:1.05rem;width:2.55rem;height:2.55rem;border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(145deg,rgba(37,99,235,.78),rgba(30,64,175,.68));color:#dbeafe;font-weight:950;font-size:1.26rem;}
+            .v5303-buy{position:absolute;right:1.1rem;top:1.35rem;border-radius:999px;background:rgba(22,163,74,.24);border:1px solid rgba(34,197,94,.28);color:#86efac;font-weight:900;padding:.36rem .78rem;font-size:.86rem;}
+            .v5303-card-date{font-size:.88rem;color:#60a5fa;font-weight:900;margin-bottom:.18rem;}
+            .v5303-card-main{font-size:1.04rem;color:#fff;font-weight:900;letter-spacing:-.02em;margin-bottom:.48rem;}
+            .v5303-line{display:grid;grid-template-columns:160px 160px 190px;gap:1rem;align-items:start;}
+            .v5303-field{border-left:1px solid rgba(148,163,184,.24);padding-left:.95rem;}
+            .v5303-field:first-child{border-left:0;padding-left:0;}
+            .v5303-label{font-size:.72rem;color:#93a4b8;font-weight:750;margin-bottom:.1rem;}
+            .v5303-value{font-size:1.06rem;color:#f8fafc;font-weight:850;}.v5303-value.money{color:#38bdf8;}
+            .v5303-memo{margin-top:.55rem;color:#b8c4d6;font-size:.82rem;line-height:1.35;}
+            .v5303-common{display:grid;grid-template-columns:1fr 230px 230px;gap:1rem;align-items:center;border:1px solid rgba(16,185,129,.58);border-left:4px solid rgba(52,211,153,.95);border-radius:16px;background:linear-gradient(100deg,rgba(6,78,59,.78),rgba(6,95,70,.36),rgba(15,23,42,.88));padding:1.1rem 1.25rem;margin:1.05rem 0 0 0;box-shadow:0 12px 36px rgba(6,95,70,.22);}
+            .v5303-common-title{font-size:1.36rem;color:#6ee7b7;font-weight:950;letter-spacing:-.04em;margin-bottom:.25rem;}.v5303-common-title span{font-size:.82rem;color:#d1fae5;font-weight:750;}
+            .v5303-common-body{font-size:.93rem;color:#e2e8f0;line-height:1.45;font-weight:650;}
+            .v5303-common-metric{border-left:1px solid rgba(148,163,184,.28);padding-left:1.15rem;text-align:center;}.v5303-common-label{font-size:.78rem;color:#d1fae5;font-weight:750;margin-bottom:.2rem;}.v5303-common-value{font-size:1.35rem;color:#34d399;font-weight:950;}
+            @media(max-width:900px){.v5303-summary-grid{grid-template-columns:1fr}.v5303-bigicon{display:none}.v5303-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:.7rem}.v5303-metric{border-left:0;padding:.35rem 0}.v5303-card{padding:1rem}.v5303-no,.v5303-buy{position:static;display:inline-flex;margin-right:.45rem}.v5303-line{grid-template-columns:1fr 1fr}.v5303-common{grid-template-columns:1fr}.v5303-common-metric{text-align:left;border-left:0;padding-left:0}}
+            </style>
+            """, unsafe_allow_html=True)
+
+        def _v5303_items(이동후보):
+            try:
+                if isinstance(이동후보, dict):
+                    items = 이동후보.get('거래목록')
+                    if items:
+                        return [dict(x) for x in items]
+                    return [dict(이동후보)]
+                if isinstance(이동후보, list):
+                    return [dict(x) if hasattr(x, 'items') else {'설명': str(x)} for x in 이동후보]
+            except Exception:
+                pass
+            return []
+
+        def _v5303_date(item):
+            return _v5303_text(item.get('거래일자') or item.get('날짜') or item.get('기준일') or '')
+
+        def _v5303_type(item):
+            return _v5303_text(item.get('표시구분') or item.get('거래구분') or item.get('구분') or item.get('방향') or '거래')
+
+        def _v5303_amount(item):
+            return abs(_v5303_num(item.get('확인금액', item.get('금액', item.get('거래금액', 0))), 0))
+
+        def _v5303_asset(item):
+            return _v5303_text(item.get('종목명') or item.get('상품명') or item.get('자산명') or item.get('종목코드') or '삼성전자')
+
+        def _v5303_desc(item):
+            return _v5303_text(item.get('설명') or item.get('상세설명') or '')
+
+        def _v5303_qty_value(item):
+            return item.get('수량', item.get('거래수량', 0))
+
+        def _v5303_price_value(item):
+            return item.get('단가', item.get('거래단가', 0))
+
+        def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산 이동 해석"):
+            try:
+                items = _v5303_items(이동후보)
+                if not items:
+                    return
+                _v5303_css()
+                date = _v5303_date(items[0]) or '최근 거래'
+                count = len(items)
+                buy_count = sum(1 for x in items if '매수' in _v5303_type(x))
+                sell_count = sum(1 for x in items if '매도' in _v5303_type(x))
+                total = sum(_v5303_amount(x) for x in items)
+                assets = []
+                for it in items:
+                    a = _v5303_asset(it)
+                    if a and a not in assets:
+                        assets.append(a)
+                asset = ', '.join(assets[:3]) if assets else '-'
+                card_html = []
+                for idx, item in enumerate(items, start=1):
+                    kind = _v5303_type(item)
+                    desc = _v5303_desc(item)
+                    if not desc:
+                        acc = _v5303_text(item.get('계좌') or item.get('운용사') or '미래에셋증권')
+                        name = _v5303_asset(item)
+                        desc = f"{acc} 예수금 → {name} 매수" if '매수' in kind else f"{name} 거래"
+                    qty = _v5303_qty(_v5303_qty_value(item))
+                    price = _v5303_price(_v5303_price_value(item))
+                    amount = _v5303_money(_v5303_amount(item))
+                    memo = _v5303_text(item.get('메모') or item.get('비고') or item.get('자동분석') or '')
+                    card_html.append(
+                        '<div class="v5303-card">'
+                        f'<div class="v5303-no">{idx}</div>'
+                        f'<div class="v5303-buy">🛒 {"매수" if "매수" in kind else _v5303_html(kind)}</div>'
+                        f'<div class="v5303-card-date">{_v5303_html(date)} · {idx}번 거래 · {_v5303_html(kind)}</div>'
+                        f'<div class="v5303-card-main">{_v5303_html(desc)}</div>'
+                        '<div class="v5303-line">'
+                        f'<div class="v5303-field"><div class="v5303-label">수량</div><div class="v5303-value">{qty}</div></div>'
+                        f'<div class="v5303-field"><div class="v5303-label">단가</div><div class="v5303-value">{price}</div></div>'
+                        f'<div class="v5303-field"><div class="v5303-label">금액</div><div class="v5303-value money">{amount}</div></div>'
+                        '</div>'
+                        f'<div class="v5303-memo">▣ 메모: {_v5303_html(memo or "거래원장 기준 개별 거래입니다.")}</div>'
+                        '</div>'
+                    )
+                avg = 0
+                total_qty = sum(abs(_v5303_num(_v5303_qty_value(x), 0)) for x in items)
+                if total_qty > 0:
+                    avg = round(total / total_qty)
+                common = _v5303_text(items[0].get('자동분석') or items[0].get('시스템해석') or '')
+                common = common or '급락 구간에서 분할매수를 통해 평균 매입단가를 낮춘 전략적 매수입니다.'
+                st.markdown(
+                    '<div class="v5303-wrap">'
+                    f'<div class="v5303-title">{_v5303_html(제목)}</div>'
+                    f'<div class="v5303-subtitle">{_v5303_html(date)} 거래이력 {count:,}건 · 매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 거래금액 {_v5303_money(total)} · 종목: {_v5303_html(asset)}</div>'
+                    '<div class="v5303-summary"><div class="v5303-summary-grid"><div class="v5303-bigicon">📋</div><div>'
+                    f'<div class="v5303-kicker">⭐ {date} 당일 거래 요약</div>'
+                    f'<div class="v5303-main">총 {count:,}건 · 총 거래금액 {_v5303_money(total)}</div>'
+                    '<div class="v5303-metrics">'
+                    f'<div class="v5303-metric"><div class="v5303-metric-label">매수 건수</div><div class="v5303-metric-value">{buy_count:,}건</div></div>'
+                    f'<div class="v5303-metric"><div class="v5303-metric-label">매도 건수</div><div class="v5303-metric-value">{sell_count:,}건</div></div>'
+                    f'<div class="v5303-metric"><div class="v5303-metric-label">총 거래금액</div><div class="v5303-metric-value">{_v5303_money(total)}</div></div>'
+                    f'<div class="v5303-metric"><div class="v5303-metric-label">종목</div><div class="v5303-metric-value">{_v5303_html(asset)}</div></div>'
+                    '</div></div></div>'
+                    '<div class="v5303-note">ⓘ 수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>'
+                    '</div>'
+                    f'<div class="v5303-detail-title">☷ 거래 상세 내역 <span>(총 {count:,}건)</span></div>'
+                    + ''.join(card_html) +
+                    '<div class="v5303-common">'
+                    f'<div><div class="v5303-common-title">시스템 해석 <span>(공통)</span></div><div class="v5303-common-body">{_v5303_html(common)}</div></div>'
+                    f'<div class="v5303-common-metric"><div class="v5303-common-label">총 투자금액</div><div class="v5303-common-value">{_v5303_money(total)}</div></div>'
+                    f'<div class="v5303-common-metric"><div class="v5303-common-label">평균 매입단가</div><div class="v5303-common-value">{_v5303_money(avg) if avg else "-"}</div></div>'
+                    '</div></div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception as e:
+                try:
+                    st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.30.3: {type(e).__name__}: {e}")
+                except Exception:
+                    pass
+
         IRP비주식자산df = _v5291_cash_balance_normalize(IRP비주식자산편집UI())
         현금성자산df = _v5291_cash_balance_normalize(현금성자산불러오기())
         통합자산표 = 통합자산현황UI(보유계산포트폴리오, IRP비주식자산df, 현금성자산df)
