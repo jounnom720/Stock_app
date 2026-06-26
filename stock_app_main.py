@@ -27510,3 +27510,520 @@ def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산
 # ============================================================
 # end v5.29.9 cash-ui-hierarchy-system-note
 # ============================================================
+
+
+
+# ============================================================
+# v5.30.0 cash-ui-complete FINAL OVERRIDE
+# 목적:
+# - 숫자/회계/거래건수/최근자산변화 생성 로직은 변경하지 않습니다.
+# - 현금성 자산 이동 해석 UI만 최종 개선합니다.
+# - 당일 거래 요약은 상위 배너, 건별 거래는 하위 카드, 시스템 해석은 하단 공통 해석 1회로 분리합니다.
+# - 거래이력은 절대 통합하지 않고 건별 표시 원칙을 유지합니다.
+# ============================================================
+try:
+    APP_VERSION = "v5.30.0-cash-ui-complete"
+except Exception:
+    pass
+
+
+def _v5300_html(value):
+    try:
+        if '_v5296_html' in globals():
+            return _v5296_html(value)
+    except Exception:
+        pass
+    try:
+        return html.escape(str(value if value is not None else ''))
+    except Exception:
+        return str(value if value is not None else '')
+
+
+def _v5300_num(value, default=0.0):
+    try:
+        if '_v5296_num' in globals():
+            return _v5296_num(value, default)
+    except Exception:
+        pass
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5300_money(value, signed=False):
+    try:
+        if '_v5296_money' in globals():
+            return _v5296_money(value, signed=signed)
+    except Exception:
+        pass
+    try:
+        n = _v5300_num(value, 0)
+        if signed and n > 0:
+            return f'+{n:,.0f}원'
+        return f'{n:,.0f}원'
+    except Exception:
+        return str(value)
+
+
+def _v5300_text(value):
+    try:
+        if value is None:
+            return ''
+        s = str(value).strip()
+        if s.lower() in ['nan', 'none', 'nat', '<na>']:
+            return ''
+        return s
+    except Exception:
+        return ''
+
+
+def _v5300_css():
+    """현금성 자산 이동 해석 전용 최종 CSS."""
+    try:
+        # 기존 최신 CSS가 있으면 먼저 로드해 전체 화면 톤을 유지합니다.
+        try:
+            if '_v5298_css' in globals():
+                _v5298_css()
+        except Exception:
+            pass
+        st.markdown("""
+        <style>
+        .v5300-shell{
+            margin:.25rem 0 1rem 0;
+            padding:0;
+        }
+        .v5300-title-row{
+            display:flex;
+            align-items:flex-end;
+            justify-content:space-between;
+            gap:.9rem;
+            margin:.1rem 0 .7rem 0;
+        }
+        .v5300-title{
+            color:#f8fafc;
+            font-size:1.34rem;
+            font-weight:900;
+            letter-spacing:-.045em;
+            line-height:1.22;
+        }
+        .v5300-subtitle{
+            color:#9aa9bd;
+            font-size:.78rem;
+            font-weight:650;
+            margin-top:.18rem;
+            line-height:1.45;
+        }
+        .v5300-summary-banner{
+            position:relative;
+            overflow:hidden;
+            border:1px solid rgba(56,189,248,.38);
+            border-left:7px solid rgba(56,189,248,.95);
+            background:
+                radial-gradient(circle at 0% 0%, rgba(14,165,233,.30), transparent 34%),
+                linear-gradient(135deg, rgba(8,47,73,.72), rgba(15,23,42,.58) 58%, rgba(2,6,23,.48));
+            box-shadow:0 12px 32px rgba(2,8,23,.22);
+            border-radius:18px;
+            padding:1.05rem 1.18rem 1rem 1.18rem;
+            margin:.35rem 0 .92rem 0;
+        }
+        .v5300-summary-top{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:.8rem;
+            margin-bottom:.54rem;
+        }
+        .v5300-kicker{
+            display:inline-flex;
+            align-items:center;
+            gap:.35rem;
+            border-radius:999px;
+            padding:.22rem .62rem;
+            background:rgba(186,230,253,.14);
+            border:1px solid rgba(125,211,252,.22);
+            color:#bae6fd;
+            font-size:.73rem;
+            font-weight:900;
+            letter-spacing:-.02em;
+        }
+        .v5300-date-pill{
+            border-radius:999px;
+            padding:.20rem .58rem;
+            background:rgba(15,23,42,.38);
+            border:1px solid rgba(148,163,184,.18);
+            color:#dbeafe;
+            font-size:.72rem;
+            font-weight:800;
+            white-space:nowrap;
+        }
+        .v5300-summary-main{
+            color:#f8fafc;
+            font-size:1.15rem;
+            line-height:1.38;
+            letter-spacing:-.035em;
+            font-weight:920;
+            margin:.1rem 0 .5rem 0;
+        }
+        .v5300-summary-grid{
+            display:grid;
+            grid-template-columns:repeat(3,minmax(0,1fr));
+            gap:.56rem;
+            margin-top:.70rem;
+        }
+        .v5300-summary-metric{
+            border-radius:13px;
+            background:rgba(15,23,42,.36);
+            border:1px solid rgba(148,163,184,.16);
+            padding:.62rem .72rem;
+        }
+        .v5300-metric-label{
+            color:#94a3b8;
+            font-size:.70rem;
+            font-weight:800;
+            margin-bottom:.16rem;
+        }
+        .v5300-metric-value{
+            color:#f8fafc;
+            font-size:.98rem;
+            font-weight:900;
+            letter-spacing:-.025em;
+        }
+        .v5300-summary-guide{
+            color:#a9bdd4;
+            font-size:.76rem;
+            line-height:1.48;
+            margin-top:.65rem;
+        }
+        .v5300-section-label{
+            display:flex;
+            align-items:center;
+            gap:.45rem;
+            color:#e2e8f0;
+            font-size:.86rem;
+            font-weight:900;
+            margin:.86rem 0 .46rem 0;
+            letter-spacing:-.02em;
+        }
+        .v5300-section-label:before{
+            content:"";
+            width:.48rem;
+            height:.48rem;
+            border-radius:999px;
+            background:rgba(56,189,248,.82);
+            box-shadow:0 0 0 4px rgba(56,189,248,.10);
+        }
+        .v5300-card-list{
+            display:grid;
+            grid-template-columns:1fr;
+            gap:.42rem;
+        }
+        .v5300-trade-card{
+            display:grid;
+            grid-template-columns:7.2rem minmax(0,1fr) 8.8rem;
+            gap:.72rem;
+            align-items:center;
+            border:1px solid rgba(148,163,184,.16);
+            background:linear-gradient(180deg, rgba(15,23,42,.34), rgba(15,23,42,.22));
+            border-radius:14px;
+            padding:.68rem .78rem;
+        }
+        .v5300-card-meta{
+            color:#93c5fd;
+            font-size:.72rem;
+            font-weight:900;
+            line-height:1.32;
+            white-space:nowrap;
+        }
+        .v5300-card-type{
+            display:inline-flex;
+            margin-top:.22rem;
+            padding:.12rem .42rem;
+            border-radius:999px;
+            background:rgba(59,130,246,.16);
+            border:1px solid rgba(96,165,250,.18);
+            color:#bfdbfe;
+            font-size:.66rem;
+            font-weight:850;
+        }
+        .v5300-card-main{
+            color:#f8fafc;
+            font-size:.90rem;
+            line-height:1.42;
+            font-weight:800;
+            letter-spacing:-.025em;
+        }
+        .v5300-card-sub{
+            color:#94a3b8;
+            font-size:.72rem;
+            line-height:1.38;
+            margin-top:.10rem;
+            font-weight:650;
+        }
+        .v5300-card-amount{
+            text-align:right;
+            color:#7dd3fc;
+            font-size:.88rem;
+            font-weight:920;
+            letter-spacing:-.02em;
+            white-space:nowrap;
+        }
+        .v5300-common-note{
+            margin:.9rem 0 .25rem 0;
+            border:1px solid rgba(125,211,252,.22);
+            border-left:5px solid rgba(125,211,252,.72);
+            background:linear-gradient(135deg, rgba(14,116,144,.18), rgba(30,41,59,.26));
+            border-radius:15px;
+            padding:.78rem .92rem;
+            color:#cfe7ff;
+            font-size:.80rem;
+            line-height:1.55;
+        }
+        .v5300-common-title{
+            color:#f8fafc;
+            font-size:.86rem;
+            font-weight:920;
+            margin-bottom:.28rem;
+            letter-spacing:-.02em;
+        }
+        .v5300-common-note ul{
+            margin:.25rem 0 0 1.05rem;
+            padding:0;
+        }
+        .v5300-common-note li{
+            margin:.16rem 0;
+        }
+        @media(max-width:900px){
+            .v5300-summary-grid{grid-template-columns:1fr;}
+            .v5300-trade-card{grid-template-columns:1fr;gap:.28rem;}
+            .v5300-card-amount{text-align:left;}
+            .v5300-title-row{display:block;}
+        }
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+def _v5300_trade_items(이동후보):
+    try:
+        if isinstance(이동후보, dict):
+            items = 이동후보.get('거래목록')
+            if isinstance(items, list) and items:
+                return items
+            return [이동후보]
+        if isinstance(이동후보, list):
+            return 이동후보
+    except Exception:
+        pass
+    return []
+
+
+def _v5300_item_date(item):
+    for key in ['거래일자', '날짜', '일자', '기준일']:
+        v = _v5300_text(item.get(key, '') if hasattr(item, 'get') else '')
+        if v:
+            return v
+    return '최근 거래'
+
+
+def _v5300_item_type(item):
+    for key in ['표시구분', '방향', '구분', '거래구분']:
+        v = _v5300_text(item.get(key, '') if hasattr(item, 'get') else '')
+        if v:
+            return v
+    return '거래'
+
+
+def _v5300_item_desc(item):
+    for key in ['설명', '상세설명', '이동내용', '내용', '종목명']:
+        v = _v5300_text(item.get(key, '') if hasattr(item, 'get') else '')
+        if v:
+            return v
+    return '거래 내역'
+
+
+def _v5300_item_account(item):
+    for key in ['계좌', '출금계좌', '입금계좌']:
+        v = _v5300_text(item.get(key, '') if hasattr(item, 'get') else '')
+        if v:
+            try:
+                if '_계좌짧게_v5226' in globals():
+                    return _계좌짧게_v5226(v)
+            except Exception:
+                pass
+            return v
+    return ''
+
+
+def _v5300_item_amount(item):
+    for key in ['확인금액', '이동금액', '금액', '매수금액', '매도금액']:
+        if hasattr(item, 'get') and key in item:
+            return _v5300_num(item.get(key, 0), 0)
+    return 0.0
+
+
+def _v5300_unique_notes(items):
+    notes = []
+    try:
+        for item in items or []:
+            for key in ['자동분석', '시스템해석', '해석']:
+                note = _v5300_text(item.get(key, '') if hasattr(item, 'get') else '')
+                if note and note not in notes:
+                    notes.append(note)
+        return notes
+    except Exception:
+        return notes
+
+
+def _v5300_summary_html(items):
+    try:
+        count = len(items)
+        date = _v5300_item_date(items[0]) if items else '최근 거래'
+        total = sum(abs(_v5300_item_amount(x)) for x in items)
+        buy_count = sum(1 for x in items if '매수' in _v5300_item_type(x))
+        sell_count = sum(1 for x in items if '매도' in _v5300_item_type(x))
+        transfer_count = max(0, count - buy_count - sell_count)
+        kinds = []
+        if buy_count:
+            kinds.append(f'매수 {buy_count:,}건')
+        if sell_count:
+            kinds.append(f'매도 {sell_count:,}건')
+        if transfer_count:
+            kinds.append(f'기타 {transfer_count:,}건')
+        kind_text = ' · '.join(kinds) if kinds else f'{count:,}건'
+        main_desc = '당일 거래 요약'
+        if count >= 2:
+            first_desc = _v5300_item_desc(items[0])
+            if '삼성전자' in first_desc:
+                main_desc = '삼성전자 분할거래 요약'
+            elif 'TIGER' in first_desc or '휴머노이드' in first_desc:
+                main_desc = 'ETF 거래 후 현금성 잔액 요약'
+        return (
+            '<div class="v5300-summary-banner">'
+            '<div class="v5300-summary-top">'
+            '<div class="v5300-kicker">상위 요약 · 당일 묶음</div>'
+            f'<div class="v5300-date-pill">{_v5300_html(date)}</div>'
+            '</div>'
+            f'<div class="v5300-summary-main">{_v5300_html(main_desc)} · 총 {count:,}건</div>'
+            '<div class="v5300-summary-grid">'
+            f'<div class="v5300-summary-metric"><div class="v5300-metric-label">거래 구분</div><div class="v5300-metric-value">{_v5300_html(kind_text)}</div></div>'
+            f'<div class="v5300-summary-metric"><div class="v5300-metric-label">총 거래금액</div><div class="v5300-metric-value">{_v5300_money(total)}</div></div>'
+            '<div class="v5300-summary-metric"><div class="v5300-metric-label">표시 원칙</div><div class="v5300-metric-value">건별 유지</div></div>'
+            '</div>'
+            '<div class="v5300-summary-guide">이 배너는 당일 거래를 이해하기 위한 상위 요약입니다. 아래 건별 거래 카드는 실제 거래원장의 수량·단가·금액을 합산하지 않고 각각 유지합니다.</div>'
+            '</div>'
+        )
+    except Exception:
+        return ''
+
+
+def _v5300_card_html(item, idx):
+    try:
+        date = _v5300_item_date(item)
+        typ = _v5300_item_type(item)
+        desc = _v5300_item_desc(item)
+        account = _v5300_item_account(item)
+        amount = _v5300_item_amount(item)
+        sub_parts = []
+        if account:
+            sub_parts.append(f'계좌: {account}')
+        qty = _v5300_text(item.get('수량', '') if hasattr(item, 'get') else '')
+        price = _v5300_text(item.get('단가', '') if hasattr(item, 'get') else '')
+        if qty:
+            sub_parts.append(f'수량: {qty}')
+        if price:
+            sub_parts.append(f'단가: {price}')
+        sub = ' · '.join(sub_parts)
+        return (
+            '<div class="v5300-trade-card">'
+            f'<div class="v5300-card-meta">{idx}번 거래<br><span class="v5300-card-type">{_v5300_html(typ)}</span></div>'
+            '<div>'
+            f'<div class="v5300-card-main">{_v5300_html(desc)}</div>'
+            f'<div class="v5300-card-sub">{_v5300_html(date)}{(" · " + _v5300_html(sub)) if sub else ""}</div>'
+            '</div>'
+            f'<div class="v5300-card-amount">{_v5300_money(amount)}</div>'
+            '</div>'
+        )
+    except Exception:
+        return ''
+
+
+def _v5300_common_note_html(items):
+    try:
+        notes = _v5300_unique_notes(items)
+        if not notes:
+            body = '같은 날짜의 거래라도 실제 거래원장 기준으로 건별 표시합니다. 현금성 자산 이동은 외부 입금이 아니라 거래 후 예수금 또는 현금성 대기자산 잔액 반영으로 해석합니다.'
+            return f'<div class="v5300-common-note"><div class="v5300-common-title">공통 시스템 해석</div>{_v5300_html(body)}</div>'
+        if len(notes) == 1:
+            return f'<div class="v5300-common-note"><div class="v5300-common-title">공통 시스템 해석</div>{_v5300_html(notes[0])}</div>'
+        lis = ''.join(f'<li>{_v5300_html(x)}</li>' for x in notes[:6])
+        return f'<div class="v5300-common-note"><div class="v5300-common-title">공통 시스템 해석</div><ul>{lis}</ul></div>'
+    except Exception:
+        return ''
+
+
+def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산 이동 해석"):
+    """v5.30.0: 현금성 자산 이동 해석 최종 UI.
+
+    계산 로직은 변경하지 않고 표시 구조만 다음처럼 고정합니다.
+    1) 당일 거래 요약: 상위 배너
+    2) 건별 거래: 하위 카드
+    3) 시스템 해석: 하단 공통 해석 1회
+    """
+    try:
+        _v5300_css()
+        items = _v5300_trade_items(이동후보)
+        if not items:
+            return
+        st.markdown(
+            '<div class="v5300-shell">'
+            '<div class="v5300-title-row"><div>'
+            f'<div class="v5300-title">{_v5300_html(제목)}</div>'
+            '<div class="v5300-subtitle">상위 요약과 실제 건별 거래를 분리해 표시합니다. 시스템 해석은 반복하지 않고 하단에 한 번만 표시합니다.</div>'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(_v5300_summary_html(items), unsafe_allow_html=True)
+        st.markdown('<div class="v5300-section-label">건별 거래 내역</div>', unsafe_allow_html=True)
+        cards = ''.join(_v5300_card_html(item, idx) for idx, item in enumerate(items, start=1))
+        st.markdown(f'<div class="v5300-card-list">{cards}</div>', unsafe_allow_html=True)
+        st.markdown(_v5300_common_note_html(items), unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    except Exception as e:
+        try:
+            st.caption(f"자산이동 설명 표시 오류 v5.30.0: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+# 최근자산변화 표시 함수는 v5.29.8 기준 최종 정리본을 유지합니다.
+# 단, 별칭이 과거 함수로 되돌아가는 것을 방지하기 위해 최신 표시 함수로 다시 고정합니다.
+try:
+    if '최근자산변화_표시_v5298' in globals():
+        def 최근자산변화표시_v5224(이동df, 최대표시=100):
+            return 최근자산변화_표시_v5298(이동df, 최대표시=max(최대표시, 100))
+        최근자산변화표시_v5226 = 최근자산변화표시_v5224
+        최근자산변화표시_v5223 = 최근자산변화표시_v5224
+        최근자산변화_표시_v5284 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v5286 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v5288 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v52810 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v52811 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v5293 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v5294 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v5295 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v5296 = 최근자산변화_표시_v5298
+        최근자산변화_표시_v5297 = 최근자산변화_표시_v5298
+except Exception:
+    pass
+
+# ============================================================
+# end v5.30.0 cash-ui-complete FINAL OVERRIDE
+# ============================================================
