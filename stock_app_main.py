@@ -28693,3 +28693,193 @@ except Exception:
 # ============================================================
 # end v5.30.1 cash-ui-visual-hierarchy FINAL OVERRIDE
 # ============================================================
+
+
+# ============================================================
+# v5.30.2 cash-ui-actual-call-fix FINAL OVERRIDE
+# 목적:
+# - 화면에 실제로 호출되는 최근자산변화카드표시 경로를 v5.30 UI로 교체합니다.
+# - 이전 _v5289/_v52811/_v529 계열의 단순 카드가 다시 표시되지 않도록 별칭까지 재고정합니다.
+# - 계산/회계/거래건수 로직은 변경하지 않고 표시 UI만 변경합니다.
+# ============================================================
+try:
+    APP_VERSION = "v5.30.2-cash-ui-actual-call-fix"
+except Exception:
+    pass
+
+
+def _v5302_trade_items_from_df(거래df=None):
+    """거래원장에서 최신 거래일의 매수/매도 행을 v5.30 UI 항목으로 변환합니다."""
+    try:
+        if '_v5289_trade_df' in globals():
+            df = _v5289_trade_df(거래df)
+        else:
+            df = pd.DataFrame(거래df).copy()
+    except Exception:
+        try:
+            df = pd.DataFrame(거래df).copy()
+        except Exception:
+            return []
+    try:
+        if df is None or df.empty:
+            return []
+        if '거래일자' not in df.columns and '날짜' in df.columns:
+            df = df.rename(columns={'날짜': '거래일자'})
+        if '거래일자' not in df.columns:
+            return []
+        df = df.copy()
+        date_func = globals().get('_v5289_date') or globals().get('_v5288_date')
+        if date_func:
+            df['_v5302_date'] = df['거래일자'].apply(date_func)
+        else:
+            df['_v5302_date'] = pd.to_datetime(df['거래일자'], errors='coerce').dt.strftime('%Y-%m-%d')
+        latest = df['_v5302_date'].dropna().max()
+        if not latest:
+            return []
+        today = df[df['_v5302_date'] == latest].copy()
+        kind_col = '거래구분' if '거래구분' in today.columns else '구분' if '구분' in today.columns else None
+        if kind_col:
+            today = today[today[kind_col].astype(str).str.contains('매수|매도', na=False)]
+        if today.empty:
+            return []
+
+        items = []
+        for _, r in today.sort_index().iterrows():
+            kind = _v5301_text(r.get(kind_col, '거래')) if kind_col else '거래'
+            name = _v5301_text(r.get('종목명', '')) or _v5301_text(r.get('상품명', '')) or _v5301_text(r.get('종목코드', '')) or '-'
+            account = _v5301_short_account(r.get('운용사', r.get('계좌', '')))
+            qty = abs(_v5301_num(r.get('거래수량', r.get('수량', r.get('주수', 0))), 0))
+            price = abs(_v5301_num(r.get('거래단가', r.get('단가', 0)), 0))
+            amount = abs(_v5301_num(r.get('거래금액', r.get('금액', 0)), 0))
+            if amount <= 0 and qty > 0 and price > 0:
+                amount = abs(qty * price)
+            memo = _v5301_text(r.get('비고', r.get('메모', r.get('자동분석', ''))))
+            if '매수' in kind:
+                desc = f"{account or '계좌'} 예수금 → {name} 매수"
+            elif '매도' in kind:
+                desc = f"{name} 매도 → {account or '계좌'} 예수금"
+            else:
+                desc = f"{name} {kind}"
+            items.append({
+                '거래일자': latest,
+                '거래구분': kind,
+                '표시구분': kind,
+                '종목명': name,
+                '계좌': account,
+                '설명': desc,
+                '상세설명': desc,
+                '수량': qty,
+                '단가': price,
+                '금액': amount,
+                '메모': memo,
+                '시스템해석': memo,
+            })
+        return items
+    except Exception as e:
+        try:
+            logging.warning('v5.30.2 trade item transform failed: %s', e, exc_info=True)
+        except Exception:
+            pass
+        return []
+
+
+def _v5302_render_cash_ui(items, 제목='최근 현금성 자산 이동 해석'):
+    try:
+        if not items:
+            return False
+        _v5301_css()
+        count = len(items)
+        total = sum(_v5301_amount(x) for x in items)
+        buy_count = sum(1 for x in items if '매수' in _v5301_type(x))
+        sell_count = sum(1 for x in items if '매도' in _v5301_type(x))
+        date = _v5301_date(items[0])
+        asset_names = []
+        for it in items:
+            a = _v5301_asset(it)
+            if a and a != '-' and a not in asset_names:
+                asset_names.append(a)
+        asset = ', '.join(asset_names[:3]) if asset_names else '-'
+        cards = ''.join(_v5301_card_html(item, idx) for idx, item in enumerate(items, start=1))
+        st.markdown(
+            '<div class="v5301-wrap">'
+            f'<div class="v5301-title">{_v5301_html(제목)}</div>'
+            f'<div class="v5301-subtitle">{_v5301_html(date)} 거래이력 {count:,}건 · 매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 거래금액 {_v5301_money(total)} · 종목: {_v5301_html(asset)}</div>'
+            f'{_v5301_summary_html(items)}'
+            f'<div class="v5301-detail-title">거래 상세 내역 <span>(총 {count:,}건)</span></div>'
+            f'<div class="v5301-card-list">{cards}</div>'
+            f'{_v5301_common_html(items)}'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        return True
+    except Exception as e:
+        try:
+            st.caption(f'최근 현금성 자산 이동 해석 표시 오류 v5.30.2: {type(e).__name__}: {e}')
+        except Exception:
+            pass
+        return False
+
+
+def _v5302_recent_cash_flow_card(거래df=None):
+    items = _v5302_trade_items_from_df(거래df)
+    return _v5302_render_cash_ui(items, 제목='최근 현금성 자산 이동 해석')
+
+
+def 자산이동설명카드표시(이동후보, 제목='최근 현금성 자산 이동 해석'):
+    """v5.30.2: 어떤 경로에서 호출되어도 동일한 최종 UI를 표시합니다."""
+    try:
+        items = _v5301_items(이동후보)
+        # 거래원장 DataFrame이 직접 넘어온 경우에는 최신 거래일 매수/매도 항목으로 변환합니다.
+        try:
+            if hasattr(이동후보, 'columns') and ('거래일자' in 이동후보.columns or '날짜' in 이동후보.columns):
+                converted = _v5302_trade_items_from_df(이동후보)
+                if converted:
+                    items = converted
+        except Exception:
+            pass
+        return _v5302_render_cash_ui(items, 제목=제목)
+    except Exception as e:
+        try:
+            st.caption(f'자산이동 설명 표시 오류 v5.30.2: {type(e).__name__}: {e}')
+        except Exception:
+            pass
+        return False
+
+
+# 과거 현금성 이동 해석 함수명을 전부 최신 UI로 연결합니다.
+try:
+    _v5289_recent_cash_flow_card = _v5302_recent_cash_flow_card
+    _v52811_recent_cash_flow_card = _v5302_recent_cash_flow_card
+    _v52812_recent_cash_flow_card = _v5302_recent_cash_flow_card
+    _v529_latest_cash_flow_card = _v5302_recent_cash_flow_card
+except Exception:
+    pass
+
+
+# 실제 화면 진입점 최종 고정: 최근자산변화카드표시 안에서 최신 UI를 먼저 표시합니다.
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=100):
+    try:
+        _v5302_recent_cash_flow_card(거래df)
+    except Exception as e:
+        try:
+            st.caption(f'최근 현금성 자산 이동 해석 표시 오류 v5.30.2: {type(e).__name__}: {e}')
+        except Exception:
+            pass
+    try:
+        if '최근자산변화_생성_v5288' in globals():
+            이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+        elif '최근자산변화_생성_v5289' in globals():
+            이동df = 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=3650)
+        else:
+            이동df = pd.DataFrame()
+        return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 100))
+    except Exception as e:
+        try:
+            st.caption(f'최근 자산변화 표시 오류 v5.30.2: {type(e).__name__}: {e}')
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+# ============================================================
+# end v5.30.2 cash-ui-actual-call-fix FINAL OVERRIDE
+# ============================================================
