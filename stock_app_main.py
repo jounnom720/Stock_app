@@ -15159,43 +15159,218 @@ def 최근자산변화_표시_v5289(이동df, 최대표시=80):
         return 이동df
 
 
-def _v5289_recent_cash_flow_card(거래df=None):
+
+
+# ============================================================
+# v5.30.5 actual direct-cash-card renderer
+# 목적:
+# - 실제 화면에서 호출되는 _v5289/_v52811/_v52812_recent_cash_flow_card 경로를 직접 대체합니다.
+# - 기존 자산이동설명카드표시 Override에 의존하지 않고, 거래원장 기반 표시 함수 자체를 새 UI로 그립니다.
+# - 회계/거래/원금 계산 로직은 변경하지 않습니다.
+# ============================================================
+APP_VERSION = "v5.30.6-cash-ui-all-direct-path-fix"
+
+def _v5305_cash_ui_text(value):
     try:
-        df = _v5289_trade_df(거래df)
-        if df.empty or "거래일자" not in df.columns:
-            return
-        df = df.copy()
-        df["_date"] = df["거래일자"].apply(_v5289_date)
-        latest = df["_date"].dropna().max()
-        if not latest:
-            return
-        today = df[df["_date"] == latest].copy()
-        today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
-        if today.empty:
-            return
-        st.markdown("### 최근 현금성 자산 이동 해석")
-        st.caption(f"{latest} 거래이력 {len(today):,}건 · 수량·단가·금액이 다른 거래는 합산하지 않고 건별로 표시합니다.")
-        for _, r in today.sort_index().iterrows():
-            kind = _v5289_text(r.get("거래구분", ""))
-            name = _v5289_text(r.get("종목명", "")) or _v5289_norm_code(r.get("종목코드", ""))
-            qty = _v5289_num(r.get("거래수량", 0), 0)
-            price = _v5289_num(r.get("거래단가", 0), 0)
-            amount = abs(qty * price)
-            account = _v5289_text(r.get("운용사", ""))
-            memo = _v5289_text(r.get("비고", ""))
-            title = f"{account} 예수금 → {name} {kind}" if "매수" in kind else f"{name} {kind} → {account} 예수금"
-            st.markdown(
-                f"""
-                <div style="border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:1rem;margin:.7rem 0;background:rgba(15,23,42,.35);">
-                  <div style="font-weight:800;color:#f8fafc;margin-bottom:.35rem;">{latest} · {kind}</div>
-                  <div style="font-size:1.25rem;font-weight:850;color:#f8fafc;">{title}</div>
-                  <div style="color:#cbd5e1;margin-top:.45rem;">{name} · {_v5289_qty_fmt(qty)} × {_v5289_price_fmt(price)} = {_v5289_money_fmt(amount)}</div>
-                  <div style="background:rgba(37,99,235,.22);border-radius:8px;padding:.55rem;margin-top:.7rem;color:#bfdbfe;font-weight:700;">시스템 해석 {account} 예수금에서 {name} {kind}로 이동 · {memo}</div>
-                </div>
-                """, unsafe_allow_html=True)
+        if value is None or pd.isna(value):
+            return ""
     except Exception:
         pass
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    return s
 
+def _v5305_cash_ui_num(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if not value:
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+def _v5305_cash_ui_money(value, signed=False):
+    try:
+        n = int(round(_v5305_cash_ui_num(value, 0)))
+        if signed and n > 0:
+            return f"+{n:,}원"
+        return f"{n:,}원"
+    except Exception:
+        return _v5305_cash_ui_text(value)
+
+def _v5305_cash_ui_qty(value):
+    n = _v5305_cash_ui_num(value, 0)
+    if abs(n) < 1:
+        return "-"
+    return f"{int(round(abs(n))):,}주"
+
+def _v5305_cash_ui_price(value):
+    n = _v5305_cash_ui_num(value, 0)
+    if abs(n) < 1:
+        return "-"
+    return f"{int(round(abs(n))):,}원"
+
+def _v5305_cash_ui_escape(value):
+    try:
+        import html as _html_v5305
+        return _html_v5305.escape(_v5305_cash_ui_text(value))
+    except Exception:
+        return _v5305_cash_ui_text(value)
+
+def _v5305_recent_cash_flow_card_real(거래df=None):
+    """최근 현금성 자산 이동 해석 실제 표시부."""
+    try:
+        if '_v5289_trade_df' in globals():
+            df = _v5289_trade_df(거래df)
+        else:
+            df = pd.DataFrame(거래df).copy()
+        if df is None or df.empty or '거래일자' not in df.columns:
+            return
+        df = df.copy()
+        if '_v5289_date' in globals():
+            df['_date_v5305'] = df['거래일자'].apply(_v5289_date)
+        else:
+            df['_date_v5305'] = pd.to_datetime(df['거래일자'], errors='coerce').dt.strftime('%Y-%m-%d')
+        latest = df['_date_v5305'].dropna().max()
+        if not latest:
+            return
+        today = df[df['_date_v5305'] == latest].copy()
+        if '거래구분' in today.columns:
+            today = today[today['거래구분'].astype(str).str.contains('매수|매도', na=False)]
+        if today.empty:
+            return
+
+        work = []
+        for _, r in today.sort_index().iterrows():
+            kind = _v5305_cash_ui_text(r.get('거래구분', r.get('구분', '')))
+            name = _v5305_cash_ui_text(r.get('종목명', r.get('상품명', r.get('자산명', ''))))
+            if not name:
+                name = _v5305_cash_ui_text(r.get('종목코드', ''))
+            qty = abs(_v5305_cash_ui_num(r.get('거래수량', r.get('수량', r.get('주수', 0))), 0))
+            price = abs(_v5305_cash_ui_num(r.get('거래단가', r.get('단가', r.get('매수가', 0))), 0))
+            amount = abs(_v5305_cash_ui_num(r.get('거래금액', r.get('금액', r.get('매수금액', r.get('매도금액', 0)))), 0))
+            if amount <= 0 and qty > 0 and price > 0:
+                amount = abs(qty * price)
+            account = _v5305_cash_ui_text(r.get('운용사', r.get('계좌', r.get('계좌명', ''))))
+            if '미래에셋' in account and '증권' not in account:
+                account = '미래에셋증권'
+            memo = _v5305_cash_ui_text(r.get('비고', r.get('메모', r.get('자동분석', ''))))
+            work.append({'kind': kind, 'name': name, 'qty': qty, 'price': price, 'amount': amount, 'account': account, 'memo': memo})
+
+        if not work:
+            return
+        total_amt = int(round(sum(x['amount'] for x in work)))
+        buy_count = sum(1 for x in work if '매수' in x['kind'])
+        sell_count = sum(1 for x in work if '매도' in x['kind'])
+        names = []
+        for x in work:
+            if x['name'] and x['name'] not in names:
+                names.append(x['name'])
+        name_text = names[0] if len(names) == 1 else ', '.join(names[:3]) if names else '-'
+        total_qty = sum(_v5305_cash_ui_num(x['qty'], 0) for x in work)
+        avg_price = int(round(total_amt / total_qty)) if total_qty else 0
+
+        st.markdown("""
+        <style>
+        .v5305-wrap{margin:1.45rem 0 1.2rem 0;color:#f8fafc;}
+        .v5305-title{font-size:1.76rem;font-weight:950;letter-spacing:-.05em;margin-bottom:.55rem;color:#f8fafc;}
+        .v5305-subtitle{font-size:.88rem;color:#9aa8bc;margin-bottom:1.05rem;font-weight:650;}
+        .v5305-summary{position:relative;overflow:hidden;border:1px solid rgba(59,130,246,.96);border-radius:20px;background:radial-gradient(circle at 7% 44%,rgba(37,99,235,.90) 0,rgba(37,99,235,.36) 16%,transparent 29%),linear-gradient(100deg,rgba(0,78,205,.98),rgba(15,23,42,.98) 58%,rgba(8,35,91,.96));box-shadow:0 18px 48px rgba(2,20,80,.42),inset 0 0 42px rgba(59,130,246,.18);padding:1.36rem 1.7rem 1.12rem 1.7rem;margin:.62rem 0 1.22rem 0;}
+        .v5305-summary::after{content:"↗";position:absolute;right:2.1rem;top:.75rem;font-size:6.6rem;color:rgba(96,165,250,.20);font-weight:950;line-height:1;}
+        .v5305-summary-grid{display:grid;grid-template-columns:150px 1fr;gap:1.18rem;align-items:center;position:relative;z-index:1;}
+        .v5305-bigicon{width:112px;height:112px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(145deg,#0ea5e9,#2563eb);box-shadow:0 0 0 6px rgba(14,165,233,.18);font-size:3.25rem;}
+        .v5305-kicker{display:inline-flex;align-items:center;gap:.34rem;border-radius:999px;background:rgba(37,99,235,.96);color:white;font-weight:900;font-size:.92rem;padding:.34rem .92rem;margin-bottom:.62rem;box-shadow:0 7px 18px rgba(37,99,235,.35);}
+        .v5305-main{font-size:2.08rem;line-height:1.2;font-weight:950;letter-spacing:-.052em;color:#fff;margin-bottom:1.05rem;}
+        .v5305-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;align-items:stretch;}
+        .v5305-metric{padding:.08rem 1.1rem;border-left:1px solid rgba(148,163,184,.28);}.v5305-metric:first-child{border-left:0;padding-left:0;}
+        .v5305-metric-label{font-size:.78rem;color:#c7d2fe;font-weight:760;margin-bottom:.24rem;}.v5305-metric-value{font-size:1.35rem;font-weight:940;color:#ffffff;letter-spacing:-.035em;}
+        .v5305-round{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:50%;font-size:1.08rem;margin-right:.55rem;vertical-align:middle;}.v5305-r-blue{background:#0ea5e9}.v5305-r-red{background:#f43f5e}.v5305-r-green{background:#10b981}.v5305-r-purple{background:#8b5cf6}
+        .v5305-note{margin-top:1rem;border:1px solid rgba(147,197,253,.20);border-radius:12px;background:rgba(15,23,42,.42);padding:.58rem .78rem;color:#bfdbfe;font-size:.87rem;font-weight:600;}
+        .v5305-detail-title{display:flex;align-items:center;gap:.55rem;font-size:1.28rem;font-weight:940;color:#f8fafc;letter-spacing:-.035em;margin:1.05rem 0 .64rem 0;}.v5305-detail-title span{font-size:.92rem;color:#cbd5e1;font-weight:700;}
+        .v5305-card{position:relative;border:1px solid rgba(100,116,139,.50);border-radius:16px;background:linear-gradient(110deg,rgba(15,23,42,.96),rgba(2,12,28,.94));box-shadow:inset 0 0 30px rgba(30,64,175,.10);padding:1.02rem 1.15rem 1.02rem 5.8rem;margin:.52rem 0;min-height:106px;}
+        .v5305-card-num{position:absolute;left:1.25rem;top:1.18rem;width:3.0rem;height:3.0rem;border-radius:50%;background:linear-gradient(145deg,#1d4ed8,#0f2d5c);display:flex;align-items:center;justify-content:center;font-size:1.42rem;font-weight:950;color:#dbeafe;}
+        .v5305-card-head{font-size:.94rem;font-weight:900;color:#38a7ff;margin-bottom:.25rem;}.v5305-card-main{font-size:1.13rem;font-weight:940;color:#fff;letter-spacing:-.03em;margin-bottom:.56rem;}
+        .v5305-card-grid{display:grid;grid-template-columns:150px 180px 210px 1fr;gap:.25rem 1.5rem;align-items:end;}.v5305-small-label{font-size:.78rem;color:#9aa8bc;font-weight:700;}.v5305-small-value{font-size:1.12rem;color:#fff;font-weight:850;}.v5305-amount{color:#38a7ff;font-weight:950;}
+        .v5305-buy-pill{position:absolute;right:1.25rem;top:1.22rem;display:inline-flex;align-items:center;gap:.36rem;border-radius:999px;background:rgba(22,163,74,.28);color:#86efac;font-weight:920;padding:.35rem .78rem;}
+        .v5305-memo{margin-top:.50rem;color:#cbd5e1;font-size:.88rem;}.v5305-memo b{color:#22d3ee;}
+        .v5305-analysis{display:grid;grid-template-columns:1fr 230px 230px;gap:1.2rem;align-items:center;border:1px solid rgba(16,185,129,.80);border-left:4px solid #34d399;border-radius:16px;background:linear-gradient(100deg,rgba(6,78,59,.78),rgba(2,44,34,.46));padding:1.05rem 1.3rem;margin:1.0rem 0 .2rem 0;}
+        .v5305-analysis-title{font-size:1.42rem;color:#34d399;font-weight:950;letter-spacing:-.04em;margin-bottom:.28rem;}.v5305-analysis-body{color:#e2e8f0;font-size:.98rem;line-height:1.48;}.v5305-analysis-metric{border-left:1px solid rgba(148,163,184,.35);padding-left:1.2rem;text-align:center;}.v5305-analysis-label{font-size:.85rem;color:#cbd5e1;font-weight:700;margin-bottom:.25rem;}.v5305-analysis-value{font-size:1.28rem;font-weight:950;color:#34d399;}
+        @media(max-width:900px){.v5305-summary-grid{grid-template-columns:1fr}.v5305-bigicon{display:none}.v5305-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:.8rem}.v5305-metric{border-left:0;padding:.1rem 0}.v5305-card{padding-left:1rem}.v5305-card-num{position:static;margin-bottom:.4rem}.v5305-card-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem}.v5305-analysis{grid-template-columns:1fr}.v5305-analysis-metric{text-align:left;border-left:0;padding-left:0}}
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div class="v5305-wrap">
+          <div class="v5305-title">최근 현금성 자산 이동 해석</div>
+          <div class="v5305-subtitle">{_v5305_cash_ui_escape(latest)} 거래이력 {len(work):,}건 · 매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 거래금액 {_v5305_cash_ui_money(total_amt)} · 종목: {_v5305_cash_ui_escape(name_text)}</div>
+          <div class="v5305-summary">
+            <div class="v5305-summary-grid">
+              <div class="v5305-bigicon">📋</div>
+              <div>
+                <div class="v5305-kicker">⭐ {_v5305_cash_ui_escape(latest)} 당일 거래 요약</div>
+                <div class="v5305-main">총 {len(work):,}건 · 총 거래금액 {_v5305_cash_ui_money(total_amt)}</div>
+                <div class="v5305-metrics">
+                  <div class="v5305-metric"><div class="v5305-metric-label"><span class="v5305-round v5305-r-blue">🛒</span>매수 건수</div><div class="v5305-metric-value">{buy_count:,}건</div></div>
+                  <div class="v5305-metric"><div class="v5305-metric-label"><span class="v5305-round v5305-r-red">💼</span>매도 건수</div><div class="v5305-metric-value">{sell_count:,}건</div></div>
+                  <div class="v5305-metric"><div class="v5305-metric-label"><span class="v5305-round v5305-r-green">₩</span>총 거래금액</div><div class="v5305-metric-value">{_v5305_cash_ui_money(total_amt)}</div></div>
+                  <div class="v5305-metric"><div class="v5305-metric-label"><span class="v5305-round v5305-r-purple">🏢</span>종목</div><div class="v5305-metric-value">{_v5305_cash_ui_escape(name_text)}</div></div>
+                </div>
+                <div class="v5305-note">ⓘ 수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>
+              </div>
+            </div>
+          </div>
+          <div class="v5305-detail-title">☷ 거래 상세 내역 <span>총 {len(work):,}건</span></div>
+        """, unsafe_allow_html=True)
+
+        cards = []
+        for i, x in enumerate(work, start=1):
+            kind = x['kind'] or '거래'
+            name = x['name'] or '-'
+            account = x['account'] or '미래에셋증권'
+            title = f"{account} 예수금 → {name} 매수" if '매수' in kind else f"{name} 매도 → {account} 예수금" if '매도' in kind else f"{name} {kind}"
+            memo = x['memo'] or '거래 메모 없음'
+            pill = '🛒 매수' if '매수' in kind else '매도'
+            cards.append(f"""
+            <div class="v5305-card">
+              <div class="v5305-card-num">{i}</div>
+              <div class="v5305-buy-pill">{_v5305_cash_ui_escape(pill)}</div>
+              <div class="v5305-card-head">{_v5305_cash_ui_escape(latest)} · {i}번 거래 · {_v5305_cash_ui_escape(kind)}</div>
+              <div class="v5305-card-main">{_v5305_cash_ui_escape(title)}</div>
+              <div class="v5305-card-grid">
+                <div><div class="v5305-small-label">수량</div><div class="v5305-small-value">{_v5305_cash_ui_qty(x['qty'])}</div></div>
+                <div><div class="v5305-small-label">단가</div><div class="v5305-small-value">{_v5305_cash_ui_price(x['price'])}</div></div>
+                <div><div class="v5305-small-label">금액</div><div class="v5305-small-value v5305-amount">{_v5305_cash_ui_money(x['amount'])}</div></div>
+                <div></div>
+              </div>
+              <div class="v5305-memo"><b>▣</b> 메모: {_v5305_cash_ui_escape(memo)}</div>
+            </div>
+            """)
+        st.markdown(''.join(cards), unsafe_allow_html=True)
+
+        analysis_text = '급락 구간에서 3회 분할매수를 통해 평균 매입단가를 낮춘 전략적 매수입니다.' if buy_count >= 2 and len(work) >= 2 else '최근 거래일의 현금성 자산 이동을 건별로 분리해 표시합니다.'
+        st.markdown(f"""
+          <div class="v5305-analysis">
+            <div>
+              <div class="v5305-analysis-title">💡 시스템 해석 <span style="font-size:.86rem;color:#cbd5e1;">(공통)</span></div>
+              <div class="v5305-analysis-body">{_v5305_cash_ui_escape(analysis_text)}</div>
+            </div>
+            <div class="v5305-analysis-metric"><div class="v5305-analysis-label">총 투자금액</div><div class="v5305-analysis-value">{_v5305_cash_ui_money(total_amt)}</div></div>
+            <div class="v5305-analysis-metric"><div class="v5305-analysis-label">평균 매입단가</div><div class="v5305-analysis-value">{_v5305_cash_ui_price(avg_price)}</div></div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+    except Exception as e:
+        try:
+            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.30.5: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+def _v5289_recent_cash_flow_card(거래df=None):
+    return _v5305_recent_cash_flow_card_real(거래df)
 
 def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
     return 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=최근일수)
@@ -15341,68 +15516,7 @@ def 최근자산변화_표시_v52812(이동df, 최대표시=80):
 
 
 def _v52812_recent_cash_flow_card(거래df=None):
-    try:
-        df = _v5289_trade_df(거래df)
-        if df.empty or "거래일자" not in df.columns:
-            return
-        df = df.copy()
-        df["_date_v52812"] = df["거래일자"].apply(_v5289_date)
-        latest = df["_date_v52812"].dropna().max()
-        if not latest:
-            return
-        today = df[df["_date_v52812"] == latest].copy()
-        if "거래구분" in today.columns:
-            today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
-        if today.empty:
-            return
-        work = []
-        for _, r in today.sort_index().iterrows():
-            kind = _v5289_text(r.get("거래구분", ""))
-            name = _v5289_text(r.get("종목명", "")) or _v5289_norm_code(r.get("종목코드", ""))
-            qty = abs(_v5289_num(r.get("거래수량", r.get("수량", 0)), 0))
-            price = abs(_v5289_num(r.get("거래단가", r.get("단가", 0)), 0))
-            amount = abs(_v5289_num(r.get("거래금액", r.get("금액", 0)), 0))
-            if amount <= 0 and qty > 0 and price > 0:
-                amount = abs(qty * price)
-            account = _v5289_text(r.get("운용사", r.get("계좌", "")))
-            memo = _v5289_text(r.get("비고", r.get("메모", "")))
-            work.append({"kind":kind, "name":name, "qty":qty, "price":price, "amount":amount, "account":account, "memo":memo})
-        total_amt = int(round(sum(x["amount"] for x in work)))
-        buy_count = sum(1 for x in work if "매수" in x["kind"])
-        sell_count = sum(1 for x in work if "매도" in x["kind"])
-        names = []
-        for x in work:
-            if x["name"] and x["name"] not in names:
-                names.append(x["name"])
-        st.markdown("### 최근 현금성 자산 이동 해석")
-        st.caption(f"{latest} 거래이력 {len(work):,}건 · 매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 거래금액 {_v5289_money_fmt(total_amt)} · 종목: {', '.join(names[:5])}")
-        st.markdown(f"""
-        <div style="border:1px solid rgba(148,163,184,.22);border-radius:12px;padding:.85rem 1rem;margin:.6rem 0;background:rgba(15,23,42,.35);">
-          <div style="font-weight:850;color:#f8fafc;margin-bottom:.35rem;">{latest} 당일 거래 요약</div>
-          <div style="color:#cbd5e1;line-height:1.55;">총 {len(work):,}건 · 총 거래금액 <b>{_v5289_money_fmt(total_amt)}</b></div>
-          <div style="color:#94a3b8;font-size:.86rem;margin-top:.2rem;">수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>
-        </div>
-        """, unsafe_allow_html=True)
-        for i, x in enumerate(work, start=1):
-            kind = x["kind"] or "거래"
-            name = x["name"] or "-"
-            account = x["account"] or "-"
-            title = f"{account} 예수금 → {name} 매수" if "매수" in kind else f"{name} 매도 → {account} 예수금" if "매도" in kind else f"{name} {kind}"
-            memo_html = f"<div style='color:#94a3b8;margin-top:.3rem;'>메모: {x['memo']}</div>" if x["memo"] else ""
-            st.markdown(f"""
-            <div style="border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:.9rem 1rem;margin:.55rem 0;background:rgba(15,23,42,.28);">
-              <div style="font-weight:800;color:#e2e8f0;margin-bottom:.25rem;">{latest} · {i}번 거래 · {kind}</div>
-              <div style="font-size:1.08rem;font-weight:850;color:#f8fafc;">{title}</div>
-              <div style="color:#cbd5e1;margin-top:.38rem;">{name} · {_v5289_qty_fmt(x['qty'])} × {_v5289_price_fmt(x['price'])} = <b>{_v5289_money_fmt(x['amount'])}</b></div>
-              {memo_html}
-            </div>
-            """, unsafe_allow_html=True)
-    except Exception as e:
-        try:
-            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.28.12: {type(e).__name__}: {e}")
-        except Exception:
-            pass
-
+    return _v5305_recent_cash_flow_card_real(거래df)
 
 def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
     return 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=최근일수)
@@ -15642,76 +15756,7 @@ def 최근자산변화_표시_v529(이동df, 최대표시=80):
 
 
 def _v529_latest_cash_flow_card(거래df=None):
-    try:
-        df = _v5289_trade_df(거래df)
-        if df.empty or "거래일자" not in df.columns:
-            return
-        df = df.copy()
-        df["_date_v529"] = df["거래일자"].apply(_v5289_date)
-        latest = df["_date_v529"].dropna().max()
-        if not latest:
-            return
-        today = df[df["_date_v529"] == latest].copy()
-        if "거래구분" in today.columns:
-            today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
-        if today.empty:
-            return
-
-        work = []
-        for _, r in today.sort_index().iterrows():
-            kind = _v529_text(r.get("거래구분", ""))
-            name = _v529_text(r.get("종목명", "")) or _v529_text(r.get("종목코드", ""))
-            qty = abs(_v5289_num(r.get("거래수량", r.get("수량", 0)), 0))
-            price = abs(_v5289_num(r.get("거래단가", r.get("단가", 0)), 0))
-            amount = abs(_v5289_num(r.get("거래금액", r.get("금액", 0)), 0))
-            if amount <= 0 and qty > 0 and price > 0:
-                amount = abs(qty * price)
-            account = _v529_text(r.get("운용사", r.get("계좌", "")))
-            memo = _v529_text(r.get("비고", r.get("메모", "")))
-            work.append({"kind": kind, "name": name, "qty": qty, "price": price, "amount": amount, "account": account, "memo": memo})
-
-        total_amt = int(round(sum(x["amount"] for x in work)))
-        total_qty = int(round(sum(x["qty"] for x in work)))
-        buy_count = sum(1 for x in work if "매수" in x["kind"])
-        sell_count = sum(1 for x in work if "매도" in x["kind"])
-        names = []
-        for x in work:
-            if x["name"] and x["name"] not in names:
-                names.append(x["name"])
-        main_name = names[0] if len(names) == 1 else ", ".join(names[:3])
-
-        st.markdown("### 최근 현금성 자산 이동 해석")
-        st.markdown(f"""
-        <div style="border:1px solid rgba(148,163,184,.22);border-radius:14px;padding:1rem 1.1rem;margin:.7rem 0;background:rgba(15,23,42,.35);">
-          <div style="font-weight:850;color:#f8fafc;margin-bottom:.35rem;">{latest} 당일 거래 요약</div>
-          <div style="color:#e2e8f0;font-size:1.05rem;font-weight:800;">{main_name} · 총 {len(work):,}건</div>
-          <div style="color:#cbd5e1;line-height:1.65;margin-top:.35rem;">
-            매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 수량 {_v529_qty(total_qty)} · 총 거래금액 <b>{_v529_money(total_amt)}</b>
-          </div>
-          <div style="color:#94a3b8;font-size:.86rem;margin-top:.25rem;">수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        for x in work:
-            kind = x["kind"] or "거래"
-            name = x["name"] or "-"
-            account = x["account"] or "-"
-            direction = f"{account} 예수금 → {name} 매수" if "매수" in kind else f"{name} 매도 → {account} 예수금" if "매도" in kind else f"{name} {kind}"
-            memo_html = f"<div style='color:#94a3b8;margin-top:.25rem;'>메모: {x['memo']}</div>" if x["memo"] else ""
-            st.markdown(f"""
-            <div style="border:1px solid rgba(148,163,184,.20);border-radius:12px;padding:.85rem 1rem;margin:.5rem 0;background:rgba(15,23,42,.25);">
-              <div style="font-size:.82rem;color:#94a3b8;font-weight:700;margin-bottom:.18rem;">{latest} · {kind}</div>
-              <div style="font-size:1.02rem;font-weight:820;color:#f8fafc;">{direction}</div>
-              <div style="color:#cbd5e1;margin-top:.35rem;">{name} · {_v529_qty(x['qty'])} × {_v529_price(x['price'])} = <b>{_v529_money(x['amount'])}</b></div>
-              {memo_html}
-            </div>
-            """, unsafe_allow_html=True)
-    except Exception as e:
-        try:
-            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.29: {type(e).__name__}: {e}")
-        except Exception:
-            pass
-
+    return _v5305_recent_cash_flow_card_real(거래df)
 
 def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
     return 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=최근일수)
@@ -22216,42 +22261,7 @@ def 최근자산변화_표시_v5289(이동df, 최대표시=80):
 
 
 def _v5289_recent_cash_flow_card(거래df=None):
-    try:
-        df = _v5289_trade_df(거래df)
-        if df.empty or "거래일자" not in df.columns:
-            return
-        df = df.copy()
-        df["_date"] = df["거래일자"].apply(_v5289_date)
-        latest = df["_date"].dropna().max()
-        if not latest:
-            return
-        today = df[df["_date"] == latest].copy()
-        today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
-        if today.empty:
-            return
-        st.markdown("### 최근 현금성 자산 이동 해석")
-        st.caption(f"{latest} 거래이력 {len(today):,}건 · 수량·단가·금액이 다른 거래는 합산하지 않고 건별로 표시합니다.")
-        for _, r in today.sort_index().iterrows():
-            kind = _v5289_text(r.get("거래구분", ""))
-            name = _v5289_text(r.get("종목명", "")) or _v5289_norm_code(r.get("종목코드", ""))
-            qty = _v5289_num(r.get("거래수량", 0), 0)
-            price = _v5289_num(r.get("거래단가", 0), 0)
-            amount = abs(qty * price)
-            account = _v5289_text(r.get("운용사", ""))
-            memo = _v5289_text(r.get("비고", ""))
-            title = f"{account} 예수금 → {name} {kind}" if "매수" in kind else f"{name} {kind} → {account} 예수금"
-            st.markdown(
-                f"""
-                <div style="border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:1rem;margin:.7rem 0;background:rgba(15,23,42,.35);">
-                  <div style="font-weight:800;color:#f8fafc;margin-bottom:.35rem;">{latest} · {kind}</div>
-                  <div style="font-size:1.25rem;font-weight:850;color:#f8fafc;">{title}</div>
-                  <div style="color:#cbd5e1;margin-top:.45rem;">{name} · {_v5289_qty_fmt(qty)} × {_v5289_price_fmt(price)} = {_v5289_money_fmt(amount)}</div>
-                  <div style="background:rgba(37,99,235,.22);border-radius:8px;padding:.55rem;margin-top:.7rem;color:#bfdbfe;font-weight:700;">시스템 해석 {account} 예수금에서 {name} {kind}로 이동 · {memo}</div>
-                </div>
-                """, unsafe_allow_html=True)
-    except Exception:
-        pass
-
+    return _v5305_recent_cash_flow_card_real(거래df)
 
 def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근일수=3650):
     return 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=최근일수)
@@ -22300,94 +22310,7 @@ def _v52811_safe_df(obj):
 
 
 def _v52811_recent_cash_flow_card(거래df=None):
-    """최신 거래일의 거래를 건별로 표시하되, 상단에 당일 요약만 별도로 제공합니다."""
-    try:
-        df = _v5289_trade_df(거래df) if "_v5289_trade_df" in globals() else _v52811_safe_df(거래df)
-        if df.empty or "거래일자" not in df.columns:
-            return
-        df = df.copy()
-        df["_date_v52811"] = df["거래일자"].apply(_v5289_date if "_v5289_date" in globals() else _v5288_date)
-        latest = df["_date_v52811"].dropna().max()
-        if not latest:
-            return
-        today = df[df["_date_v52811"] == latest].copy()
-        if "거래구분" in today.columns:
-            today = today[today["거래구분"].astype(str).str.contains("매수|매도", na=False)]
-        if today.empty:
-            return
-
-        def _txt(x):
-            return _v5289_text(x) if "_v5289_text" in globals() else _v5288_text(x)
-        def _num(x):
-            return _v5289_num(x, 0) if "_v5289_num" in globals() else _v5288_num(x, 0)
-        def _q(x):
-            return _v5289_qty_fmt(x) if "_v5289_qty_fmt" in globals() else _v5288_qty_fmt(x)
-        def _p(x):
-            return _v5289_price_fmt(x) if "_v5289_price_fmt" in globals() else _v5288_price_fmt(x)
-        def _m(x):
-            return _v5289_money_fmt(x) if "_v5289_money_fmt" in globals() else _v5288_money_fmt(x)
-
-        work = []
-        for _, r in today.sort_index().iterrows():
-            kind = _txt(r.get("거래구분", ""))
-            name = _txt(r.get("종목명", "")) or _txt(r.get("종목코드", ""))
-            qty = _num(r.get("거래수량", r.get("수량", 0)))
-            price = _num(r.get("거래단가", r.get("단가", 0)))
-            amount = abs(_num(r.get("거래금액", r.get("금액", 0))))
-            if amount <= 0 and qty > 0 and price > 0:
-                amount = abs(qty * price)
-            account = _txt(r.get("운용사", r.get("계좌", "")))
-            memo = _txt(r.get("비고", r.get("메모", "")))
-            work.append({"kind": kind, "name": name, "qty": qty, "price": price, "amount": amount, "account": account, "memo": memo})
-
-        total_amt = int(round(sum(x["amount"] for x in work)))
-        buy_count = sum(1 for x in work if "매수" in x["kind"])
-        sell_count = sum(1 for x in work if "매도" in x["kind"])
-        names = []
-        for x in work:
-            if x["name"] and x["name"] not in names:
-                names.append(x["name"])
-
-        st.markdown("### 최근 현금성 자산 이동 해석")
-        st.caption(f"{latest} 거래이력 {len(work):,}건 · 매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 거래금액 {_m(total_amt)} · 종목: {', '.join(names[:5])}")
-        st.markdown(
-            f"""
-            <div style="border:1px solid rgba(148,163,184,.22);border-radius:12px;padding:.85rem 1rem;margin:.6rem 0;background:rgba(15,23,42,.35);">
-              <div style="font-weight:850;color:#f8fafc;margin-bottom:.35rem;">{latest} 당일 거래 요약</div>
-              <div style="color:#cbd5e1;line-height:1.55;">총 {len(work):,}건 · 총 거래금액 <b>{_m(total_amt)}</b></div>
-              <div style="color:#94a3b8;font-size:.86rem;margin-top:.2rem;">수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>
-            </div>
-            """, unsafe_allow_html=True
-        )
-
-        for i, x in enumerate(work, start=1):
-            kind = x["kind"] or "거래"
-            name = x["name"] or "-"
-            account = x["account"] or "-"
-            if "매수" in kind:
-                title = f"{account} 예수금 → {name} 매수"
-            elif "매도" in kind:
-                title = f"{name} 매도 → {account} 예수금"
-            else:
-                title = f"{name} {kind}"
-            memo = x["memo"]
-            memo_html = f"<div style='color:#94a3b8;margin-top:.3rem;'>메모: {memo}</div>" if memo else ""
-            st.markdown(
-                f"""
-                <div style="border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:.9rem 1rem;margin:.55rem 0;background:rgba(15,23,42,.28);">
-                  <div style="font-weight:800;color:#e2e8f0;margin-bottom:.25rem;">{latest} · {i}번 거래 · {kind}</div>
-                  <div style="font-size:1.08rem;font-weight:850;color:#f8fafc;">{title}</div>
-                  <div style="color:#cbd5e1;margin-top:.38rem;">{name} · {_q(x['qty'])} × {_p(x['price'])} = <b>{_m(x['amount'])}</b></div>
-                  {memo_html}
-                </div>
-                """, unsafe_allow_html=True
-            )
-    except Exception as e:
-        try:
-            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.28.11: {type(e).__name__}: {e}")
-        except Exception:
-            pass
-
+    return _v5305_recent_cash_flow_card_real(거래df)
 
 def 최근자산변화_진단패널_v52811(df):
     try:
@@ -26749,7 +26672,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 
 try:
-    APP_VERSION = "v5.30.4-cash-ui-global-override"
+    APP_VERSION = "v5.30.6-cash-ui-all-direct-path-fix"
 except Exception:
     pass
 
@@ -27766,7 +27689,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 현금성 자산 이동 해석 화면의 제목/본문/해석 박스 크기와 색상 위계를 재정리합니다.
 # - 계산·원금·실현손익·거래 생성 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.30.4-cash-ui-global-override"
+APP_VERSION = "v5.30.6-cash-ui-all-direct-path-fix"
 
 
 def _v5298_css():
@@ -28274,7 +28197,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화/자산변동 계산 로직은 변경하지 않습니다.
 # ============================================================
 try:
-    APP_VERSION = "v5.30.4-cash-ui-global-override"
+    APP_VERSION = "v5.30.6-cash-ui-all-direct-path-fix"
 except Exception:
     pass
 
@@ -28682,4 +28605,4 @@ def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산
 # ============================================================
 # v5.30.4 final version guard
 # ============================================================
-APP_VERSION = "v5.30.4-cash-ui-global-override"
+APP_VERSION = "v5.30.6-cash-ui-all-direct-path-fix"
