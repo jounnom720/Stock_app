@@ -28027,3 +28027,669 @@ except Exception:
 # ============================================================
 # end v5.30.0 cash-ui-complete FINAL OVERRIDE
 # ============================================================
+
+
+# ============================================================
+# v5.30.1 cash-ui-visual-hierarchy FINAL OVERRIDE
+# 목적:
+# - 사용자가 확정한 밑그림 UI를 실제 코드에 반영합니다.
+# - 당일 거래 요약은 하위 거래카드보다 명확히 큰 상위 배너로 표시합니다.
+# - 건별 거래는 수량·단가·금액을 가로 지표로 정리한 하위 카드로 표시합니다.
+# - 시스템 해석은 하단 공통 해석 박스에 1회만 표시합니다.
+# - 계산·거래건수·원금·실현손익 로직은 변경하지 않습니다.
+# ============================================================
+try:
+    APP_VERSION = "v5.30.1-cash-ui-visual-hierarchy"
+except Exception:
+    pass
+
+
+def _v5301_text(value):
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    s = str(value).strip()
+    if s.lower() in ["nan", "none", "nat", "<na>"]:
+        return ""
+    return s
+
+
+def _v5301_html(value):
+    try:
+        return html.escape(_v5301_text(value))
+    except Exception:
+        return _v5301_text(value)
+
+
+def _v5301_num(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '').replace('원', '').replace('%', '').strip()
+            if value == '':
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _v5301_money(value):
+    try:
+        if '원화정수포맷' in globals():
+            return 원화정수포맷(value)
+    except Exception:
+        pass
+    try:
+        return f"{float(value):,.0f}원"
+    except Exception:
+        return "0원"
+
+
+def _v5301_short_account(value):
+    s = _v5301_text(value)
+    if not s:
+        return ""
+    try:
+        if '_계좌짧게_v5226' in globals():
+            return _계좌짧게_v5226(s)
+    except Exception:
+        pass
+    return (s.replace('미래에셋증권', '미래에셋')
+             .replace('미래에셋/증권계좌', '미래에셋')
+             .replace('신한은행 IRP', '신한IRP')
+             .replace('증권계좌', '')
+             .strip())
+
+
+def _v5301_css():
+    try:
+        try:
+            if '_v5298_css' in globals():
+                _v5298_css()
+        except Exception:
+            pass
+        st.markdown("""
+        <style>
+        .v5301-wrap{
+            margin:.15rem 0 1.25rem 0;
+            padding-top:.2rem;
+        }
+        .v5301-title{
+            color:#f8fafc;
+            font-size:1.72rem;
+            font-weight:950;
+            letter-spacing:-.055em;
+            line-height:1.18;
+            margin:0 0 .34rem 0;
+        }
+        .v5301-subtitle{
+            color:#cbd5e1;
+            font-size:.88rem;
+            font-weight:600;
+            margin-bottom:1.02rem;
+        }
+        .v5301-summary{
+            position:relative;
+            overflow:hidden;
+            min-height:174px;
+            border:1px solid rgba(37,99,235,.95);
+            background:
+                radial-gradient(circle at 7% 36%, rgba(59,130,246,.72), transparent 0 70px, transparent 74px),
+                radial-gradient(circle at 92% 20%, rgba(37,99,235,.25), transparent 22%),
+                linear-gradient(125deg, rgba(0,82,204,.96), rgba(13,36,91,.88) 45%, rgba(8,18,46,.92));
+            border-radius:18px;
+            padding:1.35rem 1.55rem 1.1rem 12.5rem;
+            box-shadow:0 20px 50px rgba(2,8,23,.34), inset 0 0 0 1px rgba(255,255,255,.04);
+            margin:.35rem 0 1.12rem 0;
+        }
+        .v5301-summary:before{
+            content:"📋";
+            position:absolute;
+            left:3.1rem;
+            top:2.65rem;
+            width:5.4rem;
+            height:5.4rem;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            border-radius:50%;
+            background:linear-gradient(135deg, rgba(59,130,246,.92), rgba(14,165,233,.72));
+            font-size:2.15rem;
+            box-shadow:0 14px 35px rgba(0,0,0,.18), inset 0 0 0 1px rgba(255,255,255,.18);
+        }
+        .v5301-summary:after{
+            content:"↗";
+            position:absolute;
+            right:2.6rem;
+            top:1.0rem;
+            color:rgba(96,165,250,.30);
+            font-size:5.8rem;
+            line-height:1;
+            font-weight:900;
+            transform:rotate(-4deg);
+        }
+        .v5301-kicker{
+            display:inline-flex;
+            align-items:center;
+            gap:.35rem;
+            padding:.31rem .72rem;
+            border-radius:999px;
+            color:#ffffff;
+            background:rgba(59,130,246,.82);
+            border:1px solid rgba(147,197,253,.32);
+            font-size:.86rem;
+            font-weight:950;
+            letter-spacing:-.025em;
+            margin-bottom:.58rem;
+        }
+        .v5301-kicker:before{content:"★";color:#fde047;}
+        .v5301-summary-main{
+            color:#ffffff;
+            font-size:1.82rem;
+            font-weight:980;
+            letter-spacing:-.055em;
+            line-height:1.18;
+            margin-bottom:1.02rem;
+            text-shadow:0 2px 12px rgba(0,0,0,.18);
+        }
+        .v5301-summary-grid{
+            display:grid;
+            grid-template-columns:repeat(4,minmax(0,1fr));
+            gap:0;
+            margin-right:4.5rem;
+        }
+        .v5301-summary-metric{
+            padding:.08rem 1.08rem .05rem 1.08rem;
+            border-right:1px solid rgba(148,163,184,.36);
+        }
+        .v5301-summary-metric:first-child{padding-left:0;}
+        .v5301-summary-metric:last-child{border-right:0;}
+        .v5301-metric-label{
+            color:#c7d2fe;
+            font-size:.78rem;
+            font-weight:850;
+            margin-bottom:.34rem;
+        }
+        .v5301-metric-value{
+            color:#ffffff;
+            font-size:1.28rem;
+            font-weight:950;
+            letter-spacing:-.035em;
+            white-space:nowrap;
+        }
+        .v5301-summary-guide{
+            margin-top:1.0rem;
+            padding:.56rem .74rem;
+            border-radius:10px;
+            background:rgba(15,23,42,.22);
+            border:1px solid rgba(147,197,253,.15);
+            color:#bdd7ff;
+            font-size:.82rem;
+            font-weight:650;
+            line-height:1.42;
+        }
+        .v5301-detail-title{
+            display:flex;
+            align-items:center;
+            gap:.5rem;
+            color:#f8fafc;
+            font-size:1.17rem;
+            font-weight:950;
+            letter-spacing:-.04em;
+            margin:1.05rem 0 .66rem 0;
+        }
+        .v5301-detail-title:before{
+            content:"☷";
+            color:#38bdf8;
+            font-size:1.1rem;
+        }
+        .v5301-detail-title span{
+            color:#cbd5e1;
+            font-size:.9rem;
+            font-weight:700;
+        }
+        .v5301-card-list{
+            display:grid;
+            grid-template-columns:1fr;
+            gap:.42rem;
+        }
+        .v5301-card{
+            position:relative;
+            display:grid;
+            grid-template-columns:3.2rem minmax(0,1fr) 6.5rem;
+            gap:1.05rem;
+            align-items:center;
+            min-height:88px;
+            border:1px solid rgba(100,116,139,.46);
+            border-radius:15px;
+            background:
+                radial-gradient(circle at 0% 0%, rgba(59,130,246,.10), transparent 34%),
+                linear-gradient(100deg, rgba(15,23,42,.74), rgba(8,18,34,.62));
+            padding:.82rem 1rem .82rem 1.12rem;
+            box-shadow:0 8px 22px rgba(2,8,23,.16);
+        }
+        .v5301-no{
+            width:2.55rem;
+            height:2.55rem;
+            border-radius:50%;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            color:#bfdbfe;
+            background:linear-gradient(135deg, rgba(30,64,175,.88), rgba(37,99,235,.52));
+            font-size:1.1rem;
+            font-weight:950;
+        }
+        .v5301-card-meta{
+            color:#3b82f6;
+            font-size:.82rem;
+            font-weight:950;
+            margin-bottom:.18rem;
+            letter-spacing:-.025em;
+        }
+        .v5301-card-main{
+            color:#ffffff;
+            font-size:1.0rem;
+            font-weight:920;
+            letter-spacing:-.035em;
+            line-height:1.35;
+        }
+        .v5301-card-metrics{
+            display:grid;
+            grid-template-columns:repeat(3,minmax(0,1fr));
+            gap:.8rem;
+            max-width:33rem;
+            margin-top:.44rem;
+        }
+        .v5301-mini{
+            border-right:1px solid rgba(148,163,184,.30);
+            padding-right:.8rem;
+        }
+        .v5301-mini:last-child{border-right:0;}
+        .v5301-mini-label{
+            color:#94a3b8;
+            font-size:.73rem;
+            font-weight:750;
+            margin-bottom:.08rem;
+        }
+        .v5301-mini-value{
+            color:#f8fafc;
+            font-size:.94rem;
+            font-weight:850;
+            white-space:nowrap;
+        }
+        .v5301-mini-value.amount{color:#38bdf8;font-weight:950;}
+        .v5301-memo{
+            color:#cbd5e1;
+            font-size:.81rem;
+            line-height:1.35;
+            margin-top:.42rem;
+        }
+        .v5301-memo:before{content:"▣ ";color:#22d3ee;}
+        .v5301-buy-pill{
+            justify-self:end;
+            display:inline-flex;
+            align-items:center;
+            gap:.32rem;
+            border-radius:999px;
+            padding:.38rem .72rem;
+            background:rgba(22,163,74,.24);
+            color:#86efac;
+            border:1px solid rgba(34,197,94,.20);
+            font-size:.86rem;
+            font-weight:950;
+            white-space:nowrap;
+        }
+        .v5301-buy-pill:before{content:"🛒";}
+        .v5301-common{
+            display:grid;
+            grid-template-columns:minmax(0,1.4fr) .65fr .65fr;
+            gap:1rem;
+            align-items:center;
+            margin:.78rem 0 .2rem 0;
+            border:1px solid rgba(16,185,129,.62);
+            border-left:4px solid rgba(52,211,153,.98);
+            border-radius:16px;
+            background:
+                radial-gradient(circle at 2% 45%, rgba(16,185,129,.22), transparent 0 46px, transparent 50px),
+                linear-gradient(100deg, rgba(6,78,59,.68), rgba(6,35,44,.52));
+            padding:1rem 1.2rem 1rem 5.5rem;
+            color:#d1fae5;
+            min-height:86px;
+            position:relative;
+        }
+        .v5301-common:before{
+            content:"💡";
+            position:absolute;
+            left:1.35rem;
+            top:50%;
+            transform:translateY(-50%);
+            width:2.85rem;
+            height:2.85rem;
+            border-radius:50%;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            background:rgba(16,185,129,.20);
+            font-size:1.3rem;
+        }
+        .v5301-common-title{
+            color:#5eead4;
+            font-size:1.34rem;
+            font-weight:980;
+            letter-spacing:-.05em;
+            margin-bottom:.24rem;
+        }
+        .v5301-common-title span{
+            color:#d1d5db;
+            font-size:.88rem;
+            font-weight:750;
+        }
+        .v5301-common-body{
+            color:#e5f9f0;
+            font-size:.9rem;
+            line-height:1.48;
+            font-weight:650;
+        }
+        .v5301-common-metric{
+            border-left:1px solid rgba(209,250,229,.26);
+            padding-left:1.1rem;
+            text-align:center;
+        }
+        .v5301-common-label{
+            color:#d1fae5;
+            font-size:.82rem;
+            font-weight:800;
+            margin-bottom:.22rem;
+        }
+        .v5301-common-value{
+            color:#4ade80;
+            font-size:1.2rem;
+            font-weight:980;
+            white-space:nowrap;
+            letter-spacing:-.035em;
+        }
+        @media(max-width:900px){
+            .v5301-summary{padding:1rem 1rem 1rem 1rem;min-height:auto;}
+            .v5301-summary:before,.v5301-summary:after{display:none;}
+            .v5301-summary-main{font-size:1.24rem;}
+            .v5301-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-right:0;gap:.65rem;}
+            .v5301-summary-metric{border-right:0;border:1px solid rgba(148,163,184,.16);border-radius:12px;padding:.58rem .68rem;}
+            .v5301-card{grid-template-columns:1fr;gap:.42rem;}
+            .v5301-no{width:2.2rem;height:2.2rem;}
+            .v5301-buy-pill{justify-self:start;}
+            .v5301-card-metrics{grid-template-columns:1fr;gap:.35rem;}
+            .v5301-mini{border-right:0;border-bottom:1px solid rgba(148,163,184,.18);padding-bottom:.3rem;}
+            .v5301-common{grid-template-columns:1fr;padding:1rem;}
+            .v5301-common:before{display:none;}
+            .v5301-common-metric{text-align:left;border-left:0;border-top:1px solid rgba(209,250,229,.18);padding:.7rem 0 0 0;}
+        }
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+def _v5301_items(이동후보):
+    try:
+        if isinstance(이동후보, dict):
+            items = 이동후보.get('거래목록') or 이동후보.get('items') or 이동후보.get('내역')
+            if isinstance(items, list) and items:
+                return items
+            return [이동후보]
+        if isinstance(이동후보, list):
+            return 이동후보
+        if hasattr(이동후보, 'to_dict'):
+            try:
+                return 이동후보.to_dict('records')
+            except Exception:
+                return []
+    except Exception:
+        pass
+    return []
+
+
+def _v5301_pick(item, keys, default=""):
+    try:
+        for key in keys:
+            if hasattr(item, 'get') and key in item:
+                v = _v5301_text(item.get(key, ''))
+                if v:
+                    return v
+    except Exception:
+        pass
+    return default
+
+
+def _v5301_date(item):
+    return _v5301_pick(item, ['거래일자', '날짜', '일자', '기준일'], '최근 거래')
+
+
+def _v5301_type(item):
+    return _v5301_pick(item, ['표시구분', '방향', '구분', '거래구분'], '거래')
+
+
+def _v5301_desc(item):
+    return _v5301_pick(item, ['설명', '상세설명', '이동내용', '내용'], _v5301_pick(item, ['종목명', '상품명'], '거래 내역'))
+
+
+def _v5301_account(item):
+    return _v5301_short_account(_v5301_pick(item, ['계좌', '출금계좌', '입금계좌'], ''))
+
+
+def _v5301_asset(item):
+    desc = _v5301_desc(item)
+    name = _v5301_pick(item, ['종목명', '상품명', '자산명'], '')
+    if name:
+        return name
+    for candidate in ['삼성전자', 'SK하이닉스', '삼성전기', '현대차', '에이피알', 'KODEX 200', 'TIGER 200', 'TIGER 코리아휴머노이드로봇산업']:
+        if candidate in desc:
+            return candidate
+    if '휴머노이드' in desc:
+        return 'TIGER 코리아휴머노이드로봇산업'
+    return '-'
+
+
+def _v5301_amount(item):
+    try:
+        for key in ['확인금액', '이동금액', '금액', '매수금액', '매도금액']:
+            if hasattr(item, 'get') and key in item:
+                n = _v5301_num(item.get(key, 0), 0)
+                if n:
+                    return abs(n)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _v5301_qty(item):
+    q = _v5301_pick(item, ['수량', '주수', '거래수량'], '')
+    if q:
+        try:
+            n = _v5301_num(q, None)
+            if n is not None:
+                return f"{n:,.0f}주"
+        except Exception:
+            return q
+    return '-'
+
+
+def _v5301_price(item):
+    p = _v5301_pick(item, ['단가', '매수단가', '매도단가', '거래단가'], '')
+    if p:
+        return _v5301_money(_v5301_num(p, 0))
+    return '-'
+
+
+def _v5301_note(item):
+    return _v5301_pick(item, ['메모', '비고', '자동분석', '시스템해석', '해석'], '')
+
+
+def _v5301_unique_notes(items):
+    notes = []
+    try:
+        for item in items:
+            for key in ['시스템해석', '자동분석', '해석']:
+                n = _v5301_text(item.get(key, '') if hasattr(item, 'get') else '')
+                if n and n not in notes:
+                    notes.append(n)
+    except Exception:
+        pass
+    return notes
+
+
+def _v5301_average_price(items, total):
+    try:
+        total_qty = 0.0
+        for item in items:
+            q = _v5301_num(item.get('수량', item.get('주수', 0)) if hasattr(item, 'get') else 0, 0)
+            total_qty += q
+        if total_qty > 0:
+            return total / total_qty
+    except Exception:
+        pass
+    return 0.0
+
+
+def _v5301_summary_html(items):
+    count = len(items)
+    total = sum(_v5301_amount(x) for x in items)
+    buy_count = sum(1 for x in items if '매수' in _v5301_type(x))
+    sell_count = sum(1 for x in items if '매도' in _v5301_type(x))
+    date = _v5301_date(items[0]) if items else '최근 거래'
+    asset = _v5301_asset(items[0]) if items else '-'
+    if asset == '-' and items:
+        for it in items:
+            asset = _v5301_asset(it)
+            if asset != '-':
+                break
+    return (
+        '<div class="v5301-summary">'
+        f'<div class="v5301-kicker">{_v5301_html(date)} 당일 거래 요약</div>'
+        f'<div class="v5301-summary-main">총 {count:,}건 · 총 거래금액 {_v5301_money(total)}</div>'
+        '<div class="v5301-summary-grid">'
+        f'<div class="v5301-summary-metric"><div class="v5301-metric-label">매수 건수</div><div class="v5301-metric-value">{buy_count:,}건</div></div>'
+        f'<div class="v5301-summary-metric"><div class="v5301-metric-label">매도 건수</div><div class="v5301-metric-value">{sell_count:,}건</div></div>'
+        f'<div class="v5301-summary-metric"><div class="v5301-metric-label">총 거래금액</div><div class="v5301-metric-value">{_v5301_money(total)}</div></div>'
+        f'<div class="v5301-summary-metric"><div class="v5301-metric-label">종목</div><div class="v5301-metric-value">{_v5301_html(asset)}</div></div>'
+        '</div>'
+        '<div class="v5301-summary-guide">수량·단가·금액이 다른 거래는 합산하지 않고 아래에 건별로 표시합니다.</div>'
+        '</div>'
+    )
+
+
+def _v5301_card_html(item, idx):
+    date = _v5301_date(item)
+    typ = _v5301_type(item)
+    desc = _v5301_desc(item)
+    account = _v5301_account(item)
+    amount = _v5301_amount(item)
+    qty = _v5301_qty(item)
+    price = _v5301_price(item)
+    memo = _v5301_note(item)
+    if not memo:
+        memo = '거래원장 기준 건별 표시'
+    if account and '→' not in desc and '매수' in typ:
+        desc = f"{account} → {desc}"
+    return (
+        '<div class="v5301-card">'
+        f'<div class="v5301-no">{idx}</div>'
+        '<div>'
+        f'<div class="v5301-card-meta">{_v5301_html(date)} · {idx}번 거래 · {_v5301_html(typ)}</div>'
+        f'<div class="v5301-card-main">{_v5301_html(desc)}</div>'
+        '<div class="v5301-card-metrics">'
+        f'<div class="v5301-mini"><div class="v5301-mini-label">수량</div><div class="v5301-mini-value">{_v5301_html(qty)}</div></div>'
+        f'<div class="v5301-mini"><div class="v5301-mini-label">단가</div><div class="v5301-mini-value">{_v5301_html(price)}</div></div>'
+        f'<div class="v5301-mini"><div class="v5301-mini-label">금액</div><div class="v5301-mini-value amount">{_v5301_money(amount)}</div></div>'
+        '</div>'
+        f'<div class="v5301-memo">메모: {_v5301_html(memo)}</div>'
+        '</div>'
+        f'<div class="v5301-buy-pill">{_v5301_html("매수" if "매수" in typ else typ)}</div>'
+        '</div>'
+    )
+
+
+def _v5301_common_html(items):
+    total = sum(_v5301_amount(x) for x in items)
+    avg = _v5301_average_price(items, total)
+    notes = _v5301_unique_notes(items)
+    if notes:
+        body = notes[0]
+        if len(notes) > 1:
+            body = notes[0]
+    else:
+        body = '급락 구간에서 여러 번 나누어 매수하여 평균 매입단가를 낮춘 전략적 매수입니다.'
+    avg_html = _v5301_money(avg) if avg else '-'
+    return (
+        '<div class="v5301-common">'
+        '<div>'
+        '<div class="v5301-common-title">시스템 해석 <span>(공통)</span></div>'
+        f'<div class="v5301-common-body">{_v5301_html(body)}</div>'
+        '</div>'
+        '<div class="v5301-common-metric">'
+        '<div class="v5301-common-label">총 투자금액</div>'
+        f'<div class="v5301-common-value">{_v5301_money(total)}</div>'
+        '</div>'
+        '<div class="v5301-common-metric">'
+        '<div class="v5301-common-label">평균 매입단가</div>'
+        f'<div class="v5301-common-value">{avg_html}</div>'
+        '</div>'
+        '</div>'
+    )
+
+
+def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산 이동 해석"):
+    """v5.30.1: 확정 UI 반영본."""
+    try:
+        _v5301_css()
+        items = _v5301_items(이동후보)
+        if not items:
+            return
+        count = len(items)
+        total = sum(_v5301_amount(x) for x in items)
+        buy_count = sum(1 for x in items if '매수' in _v5301_type(x))
+        sell_count = sum(1 for x in items if '매도' in _v5301_type(x))
+        date = _v5301_date(items[0])
+        asset = _v5301_asset(items[0])
+        if asset == '-':
+            for it in items:
+                asset = _v5301_asset(it)
+                if asset != '-':
+                    break
+        cards = ''.join(_v5301_card_html(item, idx) for idx, item in enumerate(items, start=1))
+        st.markdown(
+            '<div class="v5301-wrap">'
+            f'<div class="v5301-title">{_v5301_html(제목)}</div>'
+            f'<div class="v5301-subtitle">{_v5301_html(date)} 거래이력 {count:,}건 · 매수 {buy_count:,}건 / 매도 {sell_count:,}건 · 총 거래금액 {_v5301_money(total)} · 종목: {_v5301_html(asset)}</div>'
+            f'{_v5301_summary_html(items)}'
+            f'<div class="v5301-detail-title">거래 상세 내역 <span>(총 {count:,}건)</span></div>'
+            f'<div class="v5301-card-list">{cards}</div>'
+            f'{_v5301_common_html(items)}'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    except Exception as e:
+        try:
+            st.caption(f"자산이동 설명 표시 오류 v5.30.1: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+# 최신 UI 함수가 과거 별칭으로 되돌아가지 않도록 마지막에 재고정합니다.
+try:
+    if '최근자산변화_생성_v5288' in globals():
+        def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=100):
+            이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+            return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 100))
+except Exception:
+    pass
+
+# ============================================================
+# end v5.30.1 cash-ui-visual-hierarchy FINAL OVERRIDE
+# ============================================================
