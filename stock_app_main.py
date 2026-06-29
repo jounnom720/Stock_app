@@ -711,7 +711,29 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
+
+# ======================================================
+# # v5.31.5 QUALITY IMPROVEMENT CHANGE LOG
+#
+# 수정 함수
+# - IRP비주식자산편집UI
+# - v5311_현금성이동UI단일진입점
+# - 최근자산변화카드표시
+# - 자산변동추이UI 내부 중복 호출 제거
+#
+# 수정 내용
+# - 계좌별 비주식·현금성 자산 표시 기준을 Editor 반환값 기준 Single Source of Truth로 통일
+# - 최근 현금성 자산 이동해석 Hero UI를 Compact Insight Card로 축소
+# - 자산 변동 추이 아래 중복 Render Path 호출 삭제
+#
+# 영향 범위
+# - UI / CSS / Layout / Render Path
+#
+# 회계 엔진 영향
+# - 없음
+# ======================================================
+
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -5523,15 +5545,18 @@ def IRP비주식자산표시용스타일(df):
 
 
 def IRP비주식자산편집UI():
+    """v5.31.5: Editor 반환값을 표시/저장/세션의 단일 기준으로 사용하는 UI."""
     st.markdown("### 계좌별 비주식·현금성 자산 관리")
     st.caption("TDF, 정기예금, 현금성 자산은 실시간 시세 조회 대신 원금과 평가금액을 직접 입력해 통합 자산에 반영합니다.")
-    현재df = IRP비주식자산불러오기()
+
+    현재df = IRP비주식자산표준열맞추기(IRP비주식자산불러오기())
+
     with st.expander("계좌별 비주식·현금성 자산 입력/수정", expanded=False):
         편집df = st.data_editor(
             현재df,
             num_rows="dynamic",
             width="stretch",
-            key="irp_non_stock_assets_editor_v513",
+            key="irp_non_stock_assets_editor_v5315",
             column_config={
                 "계좌": st.column_config.TextColumn("계좌"),
                 "자산군": st.column_config.SelectboxColumn("자산군", options=["TDF", "정기예금", "현금성자산", "채권", "펀드", "기타"]),
@@ -5545,50 +5570,34 @@ def IRP비주식자산편집UI():
             },
         )
 
-        st.caption("입력표는 숫자 입력 안정성을 위해 원 단위 숫자로 저장하고, 아래 표시 기준 보기에서 천 단위 쉼표·원화·손익 색상을 적용해 확인합니다.")
-        표데이터프레임(IRP비주식자산표시용스타일(편집df), width="stretch")
+        # Single Source of Truth: 화면 표시와 저장 모두 Editor 반환값을 표준화한 결과만 사용합니다.
+        표시저장기준df = IRP비주식자산표준열맞추기(편집df)
+        st.session_state["irp_non_stock_assets_df_v512"] = 표시저장기준df.copy()
+        st.session_state["irp_non_stock_assets_df_v5315_editor_truth"] = 표시저장기준df.copy()
 
-        비주식점검표 = IRP비주식자산검증표생성(편집df)
-        if 비주식점검표.empty:
-            st.success("비주식·현금성 자산 입력 참고 참고 점검 결과: 현재 확인된 형식 오류가 없습니다.")
-        else:
-            st.warning(f"비주식·현금성 자산 입력 참고 참고 점검 결과: {len(비주식점검표)}건의 확인 사항이 있습니다.")
-            with st.expander("비주식·현금성 자산 검증 상세 보기", expanded=False):
-                try:
-                    점검표시 = 비주식점검표.copy()
-                    표데이터프레임(index_1부터(점검표시).style.map(손익색상, subset=["현재값"]), width="stretch")
-                except Exception:
-                    표데이터프레임(index_1부터(비주식점검표), width="stretch")
+        st.caption("아래 확인표는 현재 Editor 반환값을 즉시 표준화한 결과입니다. 저장 전 DataFrame이 다시 표시되지 않습니다.")
+        표데이터프레임(IRP비주식자산표시용스타일(표시저장기준df), width="stretch")
 
-        # v5.21.3: 비주식·현금성자산 화면에서도 최근 거래에 따른 자산 이동 해석을 바로 보여줍니다.
-        # 예: 예수금 → 현대차 주식 매수. 원금 변화가 0원이어도 현금성자산 감소의 이유를 확인할 수 있습니다.
-        try:
-            이동후보_비주식화면 = 자산변화통합최신이동후보_v52212(거래df=현재거래이력가져오기(), 비주식자산df=편집df)
-            자산이동설명카드표시(이동후보_비주식화면, 제목="최근 현금성 자산 이동 해석")
-        except Exception as e:
-            st.caption(f"최근 거래 기반 현금성자산 해석 표시 오류: {type(e).__name__}: {e}")
-
-        버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.6, 4.6])
+        버튼1, 버튼2, 버튼3 = st.columns([1.2, 1.2, 5])
         with 버튼1:
-            if st.button("비주식 자산 저장", key="save_irp_non_stock_assets_v513", width="stretch"):
-                성공, 메시지 = IRP비주식자산저장(편집df)
+            if st.button("비주식 자산 저장", key="save_irp_non_stock_assets_v5315", use_container_width=True):
+                성공, 메시지 = IRP비주식자산저장(표시저장기준df)
                 if 성공:
-                    st.success(메시지 or "비주식·현금성 자산을 Google Sheets에 저장했습니다.")
-                    st.rerun()
+                    st.session_state["irp_non_stock_assets_df_v512"] = 표시저장기준df.copy()
+                    st.success("비주식·현금성 자산을 저장했습니다.")
                 else:
                     st.error(메시지)
         with 버튼2:
-            복원확인 = st.checkbox("Jone 기준값 복원 확인", key="confirm_reset_irp_non_stock_assets_v51440")
-            if st.button("Jone 기준값 복원", key="reset_irp_non_stock_assets_v51440", width="stretch", disabled=not 복원확인):
-                성공, 메시지 = IRP비주식자산저장(기본IRP비주식자산표())
+            if st.button("기본값 복원", key="reset_irp_non_stock_assets_v5315", use_container_width=True):
+                기본df = IRP비주식자산표준열맞추기(기본IRP비주식자산표())
+                성공, 메시지 = IRP비주식자산저장(기본df)
                 if 성공:
-                    st.success("Jone 기준 비주식·현금성 자산 값으로 복원했습니다.")
-                    st.rerun()
+                    st.session_state["irp_non_stock_assets_df_v512"] = 기본df.copy()
+                    st.session_state["irp_non_stock_assets_df_v5315_editor_truth"] = 기본df.copy()
+                    st.success("기본 비주식·현금성 자산으로 복원했습니다. 화면을 새로고침하면 입력표도 갱신됩니다.")
                 else:
                     st.error(메시지)
-        with 버튼3:
-            st.caption("기본값 복원은 Google Sheets 값을 덮어쓰는 작업이므로 확인 체크 후에만 실행됩니다. 정기예금은 해지 상태라면 비고에 '해지'를 유지하고 원금·평가금액 0원으로 둘 수 있습니다.")
-    return IRP비주식자산불러오기()
+
 
 
 def _계좌명정규화(값):
@@ -14120,7 +14129,7 @@ def v5192_포트폴리오핵심상태메인UI(거래df=None):
 # v5.22.16 cash balance / direct edit / Google Sheets format fix
 # ============================================================
 try:
-    APP_VERSION = "v5.29.4-recent-ledger-readability"
+    APP_VERSION = "v5.31.5-quality-improvement"
 except Exception:
     pass
 
@@ -14515,7 +14524,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5239_text(value):
@@ -14761,7 +14770,7 @@ for idx, 섹터명 in enumerate(섹터목록):
 # - 회계검증과 동일한 평균단가 방식으로 거래원장을 직접 순회하여 실현손익 계산
 # - 거래원장 50건은 건별 유지, 설명행은 별도 행유형으로 분리
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5289_text(value):
@@ -15168,7 +15177,7 @@ def 최근자산변화_표시_v5289(이동df, 최대표시=80):
 # - 기존 자산이동설명카드표시 Override에 의존하지 않고, 거래원장 기반 표시 함수 자체를 새 UI로 그립니다.
 # - 회계/거래/원금 계산 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 def _v5305_cash_ui_text(value):
     try:
@@ -15406,7 +15415,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - v5.28.11에서 _v5288_money_fmt 미정의로 자산변화 내역이 사라진 오류를 수정합니다.
 # - 거래원장 50건 + 설명행 2건, 거래형 실현손익 5,035,094원 구조를 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 # v5.28.11/과거 래퍼가 참조하는 v5288 포맷명을 v5289 기준으로 안전 연결합니다.
 try:
@@ -15559,7 +15568,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 실거래/설명행 구분, 거래형 실현손익, 원장 기준 전체 실현손익을 명확히 표시합니다.
 # ============================================================
 
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v529_safe_df(obj):
@@ -16148,7 +16157,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 #   거래기반 현금 보정 행을 모두 화면 계산 전에 적용합니다.
 # - 기존 전체 거래이력 병합과 TDF2035 실현손익 보호 로직은 건드리지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5248_text(value):
@@ -16578,7 +16587,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표 계산 시 최근 ETF/주식 매도대금이 현금성자산에 아직 저장되지 않았으면 임시 현금 행으로 반영합니다.
 # - Google Sheets 반영일자는 저장 직전에 YYYY-MM-DD 문자열로 강제 정리합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5249_num(value, default=0.0):
@@ -16907,7 +16916,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표에는 현금성자산 시트에 아직 매도대금이 반영되지 않은 경우에만
 #   매도대금 임시반영 행을 원금=취득원가, 평가금액=매도대금, 평가손익=실현손익으로 추가합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5250_num(value, default=0.0):
@@ -17276,7 +17285,7 @@ def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
 #        원금은 20,730원 + 매도 원금 98,010원 = 118,740원,
 #        평가금액은 90,138원, 평가손익은 -28,602원으로 계산합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5251_register_asset_master():
@@ -17594,7 +17603,7 @@ def IRP비주식자산저장(df):
 # 4) 증권앱과 유사하게 수익은 빨간색, 손실은 파란색을 더 선명하고 굵게 표시합니다.
 # 5) 화면 문구 '자동분석'은 사용자에게 더 자연스러운 '시스템 해석'으로 표시합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 # 주식앱과 유사한 상승/하락 색상: 상승/수익=빨강, 하락/손실=파랑
 PROFIT_RED_V5252 = "#e9545f"
@@ -18000,7 +18009,7 @@ _v5252_global_style_inject()
 # - 화면 표시 함수 안에서 실현손익을 추정하지 않도록 검증표를 별도로 제공합니다.
 # - ASSET_MASTER 누락 종목(한화오션, TIGER 200 등)을 실행 전 보강합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 # 증권앱 기준에 가까운 색상: 수익=빨강, 손실=파랑, 중립=회색
 PROFIT_RED_V5260 = "#e93030"
@@ -18381,7 +18390,7 @@ _v5260_global_style_inject()
 #   현금잔액과 ETF 실현손실을 분리해 설명합니다.
 # - 색상은 국내 증권앱 관례에 맞게 수익=빨강, 손실=파랑을 더 선명하게 적용합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 PROFIT_RED_V5261 = "#E60012"   # 국내 증권앱에 가까운 강한 빨강
 LOSS_BLUE_V5261 = "#0066FF"    # 국내 증권앱에 가까운 강한 파랑
@@ -18691,7 +18700,7 @@ _v5261_global_style_inject()
 #   원시 float 표시를 사용자 화면용 정수/쉼표 표시로 복원합니다.
 # - 계산값은 변경하지 않고 표시 포맷만 보정합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5263_num(value, default=0.0):
@@ -18796,7 +18805,7 @@ _v5263_global_number_style()
 #    실현손익 거래만 정밀 보강합니다.
 # 3) 목표: 최근자산변화 54건 / 실현손익 8,726,021원
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5266_num(value, default=0.0):
@@ -19085,7 +19094,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 #   실제 누락된 매도 실현손익 행만 정확한 키로 추가합니다.
 # - KPI의 실현손익 기준은 화면 이동목록 합계가 아니라 원장 검증 실현손익입니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5267_num(value, default=0.0):
@@ -19379,7 +19388,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 KPI의 실현손익은 표시행 기준이 아니라 Google Sheets 거래원장 기준
 #   실현손익 총액과 동기화합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5268_num(value, default=0.0):
@@ -19664,7 +19673,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 누락된 2026-05-15 KODEX AI반도체핵심장비 3주 매도(+18,453원)는
 #   매도금액+실현손익 키 기준으로만 판단하여 없을 때만 보강합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5269_num(value, default=0.0):
@@ -20042,7 +20051,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 표시목록에서만 "실현손익 있는 실제 매도행"과 중복되는 "손익 0원 설명행"을 숨깁니다.
 # - 2026-05-15 KODEX AI반도체핵심장비 3주 매도 +18,453원 보강행은 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5270_num(value, default=0.0):
@@ -20265,7 +20274,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 동일 날짜·계좌·자산·금액의 실현손익 있는 매도행이 있으면 손익 0원 설명행만 숨깁니다.
 # - Google Sheets 원장 기준 실현손익 KPI 8,726,021원과 +18,453원 행은 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5271_num(value, default=0.0):
@@ -20547,7 +20556,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장 실제 행을 우선 반영하여 동일 날짜 삼성전자 3회 매수 같은 다중거래를 보존합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 try:
     _자산이동목록통합_v5282_legacy_base = 자산이동목록통합_v5225
@@ -20922,7 +20931,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 원장 수량/단가/금액 컬럼명이 다르거나 일부 보정된 DataFrame이어도 위치 기반 보조 추출을 적용합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 try:
     _자산이동목록통합_v5283_legacy_base = _자산이동목록통합_v5282_legacy_base
@@ -21313,7 +21322,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 포트폴리오 요약 카드의 '원원' 표기 오류를 제거합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5287_text(x):
@@ -21862,7 +21871,7 @@ def 포트폴리오요약카드표시(요약정보):
 # - 회계검증과 동일한 평균단가 방식으로 거래원장을 직접 순회하여 실현손익 계산
 # - 거래원장 50건은 건별 유지, 설명행은 별도 행유형으로 분리
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5289_text(value):
@@ -22299,7 +22308,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근 현금성 자산 이동 해석은 최신 거래일의 거래를 건별로 표시하고, 당일 요약을 함께 표시합니다.
 # - 매수/매도 건별 수량·단가·금액은 절대 합산하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v52811_safe_df(obj):
@@ -22452,7 +22461,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 기존 회계/거래/원금/실현손익 계산 로직은 변경하지 않습니다.
 # - 기존 UI 렌더러가 가진 세부 HTML 구조는 유지하고, 중복된 색상/간격/카드 기준만 보정합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def v5312_공통CSS적용():
@@ -22569,7 +22578,27 @@ def v5312_공통CSS적용():
             table.asset-change-table th,table.asset-change-table td{padding:.48rem .40rem!important;}
             .v5304-card,.v5305-card,.v5306-card{padding:.85rem!important;}
         }
-        </style>
+        
+        
+        .v5315-cash-compact-card{
+            margin:.35rem 0 .45rem 0;
+            padding:.72rem .86rem;
+            border:1px solid rgba(148,163,184,.24);
+            border-radius:14px;
+            background:linear-gradient(180deg,rgba(15,23,42,.72),rgba(2,6,23,.42));
+        }
+        .v5315-cash-title-row{display:flex;align-items:center;justify-content:space-between;gap:.7rem;}
+        .v5315-cash-title{font-size:.98rem;font-weight:800;color:#f8fafc;letter-spacing:-.01em;}
+        .v5315-cash-pill{font-size:.76rem;color:#cbd5e1;border:1px solid rgba(148,163,184,.25);border-radius:999px;padding:.18rem .52rem;background:rgba(15,23,42,.65);white-space:nowrap;}
+        .v5315-cash-row{margin:.28rem 0;padding:.56rem .72rem;border:1px solid rgba(148,163,184,.16);border-radius:12px;background:rgba(15,23,42,.34);}
+        .v5315-cash-row-main{display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;font-size:.86rem;line-height:1.25;}
+        .v5315-cash-date{color:#94a3b8;font-weight:700;}
+        .v5315-cash-type{color:#38bdf8;font-weight:800;}
+        .v5315-cash-name{color:#f8fafc;font-weight:800;}
+        .v5315-cash-money{margin-left:auto;color:#e5e7eb;font-weight:900;}
+        .v5315-cash-row-sub{margin-top:.18rem;color:#94a3b8;font-size:.76rem;line-height:1.35;}
+        
+</style>
         """, unsafe_allow_html=True)
     except Exception as e:
         try:
@@ -22619,7 +22648,7 @@ def 최근자산변화표스타일_v5312():
 # - 회계 엔진, 거래 원장, 원금/평가금액/실현손익 계산 로직은 변경하지 않습니다.
 # - 거래이력은 원장 그대로 건별 유지하며, 같은 날짜·같은 종목도 수량/단가가 다르면 절대 통합하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 # Alias를 덮어쓰기 전에 직전 안정 함수 참조를 보관합니다.
 _v5311_original_cash_renderer = globals().get("_v5305_recent_cash_flow_card_real")
@@ -22633,22 +22662,94 @@ _v5311_original_recent_display = (
 )
 
 
-def v5311_현금성이동UI단일진입점(거래df=None, *args, **kwargs):
-    """최근 현금성 자산 이동 해석 UI의 단일 진입점."""
+def v5311_현금성이동UI단일진입점(이동후보=None, 제목="최근 현금성 자산 이동 해석"):
+    """v5.31.5: 최근 현금성 자산 이동해석 Compact Insight Card 단일 진입점."""
     try:
-        if 'v5312_공통CSS적용' in globals():
-            v5312_공통CSS적용()
-    except Exception:
-        pass
-    try:
-        if callable(_v5311_original_cash_renderer):
-            return _v5311_original_cash_renderer(거래df)
+        후보df = pd.DataFrame()
+        if 이동후보 is not None:
+            try:
+                후보df = pd.DataFrame(이동후보).copy()
+            except Exception:
+                후보df = pd.DataFrame()
+
+        # 거래원장 원본이 들어온 경우에는 기존 후보 생성 함수만 사용하고 계산 로직은 변경하지 않습니다.
+        if not 후보df.empty and not any(str(c) in 후보df.columns for c in ["상세설명", "자동분석", "변화유형", "금액"]):
+            for 생성함수명 in ["최근자산변화_생성_v5289", "최근자산변화_생성_v5288", "최근자산변화_생성_v5284"]:
+                생성함수 = globals().get(생성함수명)
+                if callable(생성함수):
+                    try:
+                        후보df = 생성함수(후보df, None, 최근일수=3650)
+                        break
+                    except Exception:
+                        continue
+
+        if 후보df is None or 후보df.empty:
+            st.caption("최근 현금성 자산 이동 해석 대상이 없습니다.")
+            return False
+
+        작업 = 후보df.copy()
+        if "날짜" in 작업.columns:
+            작업["_정렬일"] = pd.to_datetime(작업["날짜"], errors="coerce")
+            작업 = 작업.sort_values("_정렬일", ascending=False)
+        작업 = 작업.head(6).copy()
+
+        def _fmt_money(x):
+            try:
+                if "원화정수포맷" in globals():
+                    return 원화정수포맷(x)
+                return f"{int(round(float(x or 0))):,}원"
+            except Exception:
+                return str(x if x is not None else "")
+
+        def _get(row, names, default=""):
+            for name in names:
+                if name in row and str(row.get(name, "")).strip() not in ["", "nan", "None"]:
+                    return row.get(name)
+            return default
+
+        총금액 = 0
+        if "금액" in 작업.columns:
+            try:
+                총금액 = int(pd.to_numeric(작업["금액"], errors="coerce").fillna(0).sum())
+            except Exception:
+                총금액 = 0
+
+        st.markdown(f"""
+        <div class="v5315-cash-compact-card">
+            <div class="v5315-cash-title-row">
+                <div class="v5315-cash-title">{html.escape(str(제목))}</div>
+                <div class="v5315-cash-pill">최근 {len(작업):,}건 · {_fmt_money(총금액)}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for _, row in 작업.iterrows():
+            날짜 = html.escape(str(_get(row, ["날짜", "거래일자", "일자"], "")))
+            계좌 = html.escape(str(_get(row, ["계좌", "계좌구분", "운용사"], "")))
+            구분 = html.escape(str(_get(row, ["변화유형", "구분", "거래구분"], "이동")))
+            종목 = html.escape(str(_get(row, ["종목명", "상품명", "자산명"], "")))
+            금액 = _fmt_money(_get(row, ["금액", "원금부분", "평가금액"], 0))
+            설명 = html.escape(str(_get(row, ["자동분석", "상세설명", "메모", "비고"], "")))
+
+            st.markdown(f"""
+            <div class="v5315-cash-row">
+                <div class="v5315-cash-row-main">
+                    <span class="v5315-cash-date">{날짜}</span>
+                    <span class="v5315-cash-type">{구분}</span>
+                    <span class="v5315-cash-name">{종목}</span>
+                    <span class="v5315-cash-money">{금액}</span>
+                </div>
+                <div class="v5315-cash-row-sub">{계좌} · {설명}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        return True
     except Exception as e:
         try:
-            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.31.1: {type(e).__name__}: {e}")
+            st.caption(f"최근 현금성 자산 이동 해석 표시 오류 v5.31.5: {type(e).__name__}: {e}")
         except Exception:
             pass
-    return None
+        return False
+
 
 
 # 과거 현금성 이동 카드 함수 Alias 통합
@@ -23057,7 +23158,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -23347,7 +23448,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -23635,7 +23736,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -23914,7 +24015,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v52221_to_df_safe(obj):
@@ -24182,7 +24283,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 
@@ -24193,7 +24294,7 @@ APP_VERSION = "v5.31.2-common-css-consolidation"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5242_runtime_integrity_check():
@@ -24262,7 +24363,7 @@ def v5242_운영점검표시():
 # - 현금성 대기자산은 현금잔액과 ETF 매도손실의 의미가 분리되도록 설명 문구를 보강합니다.
 # - 수익=강한 빨강, 손실=강한 파랑 색상 규칙을 화면 전체에 다시 적용합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 PROFIT_RED_V5262 = "#E60012"
 LOSS_BLUE_V5262 = "#0066FF"
@@ -24594,7 +24695,7 @@ except Exception:
 # - 숫자 표시에서 31.000000, 315000.000000 같은 표현을 제거합니다.
 # - 회계검증/통합자산/포트폴리오 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5284_text(value):
@@ -25061,7 +25162,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않음
 # ============================================================
 
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5285_money_fmt(x, dash_zero=False):
@@ -25374,7 +25475,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
 
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5286_text(x):
@@ -25857,7 +25958,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 설명행은 별도 행유형으로 분리하여 실거래 건수와 혼합하지 않음
 # - 회계검증/통합자산/포트폴리오 계산 로직은 수정하지 않음
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5288_text(value):
@@ -26342,7 +26443,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 52건 = 실거래 50건 + 설명행 2건 구조를 오해하지 않도록 표시합니다.
 # - 거래형 실현손익 5,035,094원과 원장 기준 전체 실현손익 8,726,021원을 구분합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def 최근자산변화_진단패널_v52810(df):
@@ -26476,7 +26577,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 
 # v5.28.11 final version marker
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 # ============================================================
@@ -26488,7 +26589,7 @@ APP_VERSION = "v5.31.2-common-css-consolidation"
 # - 실거래/설명행을 화면에서 명확히 구분합니다.
 # - 거래원장 행수와 최근자산변화 표시행수를 자동 검증합니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5293_text(value):
@@ -26770,7 +26871,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 
 try:
-    APP_VERSION = "v5.29.4-recent-ledger-readability"
+    APP_VERSION = "v5.31.5-quality-improvement"
 except Exception:
     pass
 
@@ -26990,7 +27091,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # ============================================================
 
 try:
-    APP_VERSION = "v5.30.6-cash-ui-all-direct-path-fix"
+    APP_VERSION = "v5.31.5-quality-improvement"
 except Exception:
     pass
 
@@ -27571,7 +27672,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 계산·원금·거래건수 생성 로직은 변경하지 않습니다.
 # ============================================================
 try:
-    APP_VERSION = "v5.29.7-ui-hierarchy-cleanup"
+    APP_VERSION = "v5.31.5-quality-improvement"
 except Exception:
     pass
 
@@ -28007,7 +28108,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 현금성 자산 이동 해석 화면의 제목/본문/해석 박스 크기와 색상 위계를 재정리합니다.
 # - 계산·원금·실현손익·거래 생성 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 def _v5298_css():
@@ -28498,9 +28599,30 @@ def 최근자산변화표시_v5224(이동df, 최대표시=100):
 최근자산변화_표시_v5297 = 최근자산변화_표시_v5298
 
 
-def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=100):
-    이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
-    return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 100))
+def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표시=80):
+    """v5.31.5: 최근 현금성 이동 Compact Card 1회 + 최근 자산변화 표 1회만 렌더링."""
+    try:
+        v5311_현금성이동UI단일진입점(거래df, 제목="최근 현금성 자산 이동 해석")
+    except Exception:
+        pass
+
+    if "최근자산변화_생성_v5289" in globals():
+        이동df = 최근자산변화_생성_v5289(거래df, 비주식자산df, 최근일수=3650)
+    elif "최근자산변화_생성_v5288" in globals():
+        이동df = 최근자산변화_생성_v5288(거래df, 비주식자산df, 최근일수=3650)
+    elif "최근자산변화_생성_v5284" in globals():
+        이동df = 최근자산변화_생성_v5284(거래df, 비주식자산df, 최근일수=3650)
+    else:
+        이동df = pd.DataFrame()
+
+    if "최근자산변화_표시_v52811" in globals():
+        return 최근자산변화_표시_v52811(이동df, 최대표시=max(최대표시, 80))
+    if "최근자산변화_표시_v5289" in globals():
+        return 최근자산변화_표시_v5289(이동df, 최대표시=max(최대표시, 80))
+    if "최근자산변화표시_v5224" in globals():
+        return 최근자산변화표시_v5224(이동df, 최대표시=max(최대표시, 80))
+    return 이동df
+
 
 # ============================================================
 # end v5.29.8 duplicate-kpi-cleanup + cash-move-compact-ui
@@ -28515,7 +28637,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화/자산변동 계산 로직은 변경하지 않습니다.
 # ============================================================
 try:
-    APP_VERSION = "v5.30.6-cash-ui-all-direct-path-fix"
+    APP_VERSION = "v5.31.5-quality-improvement"
 except Exception:
     pass
 
@@ -28923,12 +29045,12 @@ def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산
 # ============================================================
 # v5.30.4 final version guard
 # ============================================================
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 # v5.31.1 final version guard
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
 
 
 # v5.31.2 final version guard
-APP_VERSION = "v5.31.2-common-css-consolidation"
+APP_VERSION = "v5.31.5-quality-improvement"
