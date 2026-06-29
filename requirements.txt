@@ -6,7 +6,6 @@ gspread
 google-auth
 openpyxl
 requests
-beautifulsoup4
-streamlit-plotly-events
+yfinance
 python-docx
 setuptools
