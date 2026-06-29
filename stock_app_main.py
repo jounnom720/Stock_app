@@ -711,7 +711,7 @@ except Exception:
     qn = None
     DOCX_AVAILABLE = False
 
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 # ============================================================
 # v5.18.3 UI 안정화 + 데이터 구조 정리
@@ -14515,7 +14515,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - 최근자산변화 표는 최신 코드의 UI와 용어(수익실현·자금이체·현금대기)를 유지합니다.
 # - 정렬은 최신일 우선, 같은 날짜 안에서는 현재 자산상태가 위에 오도록 고정합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5239_text(value):
@@ -14761,7 +14761,7 @@ for idx, 섹터명 in enumerate(섹터목록):
 # - 회계검증과 동일한 평균단가 방식으로 거래원장을 직접 순회하여 실현손익 계산
 # - 거래원장 50건은 건별 유지, 설명행은 별도 행유형으로 분리
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5289_text(value):
@@ -15168,7 +15168,7 @@ def 최근자산변화_표시_v5289(이동df, 최대표시=80):
 # - 기존 자산이동설명카드표시 Override에 의존하지 않고, 거래원장 기반 표시 함수 자체를 새 UI로 그립니다.
 # - 회계/거래/원금 계산 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 def _v5305_cash_ui_text(value):
     try:
@@ -15406,7 +15406,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - v5.28.11에서 _v5288_money_fmt 미정의로 자산변화 내역이 사라진 오류를 수정합니다.
 # - 거래원장 50건 + 설명행 2건, 거래형 실현손익 5,035,094원 구조를 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 # v5.28.11/과거 래퍼가 참조하는 v5288 포맷명을 v5289 기준으로 안전 연결합니다.
 try:
@@ -15559,7 +15559,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 실거래/설명행 구분, 거래형 실현손익, 원장 기준 전체 실현손익을 명확히 표시합니다.
 # ============================================================
 
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v529_safe_df(obj):
@@ -16148,7 +16148,7 @@ with st.sidebar.expander("거래이력 관리", expanded=False):
 #   거래기반 현금 보정 행을 모두 화면 계산 전에 적용합니다.
 # - 기존 전체 거래이력 병합과 TDF2035 실현손익 보호 로직은 건드리지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5248_text(value):
@@ -16578,7 +16578,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표 계산 시 최근 ETF/주식 매도대금이 현금성자산에 아직 저장되지 않았으면 임시 현금 행으로 반영합니다.
 # - Google Sheets 반영일자는 저장 직전에 YYYY-MM-DD 문자열로 강제 정리합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5249_num(value, default=0.0):
@@ -16907,7 +16907,7 @@ def IRP비주식자산저장(df):
 # - 통합자산표에는 현금성자산 시트에 아직 매도대금이 반영되지 않은 경우에만
 #   매도대금 임시반영 행을 원금=취득원가, 평가금액=매도대금, 평가손익=실현손익으로 추가합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5250_num(value, default=0.0):
@@ -17276,7 +17276,7 @@ def 통합자산현황표생성(보유포트폴리오, irp_df, cash_df=None):
 #        원금은 20,730원 + 매도 원금 98,010원 = 118,740원,
 #        평가금액은 90,138원, 평가손익은 -28,602원으로 계산합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5251_register_asset_master():
@@ -17594,7 +17594,7 @@ def IRP비주식자산저장(df):
 # 4) 증권앱과 유사하게 수익은 빨간색, 손실은 파란색을 더 선명하고 굵게 표시합니다.
 # 5) 화면 문구 '자동분석'은 사용자에게 더 자연스러운 '시스템 해석'으로 표시합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 # 주식앱과 유사한 상승/하락 색상: 상승/수익=빨강, 하락/손실=파랑
 PROFIT_RED_V5252 = "#e9545f"
@@ -18000,7 +18000,7 @@ _v5252_global_style_inject()
 # - 화면 표시 함수 안에서 실현손익을 추정하지 않도록 검증표를 별도로 제공합니다.
 # - ASSET_MASTER 누락 종목(한화오션, TIGER 200 등)을 실행 전 보강합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 # 증권앱 기준에 가까운 색상: 수익=빨강, 손실=파랑, 중립=회색
 PROFIT_RED_V5260 = "#e93030"
@@ -18381,7 +18381,7 @@ _v5260_global_style_inject()
 #   현금잔액과 ETF 실현손실을 분리해 설명합니다.
 # - 색상은 국내 증권앱 관례에 맞게 수익=빨강, 손실=파랑을 더 선명하게 적용합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 PROFIT_RED_V5261 = "#E60012"   # 국내 증권앱에 가까운 강한 빨강
 LOSS_BLUE_V5261 = "#0066FF"    # 국내 증권앱에 가까운 강한 파랑
@@ -18691,7 +18691,7 @@ _v5261_global_style_inject()
 #   원시 float 표시를 사용자 화면용 정수/쉼표 표시로 복원합니다.
 # - 계산값은 변경하지 않고 표시 포맷만 보정합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5263_num(value, default=0.0):
@@ -18796,7 +18796,7 @@ _v5263_global_number_style()
 #    실현손익 거래만 정밀 보강합니다.
 # 3) 목표: 최근자산변화 54건 / 실현손익 8,726,021원
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5266_num(value, default=0.0):
@@ -19085,7 +19085,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 #   실제 누락된 매도 실현손익 행만 정확한 키로 추가합니다.
 # - KPI의 실현손익 기준은 화면 이동목록 합계가 아니라 원장 검증 실현손익입니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5267_num(value, default=0.0):
@@ -19379,7 +19379,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 KPI의 실현손익은 표시행 기준이 아니라 Google Sheets 거래원장 기준
 #   실현손익 총액과 동기화합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5268_num(value, default=0.0):
@@ -19664,7 +19664,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 누락된 2026-05-15 KODEX AI반도체핵심장비 3주 매도(+18,453원)는
 #   매도금액+실현손익 키 기준으로만 판단하여 없을 때만 보강합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5269_num(value, default=0.0):
@@ -20042,7 +20042,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근자산변화 표시목록에서만 "실현손익 있는 실제 매도행"과 중복되는 "손익 0원 설명행"을 숨깁니다.
 # - 2026-05-15 KODEX AI반도체핵심장비 3주 매도 +18,453원 보강행은 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5270_num(value, default=0.0):
@@ -20265,7 +20265,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 동일 날짜·계좌·자산·금액의 실현손익 있는 매도행이 있으면 손익 0원 설명행만 숨깁니다.
 # - Google Sheets 원장 기준 실현손익 KPI 8,726,021원과 +18,453원 행은 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5271_num(value, default=0.0):
@@ -20547,7 +20547,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장 실제 행을 우선 반영하여 동일 날짜 삼성전자 3회 매수 같은 다중거래를 보존합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 try:
     _자산이동목록통합_v5282_legacy_base = 자산이동목록통합_v5225
@@ -20922,7 +20922,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 원장 수량/단가/금액 컬럼명이 다르거나 일부 보정된 DataFrame이어도 위치 기반 보조 추출을 적용합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 try:
     _자산이동목록통합_v5283_legacy_base = _자산이동목록통합_v5282_legacy_base
@@ -21313,7 +21313,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 포트폴리오 요약 카드의 '원원' 표기 오류를 제거합니다.
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5287_text(x):
@@ -21862,7 +21862,7 @@ def 포트폴리오요약카드표시(요약정보):
 # - 회계검증과 동일한 평균단가 방식으로 거래원장을 직접 순회하여 실현손익 계산
 # - 거래원장 50건은 건별 유지, 설명행은 별도 행유형으로 분리
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5289_text(value):
@@ -22299,7 +22299,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 최근 현금성 자산 이동 해석은 최신 거래일의 거래를 건별로 표시하고, 당일 요약을 함께 표시합니다.
 # - 매수/매도 건별 수량·단가·금액은 절대 합산하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v52811_safe_df(obj):
@@ -22443,6 +22443,173 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # end v5.28.11 core-unified-before-ui
 # ============================================================
 
+
+# ============================================================
+# v5.31.2 COMMON CSS CONSOLIDATION
+# ------------------------------------------------------------
+# 목적:
+# - v5.31.1에서 단일화한 UI Render Path 위에 공통 CSS 기준을 먼저 적용합니다.
+# - 기존 회계/거래/원금/실현손익 계산 로직은 변경하지 않습니다.
+# - 기존 UI 렌더러가 가진 세부 HTML 구조는 유지하고, 중복된 색상/간격/카드 기준만 보정합니다.
+# ============================================================
+APP_VERSION = "v5.31.2-common-css-consolidation"
+
+
+def v5312_공통CSS적용():
+    """v5.31.2 공통 UI 스타일.
+
+    기존 v5224~v5306 계열 UI 함수가 각자 CSS를 갖고 있어도, 최종 Render Path 진입 전에
+    이 공통 CSS를 먼저 주입해 Hero/KPI/최근자산변화/현금성이동 카드의 기본 간격과 위계를 맞춥니다.
+    """
+    try:
+        st.markdown("""
+        <style>
+        :root{
+            --v5312-bg-0:#020617;
+            --v5312-bg-1:#0f172a;
+            --v5312-bg-2:#111827;
+            --v5312-line:rgba(148,163,184,.20);
+            --v5312-line-strong:rgba(148,163,184,.30);
+            --v5312-text:#f8fafc;
+            --v5312-muted:#94a3b8;
+            --v5312-blue:#38bdf8;
+            --v5312-green:#22c55e;
+            --v5312-red:#ef4444;
+            --v5312-purple:#a855f7;
+            --v5312-radius-lg:18px;
+            --v5312-radius-md:14px;
+            --v5312-shadow:0 14px 38px rgba(2,6,23,.22);
+        }
+        .block-container{padding-top:1.15rem;padding-bottom:2.5rem;}
+        div[data-testid="stMetric"]{
+            border:1px solid var(--v5312-line);
+            border-radius:var(--v5312-radius-md);
+            background:linear-gradient(180deg,rgba(15,23,42,.70),rgba(2,6,23,.38));
+            padding:.86rem .96rem;
+            box-shadow:var(--v5312-shadow);
+        }
+        div[data-testid="stMetric"] label{color:var(--v5312-muted)!important;font-weight:700!important;}
+        div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:var(--v5312-text)!important;font-weight:850!important;letter-spacing:-.03em;}
+
+        .asset-change-head{margin:.18rem 0 .72rem 0!important;align-items:flex-end!important;}
+        .asset-change-title{font-size:1.30rem!important;font-weight:820!important;color:var(--v5312-text)!important;letter-spacing:-.04em!important;}
+        .asset-change-sub{font-size:.84rem!important;color:var(--v5312-muted)!important;}
+        .asset-kpi-box{
+            border:1px solid var(--v5312-line)!important;
+            border-radius:var(--v5312-radius-lg)!important;
+            background:linear-gradient(180deg,rgba(15,23,42,.62),rgba(2,6,23,.34))!important;
+            box-shadow:var(--v5312-shadow)!important;
+            margin:.68rem 0 .90rem 0!important;
+        }
+        .asset-kpi{padding:.78rem .92rem!important;}
+        .asset-kpi-label{font-size:.75rem!important;color:var(--v5312-muted)!important;font-weight:720!important;}
+        .asset-kpi-value{font-size:1.12rem!important;color:var(--v5312-text)!important;font-weight:850!important;letter-spacing:-.035em!important;}
+        .asset-kpi-note{font-size:.72rem!important;color:var(--v5312-muted)!important;}
+        .asset-change-wrap{
+            border:1px solid var(--v5312-line)!important;
+            border-radius:var(--v5312-radius-lg)!important;
+            background:linear-gradient(180deg,rgba(15,23,42,.70),rgba(2,6,23,.40))!important;
+            box-shadow:var(--v5312-shadow)!important;
+            overflow:hidden!important;
+        }
+        table.asset-change-table{font-size:.86rem!important;}
+        table.asset-change-table th{padding:.58rem .68rem!important;color:#dbeafe!important;font-weight:780!important;background:rgba(15,23,42,.92)!important;}
+        table.asset-change-table td{padding:.56rem .68rem!important;line-height:1.35!important;}
+        .move-main{font-size:.91rem!important;font-weight:820!important;letter-spacing:-.025em!important;}
+        .move-sub{font-size:.74rem!important;color:var(--v5312-muted)!important;line-height:1.32!important;}
+        .amount-main{font-weight:850!important;color:var(--v5312-blue)!important;}
+        .badge{border-radius:999px!important;padding:.24rem .50rem!important;font-size:.72rem!important;font-weight:820!important;}
+        .analysis-card{
+            border:1px solid var(--v5312-line)!important;
+            border-radius:var(--v5312-radius-md)!important;
+            background:linear-gradient(180deg,rgba(15,23,42,.56),rgba(2,6,23,.32))!important;
+            padding:.78rem .92rem!important;
+            margin-top:.78rem!important;
+            color:#cbd5e1!important;
+            box-shadow:0 10px 26px rgba(2,6,23,.16)!important;
+        }
+        .analysis-title{font-size:.92rem!important;font-weight:840!important;color:var(--v5312-text)!important;margin-bottom:.30rem!important;}
+        .asset-change-foot{font-size:.74rem!important;color:var(--v5312-muted)!important;}
+
+        .v5304-wrap,.v5305-wrap,.v5306-wrap{
+            border-radius:var(--v5312-radius-lg)!important;
+            box-shadow:var(--v5312-shadow)!important;
+        }
+        .v5304-summary,.v5305-summary,.v5306-summary{
+            border-radius:var(--v5312-radius-lg)!important;
+            border-color:var(--v5312-line-strong)!important;
+        }
+        .v5304-card,.v5305-card,.v5306-card{
+            border-radius:16px!important;
+            margin:.46rem 0!important;
+            min-height:96px!important;
+        }
+        .v5304-common,.v5305-common,.v5306-common{
+            border-radius:16px!important;
+            margin-top:.9rem!important;
+        }
+        .v5304-detail-title,.v5305-detail-title,.v5306-detail-title{font-size:1.14rem!important;margin:1rem 0 .55rem 0!important;}
+
+        .v5312-insight-card{
+            border:1px solid rgba(56,189,248,.24);
+            border-left:4px solid rgba(56,189,248,.82);
+            border-radius:16px;
+            background:linear-gradient(110deg,rgba(8,47,73,.52),rgba(15,23,42,.58));
+            padding:.86rem 1rem;
+            margin:.82rem 0;
+            color:#dbeafe;
+            box-shadow:0 12px 30px rgba(8,47,73,.18);
+        }
+        .v5312-insight-title{font-size:.92rem;font-weight:860;color:#f8fafc;margin-bottom:.22rem;}
+        .v5312-insight-body{font-size:.84rem;line-height:1.48;color:#cbd5e1;}
+        @media(max-width:900px){
+            .block-container{padding-top:.75rem;}
+            .asset-kpi-box{grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+            table.asset-change-table{font-size:.79rem!important;}
+            table.asset-change-table th,table.asset-change-table td{padding:.48rem .40rem!important;}
+            .v5304-card,.v5305-card,.v5306-card{padding:.85rem!important;}
+        }
+        </style>
+        """, unsafe_allow_html=True)
+    except Exception as e:
+        try:
+            logging.warning("v5.31.2 common css apply failed: %s", e, exc_info=True)
+        except Exception:
+            pass
+
+
+def v5312_InsightCard(제목="시스템 해석", 본문=""):
+    """공통 Insight Card 보조 표시 함수. 계산 로직에는 관여하지 않습니다."""
+    try:
+        v5312_공통CSS적용()
+        safe_title = _html_escape_v5224(제목) if '_html_escape_v5224' in globals() else html.escape(str(제목))
+        safe_body = _html_escape_v5224(본문) if '_html_escape_v5224' in globals() else html.escape(str(본문))
+        st.markdown(
+            f'<div class="v5312-insight-card"><div class="v5312-insight-title">{safe_title}</div><div class="v5312-insight-body">{safe_body}</div></div>',
+            unsafe_allow_html=True,
+        )
+    except Exception as e:
+        try:
+            st.caption(f"Insight Card 표시 오류 v5.31.2: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+# 기존 스타일 함수가 호출되더라도 공통 CSS가 반드시 한 번 먼저 적용되도록 보조 래퍼를 준비합니다.
+_v5312_original_style_v5224 = globals().get('최근자산변화표스타일_v5224')
+_v5312_original_style_v5226 = globals().get('최근자산변화표스타일_v5226')
+
+
+def 최근자산변화표스타일_v5312():
+    v5312_공통CSS적용()
+
+
+최근자산변화공통스타일_v5312 = 최근자산변화표스타일_v5312
+
+# ============================================================
+# end v5.31.2 COMMON CSS CONSOLIDATION
+# ============================================================
+
 # ============================================================
 # v5.31.1 UI DUPLICATE CONSOLIDATION / RENDER PATH GUARD
 # ------------------------------------------------------------
@@ -22452,7 +22619,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 회계 엔진, 거래 원장, 원금/평가금액/실현손익 계산 로직은 변경하지 않습니다.
 # - 거래이력은 원장 그대로 건별 유지하며, 같은 날짜·같은 종목도 수량/단가가 다르면 절대 통합하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 # Alias를 덮어쓰기 전에 직전 안정 함수 참조를 보관합니다.
 _v5311_original_cash_renderer = globals().get("_v5305_recent_cash_flow_card_real")
@@ -22468,6 +22635,11 @@ _v5311_original_recent_display = (
 
 def v5311_현금성이동UI단일진입점(거래df=None, *args, **kwargs):
     """최근 현금성 자산 이동 해석 UI의 단일 진입점."""
+    try:
+        if 'v5312_공통CSS적용' in globals():
+            v5312_공통CSS적용()
+    except Exception:
+        pass
     try:
         if callable(_v5311_original_cash_renderer):
             return _v5311_original_cash_renderer(거래df)
@@ -22488,6 +22660,11 @@ _v529_latest_cash_flow_card = v5311_현금성이동UI단일진입점
 
 def v5311_최근자산변화표시단일진입점(이동df, 최대표시=100, *args, **kwargs):
     """최근자산변화 표 UI 단일 진입점."""
+    try:
+        if 'v5312_공통CSS적용' in globals():
+            v5312_공통CSS적용()
+    except Exception:
+        pass
     try:
         표시건수 = max(int(최대표시 or 100), 100)
     except Exception:
@@ -22560,7 +22737,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 
 def v5311_UI중복정리상태():
-    """v5.31.1 UI 경로 연결 상태를 점검합니다."""
+    """v5.31.2 UI 경로와 공통 CSS 연결 상태를 점검합니다."""
     try:
         rows = [
             {"함수": "_v5289_recent_cash_flow_card", "연결": getattr(_v5289_recent_cash_flow_card, "__name__", str(_v5289_recent_cash_flow_card))},
@@ -22573,6 +22750,8 @@ def v5311_UI중복정리상태():
             {"함수": "보관된 현금성 렌더러", "연결": getattr(_v5311_original_cash_renderer, "__name__", str(_v5311_original_cash_renderer))},
             {"함수": "보관된 최근자산변화 표시", "연결": getattr(_v5311_original_recent_display, "__name__", str(_v5311_original_recent_display))},
             {"함수": "보관된 최근자산변화 생성", "연결": getattr(_v5311_original_recent_generator, "__name__", str(_v5311_original_recent_generator))},
+            {"함수": "v5312_공통CSS적용", "연결": getattr(globals().get("v5312_공통CSS적용"), "__name__", str(globals().get("v5312_공통CSS적용")))},
+            {"함수": "최근자산변화공통스타일_v5312", "연결": getattr(globals().get("최근자산변화공통스타일_v5312"), "__name__", str(globals().get("최근자산변화공통스타일_v5312")))},
         ]
         return pd.DataFrame(rows)
     except Exception as e:
@@ -22878,7 +23057,7 @@ st.markdown(
 #   ① 매수 전 예수금 보관/이체 ② 주식 매수 ③ 매수 후 예수금 잔액 순서로 해석합니다.
 # - Google Sheets 날짜 일련번호(46189 등)를 YYYY-MM-DD로 복구하고 원 단위 정수 저장을 유지합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 try:
     _v52218_prev_date_str = _v52217_date_str
@@ -23168,7 +23347,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금의 미래에셋 예수금 이체(49,244,653원)와
 #   이후 한화오션 매수(13,350,000원) 흐름이 누락된 경우 복원 표시합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 _V52219_KNOWN_TDF2035_TRANSFER_DATE = "2026-06-17"
 _V52219_KNOWN_TDF2035_TRANSFER_TO_MIRAE = 49_244_653
@@ -23456,7 +23635,7 @@ def IRP비주식자산저장(df):
 # - 2026-06-17 TDF2035 매도대금 49,244,653원 → 미래에셋 예수금 이체,
 #   이후 한화오션 매수 13,350,000원 → 예수금 잔액 흐름을 누락 없이 표시합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v52220_get_nonstock_df_safe(비주식자산df=None):
@@ -23735,7 +23914,7 @@ def 자산이동목록통합_v5225(거래df=None, 비주식자산df=None, 최근
 # - TDF2035 매도대금 → 미래에셋 예수금 이체 → 한화오션 매수 → 예수금 잔액 흐름을
 #   표시용 이동목록에 강제로 병합하고, 가능하면 내부 비주식자산변동이력에도 누적합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v52221_to_df_safe(obj):
@@ -24003,7 +24182,7 @@ def 최근자산변화표시_v5224(이동df, 최대표시=12):
 # - 이전 패치 블록의 APP_VERSION 재할당으로 화면 버전명이 과거 버전으로 돌아가는 문제를 방지합니다.
 # - 기능/데이터 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 
@@ -24014,7 +24193,7 @@ APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
 # - 현재 파일 안에 남아 있는 중복 함수/버전 표기/핵심 기준을 앱 내부에서 점검할 수 있는 보조 함수만 추가합니다.
 # - 거래이력 48건, TDF2035 실현손익 3,690,927원, 전체 이력 병합 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5242_runtime_integrity_check():
@@ -24083,7 +24262,7 @@ def v5242_운영점검표시():
 # - 현금성 대기자산은 현금잔액과 ETF 매도손실의 의미가 분리되도록 설명 문구를 보강합니다.
 # - 수익=강한 빨강, 손실=강한 파랑 색상 규칙을 화면 전체에 다시 적용합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 PROFIT_RED_V5262 = "#E60012"
 LOSS_BLUE_V5262 = "#0066FF"
@@ -24415,7 +24594,7 @@ except Exception:
 # - 숫자 표시에서 31.000000, 315000.000000 같은 표현을 제거합니다.
 # - 회계검증/통합자산/포트폴리오 계산 로직은 수정하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5284_text(value):
@@ -24882,7 +25061,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않음
 # ============================================================
 
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5285_money_fmt(x, dash_zero=False):
@@ -25195,7 +25374,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 거래원장/회계검증/통합자산 계산 로직은 수정하지 않습니다.
 # ============================================================
 
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5286_text(x):
@@ -25678,7 +25857,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 설명행은 별도 행유형으로 분리하여 실거래 건수와 혼합하지 않음
 # - 회계검증/통합자산/포트폴리오 계산 로직은 수정하지 않음
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5288_text(value):
@@ -26163,7 +26342,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 52건 = 실거래 50건 + 설명행 2건 구조를 오해하지 않도록 표시합니다.
 # - 거래형 실현손익 5,035,094원과 원장 기준 전체 실현손익 8,726,021원을 구분합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def 최근자산변화_진단패널_v52810(df):
@@ -26297,7 +26476,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 
 
 # v5.28.11 final version marker
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 # ============================================================
@@ -26309,7 +26488,7 @@ APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
 # - 실거래/설명행을 화면에서 명확히 구분합니다.
 # - 거래원장 행수와 최근자산변화 표시행수를 자동 검증합니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5293_text(value):
@@ -27828,7 +28007,7 @@ def 최근자산변화카드표시(거래df, 비주식자산df=None, 최대표�
 # - 현금성 자산 이동 해석 화면의 제목/본문/해석 박스 크기와 색상 위계를 재정리합니다.
 # - 계산·원금·실현손익·거래 생성 로직은 변경하지 않습니다.
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 def _v5298_css():
@@ -28744,8 +28923,12 @@ def 자산이동설명카드표시(이동후보, 제목="최근 현금성 자산
 # ============================================================
 # v5.30.4 final version guard
 # ============================================================
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
 
 
 # v5.31.1 final version guard
-APP_VERSION = "v5.31.1-ui-duplicate-consolidation"
+APP_VERSION = "v5.31.2-common-css-consolidation"
+
+
+# v5.31.2 final version guard
+APP_VERSION = "v5.31.2-common-css-consolidation"
