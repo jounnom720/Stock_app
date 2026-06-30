@@ -17,7 +17,6 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import logging
-import json
 
 # ============================================================
 # 기본 설정
@@ -421,10 +420,11 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 tdf_eval += eva
                 tdf_cost += pri
 
-    # 3) 현금성자산
+    # 3) 현금성자산 — 비주식자산 시트의 현금성자산 행 기준 (최신 데이터)
     cash_eval = 0
-    if not cash_df.empty:
-        cash_eval = int(cash_df["평가금액"].apply(lambda x: float(x or 0)).sum())
+    if not nonstock_df.empty:
+        cash_rows = nonstock_df[nonstock_df["자산군"] == "현금성자산"]
+        cash_eval = int(cash_rows["평가금액"].apply(lambda x: float(x or 0)).sum())
 
     # 비주식 전체 (TDF + 현금)
     nonstock_eval = tdf_eval + cash_eval
@@ -489,8 +489,12 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     irp_stock_cost = int(irp_stocks["매입금액"].sum()) if not irp_stocks.empty else 0
     irp_tdf_eval   = tdf_eval  # 비주식자산 IRP 귀속
     irp_cash_eval  = 0
-    if not cash_df.empty:
-        irp_cash_eval = int(cash_df[cash_df["계좌"].str.contains("신한", na=False)]["평가금액"].apply(lambda x: float(x or 0)).sum())
+    if not nonstock_df.empty:
+        irp_cash_rows = nonstock_df[
+            (nonstock_df["자산군"] == "현금성자산") &
+            (nonstock_df["계좌"].str.contains("신한", na=False))
+        ]
+        irp_cash_eval = int(irp_cash_rows["평가금액"].apply(lambda x: float(x or 0)).sum())
     irp_total = irp_stock_eval + irp_tdf_eval + irp_cash_eval
     irp_cost  = irp_stock_cost + tdf_cost + irp_cash_eval
     irp_pnl   = irp_total - irp_cost
@@ -500,8 +504,12 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     mira_eval = int(mira_stocks["평가금액"].sum()) if not mira_stocks.empty else 0
     mira_cost = int(mira_stocks["매입금액"].sum()) if not mira_stocks.empty else 0
     mira_cash = 0
-    if not cash_df.empty:
-        mira_cash = int(cash_df[cash_df["계좌"].str.contains("미래에셋", na=False)]["평가금액"].apply(lambda x: float(x or 0)).sum())
+    if not nonstock_df.empty:
+        mira_cash_rows = nonstock_df[
+            (nonstock_df["자산군"] == "현금성자산") &
+            (nonstock_df["계좌"].str.contains("미래에셋", na=False))
+        ]
+        mira_cash = int(mira_cash_rows["평가금액"].apply(lambda x: float(x or 0)).sum())
     mira_total = mira_eval + mira_cash
     mira_cost_total = mira_cost + mira_cash
     mira_pnl  = mira_total - mira_cost_total
