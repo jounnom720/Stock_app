@@ -51,6 +51,21 @@ ASSET_MASTER = {
 }
 
 # ============================================================
+# 시장 지표 마스터 (대시보드 상단 카드용, 성격별 4그룹)
+# ============================================================
+MARKET_INDICES = [
+    {"group": "국내 증시",      "name": "코스피",     "ticker": "^KS11"},
+    {"group": "국내 증시",      "name": "코스닥",     "ticker": "^KQ11"},
+    {"group": "환율·원자재",    "name": "USD/KRW",    "ticker": "KRW=X"},
+    {"group": "환율·원자재",    "name": "WTI 유가",   "ticker": "CL=F"},
+    {"group": "미국 증시",      "name": "S&P500",     "ticker": "^GSPC"},
+    {"group": "미국 증시",      "name": "나스닥",     "ticker": "^IXIC"},
+    {"group": "위험심리·금리",  "name": "VIX",        "ticker": "^VIX"},
+    {"group": "위험심리·금리",  "name": "달러인덱스", "ticker": "DX-Y.NYB"},
+    {"group": "위험심리·금리",  "name": "美 10년물",  "ticker": "^TNX"},
+]
+
+# ============================================================
 # Google Sheets 연결
 # ============================================================
 SHEET_NAMES = {
@@ -153,6 +168,45 @@ def get_current_price(code: str, prices: dict) -> float | None:
         return None
     ticker = meta["ticker"]
     return prices.get(ticker)
+
+@st.cache_data(ttl=300)
+def get_market_index_data() -> dict[str, dict]:
+    """시장 지표(코스피·환율·VIX 등)의 현재가와 전일 대비 등락률을 조회."""
+    result = {}
+    tickers = [m["ticker"] for m in MARKET_INDICES]
+    try:
+        ticker_str = " ".join(tickers)
+        data = yf.download(ticker_str, period="5d", progress=False, auto_adjust=True, threads=True)
+        if "Close" in data.columns:
+            close = data["Close"].dropna(how="all")
+            if len(close) >= 2:
+                latest_row = close.iloc[-1]
+                prev_row = close.iloc[-2]
+                for t in tickers:
+                    try:
+                        cur = float(latest_row[t]) if hasattr(latest_row, "__getitem__") else float(latest_row)
+                        prev = float(prev_row[t]) if hasattr(prev_row, "__getitem__") else float(prev_row)
+                        if pd.notna(cur) and pd.notna(prev) and prev != 0:
+                            result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100}
+                    except Exception:
+                        continue
+    except Exception as e:
+        logging.warning("시장지표 일괄 조회 실패: %s", e)
+
+    # 누락된 지표 개별 재시도
+    missing = [t for t in tickers if t not in result]
+    for t in missing:
+        try:
+            hist = yf.Ticker(t).history(period="5d")
+            closes = hist["Close"].dropna()
+            if len(closes) >= 2:
+                cur, prev = float(closes.iloc[-1]), float(closes.iloc[-2])
+                if prev != 0:
+                    result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100}
+        except Exception as e:
+            logging.warning("시장지표 개별 조회 실패 [%s]: %s", t, e)
+
+    return result
 
 # ============================================================
 # 보유 종목 계산
@@ -414,6 +468,31 @@ st.markdown("""
 .acct-pnl   { font-size: 0.85rem; font-weight: 600; }
 .acct-detail{ font-size: 0.76rem; color: var(--text-dim2); margin-top: 0.5rem; }
 
+/* ── 시장 지표 카드 (그룹별) ── */
+.mkt-group-label {
+    font-size: 0.72rem;
+    color: var(--text-dim2);
+    margin: 0.6rem 0 0.35rem 0;
+    font-weight: 600;
+}
+.mkt-row {
+    display: flex;
+    gap: 0.5rem;
+    overflow-x: auto;
+    padding-bottom: 0.3rem;
+}
+.mkt-card {
+    flex: 0 0 auto;
+    min-width: 108px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 0.55rem 0.7rem;
+}
+.mkt-name { font-size: 0.72rem; color: var(--text-dim); }
+.mkt-value { font-size: 0.98rem; font-weight: 700; margin-top: 0.1rem; }
+.mkt-change { font-size: 0.74rem; font-weight: 600; margin-top: 0.1rem; }
+
 .section-title {
     font-size: 1.05rem;
     font-weight: 700;
@@ -512,7 +591,50 @@ def main():
 # ============================================================
 # 탭1: 통합 대시보드
 # ============================================================
+def render_market_indices():
+    """대시보드 상단 시장 지표 카드 (성격별 4그룹: 국내증시 / 환율·원자재 / 미국증시 / 위험심리·금리)."""
+    st.markdown('<div class="section-title">시장 지표</div>', unsafe_allow_html=True)
+
+    data = get_market_index_data()
+
+    groups = []
+    seen = []
+    for m in MARKET_INDICES:
+        if m["group"] not in seen:
+            seen.append(m["group"])
+    for g in seen:
+        groups.append((g, [m for m in MARKET_INDICES if m["group"] == g]))
+
+    for group_name, items in groups:
+        st.markdown(f'<div class="mkt-group-label">{group_name}</div>', unsafe_allow_html=True)
+        cards = []
+        for item in items:
+            info = data.get(item["ticker"])
+            if info is None:
+                value_str = "-"
+                change_str = "조회 실패"
+                color = "#9e9e9e"
+            else:
+                cur = info["current"]
+                chg = info["change_pct"]
+                if item["ticker"] == "^TNX":
+                    value_str = f"{cur:,.2f}%"
+                else:
+                    value_str = f"{cur:,.2f}" if abs(cur) < 1000 else f"{cur:,.0f}"
+                change_str = f"{chg:+.2f}%"
+                color = color_pnl(chg)
+            cards.append(f"""
+            <div class="mkt-card">
+                <div class="mkt-name">{item['name']}</div>
+                <div class="mkt-value">{value_str}</div>
+                <div class="mkt-change" style="color:{color}">{change_str}</div>
+            </div>""")
+        st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
 def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df, prices):
+
+    render_market_indices()
 
     # 자산 합산
     # 1) 주식/ETF 평가금액
