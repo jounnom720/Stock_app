@@ -352,14 +352,14 @@ def fmt_pct(v) -> str:
     return f"{float(v):+.2f}%"
 
 def color_pnl(v) -> str:
-    """한국 주식앱 기준: 상승=빨강(#ef5350), 하락=파랑(#42a5f5)"""
+    """한국 주식앱 기준: 상승=빨강, 하락=파랑 (카드 배경과 어울리는 톤)"""
     if v is None:
-        return "#9e9e9e"
+        return "#8a8d96"
     try:
         f = float(v)
     except Exception:
-        return "#9e9e9e"
-    return "#ef5350" if f > 0 else "#42a5f5" if f < 0 else "#9e9e9e"
+        return "#8a8d96"
+    return "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "#8a8d96"
 
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
@@ -384,8 +384,8 @@ st.markdown("""
 
 /* 한국 주식앱 색상 기준: 상승=빨강, 하락=파랑 */
 :root {
-    --color-up:    #ef5350;
-    --color-down:  #42a5f5;
+    --color-up:    #e0635e;
+    --color-down:  #5b9bd8;
     --color-flat:  #9e9e9e;
     --card-bg:     rgba(255,255,255,0.035);
     --card-border: rgba(255,255,255,0.08);
@@ -509,7 +509,7 @@ st.markdown("""
     color: var(--text-dim);
 }
 
-/* ── 시장 지표 카드 (그룹별) ── */
+/* ── 시장 지표 카드 (그룹별, 화면 폭에 맞춰 그리드 확장) ── */
 .mkt-group-label {
     font-size: 0.72rem;
     color: var(--text-dim2);
@@ -517,22 +517,19 @@ st.markdown("""
     font-weight: 600;
 }
 .mkt-row {
-    display: flex;
-    gap: 0.5rem;
-    overflow-x: auto;
-    padding-bottom: 0.3rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 0.6rem;
 }
 .mkt-card {
-    flex: 0 0 auto;
-    min-width: 108px;
     background: var(--card-bg);
     border: 1px solid var(--card-border);
     border-radius: 10px;
-    padding: 0.55rem 0.7rem;
+    padding: 0.75rem 0.9rem;
 }
-.mkt-name { font-size: 0.72rem; color: var(--text-dim); }
-.mkt-value { font-size: 0.98rem; font-weight: 700; margin-top: 0.1rem; }
-.mkt-change { font-size: 0.74rem; font-weight: 600; margin-top: 0.1rem; }
+.mkt-name { font-size: 0.74rem; color: var(--text-dim); }
+.mkt-value { font-size: 1.15rem; font-weight: 700; margin-top: 0.15rem; }
+.mkt-change { font-size: 0.78rem; font-weight: 600; margin-top: 0.15rem; }
 
 .section-title {
     font-size: 1.05rem;
@@ -872,12 +869,12 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Bar(
                 x=mdf["년월_표시"], y=mdf["통합평가"],
-                name="평가금액", marker_color="#ef5350", opacity=0.85,
+                name="평가금액", marker_color="#e0635e", opacity=0.85,
             ))
             fig_trend.add_trace(go.Scatter(
                 x=mdf["년월_표시"], y=mdf["통합원금"],
                 name="원금", mode="lines+markers",
-                line=dict(color="#42a5f5", width=2),
+                line=dict(color="#5b9bd8", width=2),
                 marker=dict(size=7),
             ))
             fig_trend.update_layout(
@@ -958,7 +955,7 @@ def render_holdings(holdings_df, prices):
             f = float(v)
         except Exception:
             return ""
-        color = "#ef5350" if f > 0 else "#42a5f5" if f < 0 else "inherit"
+        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
         return f"color: {color}; font-weight: 600"
 
     show_cols = ["구분", "종목명", "계좌", "수량", "평단", "현재가", "투자원금", "평가금액", "손익", "수익률"]
@@ -990,7 +987,7 @@ def render_holdings(holdings_df, prices):
     if len(display_df) > 0 and "수익률" in display_df.columns:
         st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
         chart_df = display_df.sort_values("수익률")
-        colors = ["#ef5350" if v >= 0 else "#42a5f5" for v in chart_df["수익률"]]
+        colors = ["#e0635e" if v >= 0 else "#5b9bd8" for v in chart_df["수익률"]]
         fig = go.Figure(go.Bar(
             x=chart_df["수익률"],
             y=chart_df["종목명"],
@@ -1097,13 +1094,13 @@ def render_cashflow(trade_df, nonstock_df):
         st.markdown(f"""
         <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
             <div class="metric-label">수익 매도</div>
-            <div class="metric-value" style="color:#ef5350">{win_count}건</div>
+            <div class="metric-value" style="color:#e0635e">{win_count}건</div>
         </div>""", unsafe_allow_html=True)
     with r3:
         st.markdown(f"""
         <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
             <div class="metric-label">손실 매도</div>
-            <div class="metric-value" style="color:#42a5f5">{lose_count}건</div>
+            <div class="metric-value" style="color:#5b9bd8">{lose_count}건</div>
         </div>""", unsafe_allow_html=True)
 
     # 실현손익 표 — 손익 색상 적용 (Styler 사용)
@@ -1115,7 +1112,7 @@ def render_cashflow(trade_df, nonstock_df):
             f = float(v)
         except Exception:
             return ""
-        color = "#ef5350" if f > 0 else "#42a5f5" if f < 0 else "inherit"
+        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
         return f"color: {color}; font-weight: 600"
 
     styled = display_realized.style
