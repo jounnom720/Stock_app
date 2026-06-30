@@ -85,7 +85,8 @@ def get_spreadsheet():
     if client is None:
         return None
     try:
-        sheet_id = st.secrets["sheet_id"]
+        # Secrets 구조: [google_sheets] spreadsheet_id = "..."
+        sheet_id = st.secrets["google_sheets"]["spreadsheet_id"]
         return client.open_by_key(sheet_id)
     except Exception as e:
         logging.warning("스프레드시트 열기 실패: %s", e)
