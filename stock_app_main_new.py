@@ -212,14 +212,30 @@ def enrich_with_prices(holdings_df: pd.DataFrame, prices: dict) -> pd.DataFrame:
 
     df = holdings_df.copy()
     df["현재가"] = df["종목코드"].apply(lambda c: get_current_price(c, prices))
-    df["평가금액"] = df.apply(
-        lambda r: round(r["현재가"] * r["보유수량"]) if r["현재가"] else r["매입금액"], axis=1
-    )
-    df["평가손익"] = df["평가금액"] - df["매입금액"]
-    df["수익률"] = df.apply(
-        lambda r: round(r["평가손익"] / r["매입금액"] * 100, 2) if r["매입금액"] else 0, axis=1
-    )
-    df["시세반영"] = df["현재가"].notna()
+
+    def _is_valid_price(v):
+        if v is None:
+            return False
+        try:
+            return not np.isnan(float(v))
+        except Exception:
+            return False
+
+    def _calc_eval(r):
+        if _is_valid_price(r["현재가"]):
+            return round(float(r["현재가"]) * int(r["보유수량"]))
+        return int(r["매입금액"])
+
+    def _calc_pct(r):
+        cost = int(r["매입금액"]) if r["매입금액"] else 0
+        if cost == 0:
+            return 0.0
+        return round((int(r["평가금액"]) - cost) / cost * 100, 2)
+
+    df["평가금액"] = df.apply(_calc_eval, axis=1)
+    df["평가손익"] = df["평가금액"] - df["매입금액"].astype(int)
+    df["수익률"]  = df.apply(_calc_pct, axis=1)
+    df["시세반영"] = df["현재가"].apply(_is_valid_price)
     return df
 
 # ============================================================
