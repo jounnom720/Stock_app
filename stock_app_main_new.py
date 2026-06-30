@@ -276,14 +276,14 @@ def fmt_pct(v) -> str:
     return f"{float(v):+.2f}%"
 
 def color_pnl(v) -> str:
-    """한국 주식앱 기준: 상승=빨강(#e53935), 하락=파랑(#1976d2)"""
+    """한국 주식앱 기준: 상승=빨강(#ef5350), 하락=파랑(#42a5f5)"""
     if v is None:
         return "#9e9e9e"
     try:
         f = float(v)
     except Exception:
         return "#9e9e9e"
-    return "#e53935" if f > 0 else "#1976d2" if f < 0 else "#9e9e9e"
+    return "#ef5350" if f > 0 else "#42a5f5" if f < 0 else "#9e9e9e"
 
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
@@ -306,59 +306,122 @@ def build_number_column_config(df: pd.DataFrame, money_cols: list[str] = None, p
 st.markdown("""
 <style>
 
-/* 한국 주식앱 색상 기준: 상승=파랑, 하락=빨강 */
+/* 한국 주식앱 색상 기준: 상승=빨강, 하락=파랑 */
 :root {
-    --color-up:   #1976d2;
-    --color-down: #e53935;
-    --color-flat: #9e9e9e;
+    --color-up:    #ef5350;
+    --color-down:  #42a5f5;
+    --color-flat:  #9e9e9e;
+    --card-bg:     rgba(255,255,255,0.035);
+    --card-border: rgba(255,255,255,0.08);
+    --text-dim:    rgba(255,255,255,0.55);
+    --text-dim2:   rgba(255,255,255,0.4);
 }
-.metric-card {
-    background: var(--secondary-background-color);
-    border-radius: 12px;
-    padding: 1.1rem 1.3rem;
-    margin-bottom: 0.6rem;
-    border: 1px solid rgba(128,128,128,0.15);
+
+/* ── 히어로 카드: 총 원금→평가금액 한눈에 ── */
+.hero-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    padding: 1.4rem 1.6rem;
+    margin-bottom: 1rem;
 }
-.metric-label {
-    font-size: 0.78rem;
-    color: gray;
-    margin-bottom: 0.2rem;
-    font-weight: 500;
-}
-.metric-value {
-    font-size: 1.45rem;
-    font-weight: 700;
-    line-height: 1.2;
-}
-.metric-sub {
+.hero-label {
     font-size: 0.82rem;
-    margin-top: 0.2rem;
+    color: var(--text-dim);
+    margin-bottom: 0.3rem;
 }
-.account-card {
-    background: var(--secondary-background-color);
-    border-radius: 10px;
-    padding: 0.9rem 1.1rem;
-    border: 1px solid rgba(128,128,128,0.15);
+.hero-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+.hero-value {
+    font-size: 2.1rem;
+    font-weight: 700;
+    line-height: 1.1;
+}
+.hero-pnl {
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+.hero-bar {
+    margin-top: 0.9rem;
+    height: 9px;
+    border-radius: 5px;
+    background: rgba(255,255,255,0.06);
+    overflow: hidden;
+    display: flex;
+}
+.hero-legend {
+    display: flex;
+    gap: 1.1rem;
+    margin-top: 0.55rem;
+    font-size: 0.76rem;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+}
+.hero-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+}
+
+/* ── 계좌별 카드 (2개 큰 카드) ── */
+.acct-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 1.1rem 1.3rem;
     margin-bottom: 0.5rem;
 }
-.tag {
+.acct-badge {
     display: inline-block;
     border-radius: 6px;
-    padding: 0.15rem 0.55rem;
-    font-size: 0.72rem;
+    padding: 0.18rem 0.6rem;
+    font-size: 0.74rem;
     font-weight: 600;
-    margin-right: 0.3rem;
+    margin-bottom: 0.5rem;
 }
-.tag-irp  { background: rgba(33,150,243,0.15); color: #1976d2; }
-.tag-mira { background: rgba(76,175,80,0.15);  color: #388e3c; }
-.tag-etf  { background: rgba(156,39,176,0.12); color: #7b1fa2; }
-.tag-stock{ background: rgba(255,152,0,0.12);  color: #f57c00; }
+.badge-irp  { background: rgba(83,74,183,0.22);  color: #AFA9EC; }
+.badge-mira { background: rgba(29,158,117,0.22); color: #5DCAA5; }
+.acct-value { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
+.acct-cost  { font-size: 0.8rem; color: var(--text-dim); margin: 0.15rem 0; }
+.acct-pnl   { font-size: 0.85rem; font-weight: 600; }
+.acct-detail{ font-size: 0.76rem; color: var(--text-dim2); margin-top: 0.5rem; }
+
+/* ── 보유종목 1줄 리스트 ── */
+.holding-row {
+    display: flex;
+    align-items: center;
+    padding: 0.85rem 0.2rem;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.holding-row:last-child { border-bottom: none; }
+.holding-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.68rem; font-weight: 700;
+    margin-right: 0.85rem;
+    flex-shrink: 0;
+}
+.icon-etf   { background: rgba(29,158,117,0.22); color: #5DCAA5; }
+.icon-stock { background: rgba(83,74,183,0.22);  color: #AFA9EC; }
+.holding-name { font-weight: 600; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.holding-sub  { font-size: 0.78rem; color: var(--text-dim); margin-top: 0.1rem; }
+.holding-right { text-align: right; flex-shrink: 0; margin-left: 0.7rem; }
+.holding-amt  { font-weight: 700; font-size: 0.95rem; }
+.holding-pnl  { font-size: 0.78rem; font-weight: 600; margin-top: 0.1rem; }
+
 .section-title {
     font-size: 1.05rem;
     font-weight: 700;
-    margin: 1.2rem 0 0.6rem 0;
-    padding-bottom: 0.3rem;
-    border-bottom: 2px solid rgba(128,128,128,0.2);
+    margin: 1.4rem 0 0.7rem 0;
+    padding-bottom: 0.35rem;
+    border-bottom: 2px solid rgba(255,255,255,0.1);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -486,55 +549,32 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     tdf_pct = tdf_pnl / tdf_cost * 100 if tdf_cost else 0
     cash_pct_of_total = cash_eval / total_eval * 100 if total_eval else 0
 
-    # ── 상단 요약 카드 ──
+    # ── 히어로 카드: 원금 → 평가금액 → 손익 한눈에 + 비중 바 ──
     st.markdown('<div class="section-title">통합 자산 현황</div>', unsafe_allow_html=True)
 
-    c0, c1, c2, c3, c4 = st.columns(5)
-    with c0:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">총 투자원금</div>
-            <div class="metric-value">{fmt_money(total_cost)}</div>
-            <div class="metric-sub" style="color:gray">주식 {fmt_money(stock_cost)} · TDF {fmt_money(tdf_cost)} · 현금 {fmt_money(cash_eval)}</div>
-        </div>""", unsafe_allow_html=True)
+    stock_pct_w = stock_eval / total_eval * 100 if total_eval else 0
+    tdf_pct_w   = tdf_eval / total_eval * 100 if total_eval else 0
+    cash_pct_w  = cash_eval / total_eval * 100 if total_eval else 0
 
-    with c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">통합 평가금액</div>
-            <div class="metric-value">{fmt_money(total_eval)}</div>
-            <div class="metric-sub" style="color:{color_pnl(total_pnl)}">
-                {fmt_money(total_pnl)} ({fmt_pct(total_pct)})
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-    with c2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">주식/ETF 평가</div>
-            <div class="metric-value">{fmt_money(stock_eval)}</div>
-            <div class="metric-sub" style="color:{color_pnl(stock_pnl)}">
-                {fmt_money(stock_pnl)} ({fmt_pct(stock_pct)})
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-    with c3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">TDF / 펀드</div>
-            <div class="metric-value">{fmt_money(tdf_eval)}</div>
-            <div class="metric-sub" style="color:{color_pnl(tdf_pnl)}">
-                {fmt_money(tdf_pnl)} ({fmt_pct(tdf_pct)})
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-    with c4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">현금성 자산</div>
-            <div class="metric-value">{fmt_money(cash_eval)}</div>
-            <div class="metric-sub" style="color:gray">전체의 {cash_pct_of_total:.1f}% · 예수금·대기자금</div>
-        </div>""", unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="hero-card">
+        <div class="hero-label">총 투자원금 {fmt_money(total_cost)} → 통합 평가금액</div>
+        <div class="hero-row">
+            <div class="hero-value">{fmt_money(total_eval)}</div>
+            <div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money(total_pnl)} ({fmt_pct(total_pct)})</div>
+        </div>
+        <div class="hero-bar">
+            <div style="width:{stock_pct_w:.1f}%;background:#534AB7"></div>
+            <div style="width:{tdf_pct_w:.1f}%;background:#1D9E75"></div>
+            <div style="width:{cash_pct_w:.1f}%;background:#5F5E5A"></div>
+        </div>
+        <div class="hero-legend">
+            <span><span class="hero-dot" style="background:#534AB7"></span>주식/ETF {fmt_money(stock_eval)} ({stock_pct_w:.0f}%) · {fmt_pct(stock_pct)}</span>
+            <span><span class="hero-dot" style="background:#1D9E75"></span>TDF/펀드 {fmt_money(tdf_eval)} ({tdf_pct_w:.0f}%) · {fmt_pct(tdf_pct)}</span>
+            <span><span class="hero-dot" style="background:#5F5E5A"></span>현금성자산 {fmt_money(cash_eval)} ({cash_pct_w:.0f}%)</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── 계좌별 현황 ──
     st.markdown('<div class="section-title">계좌별 현황</div>', unsafe_allow_html=True)
@@ -576,35 +616,24 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     ca, cb = st.columns(2)
     with ca:
         st.markdown(f"""
-        <div class="account-card">
-            <div style="margin-bottom:0.5rem">
-                <span class="tag tag-irp">신한은행 IRP</span>
-                <span class="tag tag-etf">ETF</span>
-                <span class="tag tag-etf">TDF</span>
-            </div>
-            <div style="font-size:1.3rem;font-weight:700">{fmt_money(irp_total)}</div>
-            <div style="color:gray;font-size:0.78rem">원금 {fmt_money(irp_cost)}</div>
-            <div style="color:{color_pnl(irp_pnl)};font-size:0.88rem;margin-top:0.2rem">
-                {fmt_money(irp_pnl)} ({fmt_pct(irp_pct)})
-            </div>
-            <div style="margin-top:0.6rem;font-size:0.8rem;color:gray">
+        <div class="acct-card">
+            <span class="acct-badge badge-irp">신한은행 IRP · ETF·TDF</span>
+            <div class="acct-value">{fmt_money(irp_total)}</div>
+            <div class="acct-cost">원금 {fmt_money(irp_cost)}</div>
+            <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money(irp_pnl)} ({fmt_pct(irp_pct)})</div>
+            <div class="acct-detail">
                 ETF {fmt_money(irp_stock_eval)} · TDF {fmt_money(irp_tdf_eval)} · 현금 {fmt_money(irp_cash_eval)}
             </div>
         </div>""", unsafe_allow_html=True)
 
     with cb:
         st.markdown(f"""
-        <div class="account-card">
-            <div style="margin-bottom:0.5rem">
-                <span class="tag tag-mira">미래에셋증권</span>
-                <span class="tag tag-stock">주식</span>
-            </div>
-            <div style="font-size:1.3rem;font-weight:700">{fmt_money(mira_total)}</div>
-            <div style="color:gray;font-size:0.78rem">원금 {fmt_money(mira_cost_total)}</div>
-            <div style="color:{color_pnl(mira_pnl)};font-size:0.88rem;margin-top:0.2rem">
-                {fmt_money(mira_pnl)} ({fmt_pct(mira_pct)})
-            </div>
-            <div style="margin-top:0.6rem;font-size:0.8rem;color:gray">
+        <div class="acct-card">
+            <span class="acct-badge badge-mira">미래에셋증권 · 주식</span>
+            <div class="acct-value">{fmt_money(mira_total)}</div>
+            <div class="acct-cost">원금 {fmt_money(mira_cost_total)}</div>
+            <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money(mira_pnl)} ({fmt_pct(mira_pct)})</div>
+            <div class="acct-detail">
                 주식 {fmt_money(mira_eval)} · 예수금 {fmt_money(mira_cash)}
             </div>
         </div>""", unsafe_allow_html=True)
@@ -668,12 +697,12 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Bar(
                 x=mdf["년월_표시"], y=mdf["통합평가"],
-                name="평가금액", marker_color="#e53935", opacity=0.85,
+                name="평가금액", marker_color="#ef5350", opacity=0.85,
             ))
             fig_trend.add_trace(go.Scatter(
                 x=mdf["년월_표시"], y=mdf["통합원금"],
                 name="원금", mode="lines+markers",
-                line=dict(color="#1976d2", width=2),
+                line=dict(color="#42a5f5", width=2),
                 marker=dict(size=7),
             ))
             fig_trend.update_layout(
@@ -710,51 +739,54 @@ def render_holdings(holdings_df, prices):
     else:
         display_df = holdings_df
 
-    # 카드형 표시
+    # 투자금(평가금액) 큰 순서로 정렬
+    display_df = display_df.sort_values("평가금액", ascending=False)
+
+    # 1줄형 압축 리스트
+    rows_html = []
     for _, row in display_df.iterrows():
         code = row["종목코드"]
         name = row["종목명"]
         계좌 = row["계좌"]
         qty  = row["보유수량"]
         avg  = row["평균단가"]
-        cost = row["매입금액"]
         eval_amt = row["평가금액"]
         pnl  = row["평가손익"]
         pct  = row["수익률"]
         has_price = row.get("시세반영", False)
         current_price = row.get("현재가", None)
 
-        tag_class = "tag-irp" if "신한" in 계좌 else "tag-mira"
-        tag_label = "IRP" if "신한" in 계좌 else "미래에셋"
+        acct_short = "IRP" if "신한" in 계좌 else "미래에셋"
         asset_info = ASSET_MASTER.get(code, {})
         type_label = asset_info.get("type", "")
-        type_class = "tag-etf" if type_label == "ETF" else "tag-stock"
-        price_note = f"현재가 {fmt_money(current_price)}" if has_price else "⚠ 시세 미반영 (매입가로 표시 중)"
+        icon_class = "icon-etf" if type_label == "ETF" else "icon-stock"
+        cur_str = fmt_money(current_price) if has_price else "매입가 적용"
 
-        st.markdown(f"""
-        <div class="account-card">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start">
-                <div>
-                    <span class="tag {tag_class}">{tag_label}</span>
-                    <span class="tag {type_class}">{type_label}</span>
-                    <strong style="font-size:1rem">{name}</strong>
-                    <span style="color:gray;font-size:0.78rem;margin-left:0.4rem">{code}</span>
-                </div>
-                <div style="text-align:right">
-                    <div style="font-size:1.15rem;font-weight:700">{fmt_money(eval_amt)}</div>
-                    <div style="color:{color_pnl(pnl)};font-size:0.85rem">{fmt_money(pnl)} ({fmt_pct(pct)})</div>
-                </div>
+        rows_html.append(f"""
+        <div class="holding-row">
+            <div class="holding-icon {icon_class}">{type_label}</div>
+            <div style="flex:1;min-width:0">
+                <div class="holding-name">{name} <span style="color:var(--text-dim2);font-weight:400;font-size:0.74rem">{acct_short}</span></div>
+                <div class="holding-sub">{qty}주 · 평단 {fmt_money(avg)} · 현재 {cur_str}</div>
             </div>
-            <div style="margin-top:0.5rem;font-size:0.8rem;color:gray">
-                {qty}주 · 평균단가 {fmt_money(avg)} · 매입 {fmt_money(cost)} · {price_note}
+            <div class="holding-right">
+                <div class="holding-amt">{fmt_money(eval_amt)}</div>
+                <div class="holding-pnl" style="color:{color_pnl(pnl)}">{fmt_money(pnl)} ({fmt_pct(pct)})</div>
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>""")
+
+    list_html = f'<div class="acct-card">{"".join(rows_html)}</div>'
+    st.markdown(list_html, unsafe_allow_html=True)
+
+    미반영수 = (~display_df["시세반영"]).sum() if "시세반영" in display_df.columns else 0
+    if 미반영수 > 0:
+        st.caption(f"⚠ {미반영수}종목은 실시간 시세 조회에 실패해 매입가로 표시 중입니다. '시세 새로고침'을 눌러 다시 시도하세요.")
 
     # 종목별 수익률 바 차트
     if len(display_df) > 0 and "수익률" in display_df.columns:
         st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
         chart_df = display_df.sort_values("수익률")
-        colors = ["#e53935" if v >= 0 else "#1976d2" for v in chart_df["수익률"]]
+        colors = ["#ef5350" if v >= 0 else "#42a5f5" for v in chart_df["수익률"]]
         fig = go.Figure(go.Bar(
             x=chart_df["수익률"],
             y=chart_df["종목명"],
