@@ -138,26 +138,40 @@ def update_sheet_cell(sheet_name: str, row: int, col: int, value) -> bool:
 # ============================================================
 # 실시간 시세 조회
 # ============================================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=180)
 def get_prices(tickers: list[str]) -> dict[str, float]:
-    """yfinance로 현재가 일괄 조회. 실패 시 빈 dict 반환."""
+    """yfinance로 현재가 조회. 일괄 조회 실패 시 종목별 개별 재시도."""
     if not tickers:
         return {}
+    prices = {}
+    # 1차: 일괄 조회
     try:
         ticker_str = " ".join(tickers)
-        data = yf.download(ticker_str, period="2d", progress=False, auto_adjust=True)
-        prices = {}
+        data = yf.download(ticker_str, period="5d", progress=False, auto_adjust=True, threads=True)
         if "Close" in data.columns:
-            latest = data["Close"].dropna().iloc[-1]
-            if hasattr(latest, "items"):
-                for t, p in latest.items():
-                    prices[t] = float(p)
-            else:
-                prices[tickers[0]] = float(latest)
-        return prices
+            close = data["Close"].dropna(how="all")
+            if not close.empty:
+                latest = close.iloc[-1]
+                if hasattr(latest, "items"):
+                    for t, p in latest.items():
+                        if pd.notna(p):
+                            prices[t] = float(p)
+                elif len(tickers) == 1 and pd.notna(latest):
+                    prices[tickers[0]] = float(latest)
     except Exception as e:
-        logging.warning("시세 조회 실패: %s", e)
-        return {}
+        logging.warning("일괄 시세 조회 실패: %s", e)
+
+    # 2차: 누락된 종목 개별 재시도
+    missing = [t for t in tickers if t not in prices]
+    for t in missing:
+        try:
+            hist = yf.Ticker(t).history(period="5d")
+            if not hist.empty:
+                prices[t] = float(hist["Close"].dropna().iloc[-1])
+        except Exception as e:
+            logging.warning("개별 시세 조회 실패 [%s]: %s", t, e)
+
+    return prices
 
 def get_current_price(code: str, prices: dict) -> float | None:
     meta = ASSET_MASTER.get(code)
@@ -468,10 +482,22 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     stock_pnl  = stock_eval - stock_cost
     stock_pct  = stock_pnl / stock_cost * 100 if stock_cost else 0
 
+    tdf_pnl = tdf_eval - tdf_cost
+    tdf_pct = tdf_pnl / tdf_cost * 100 if tdf_cost else 0
+    cash_pct_of_total = cash_eval / total_eval * 100 if total_eval else 0
+
     # ── 상단 요약 카드 ──
     st.markdown('<div class="section-title">통합 자산 현황</div>', unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c0, c1, c2, c3, c4 = st.columns(5)
+    with c0:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">총 투자원금</div>
+            <div class="metric-value">{fmt_money(total_cost)}</div>
+            <div class="metric-sub" style="color:gray">주식 {fmt_money(stock_cost)} · TDF {fmt_money(tdf_cost)} · 현금 {fmt_money(cash_eval)}</div>
+        </div>""", unsafe_allow_html=True)
+
     with c1:
         st.markdown(f"""
         <div class="metric-card">
@@ -497,7 +523,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         <div class="metric-card">
             <div class="metric-label">TDF / 펀드</div>
             <div class="metric-value">{fmt_money(tdf_eval)}</div>
-            <div class="metric-sub" style="color:gray">원금 {fmt_money(tdf_cost)}</div>
+            <div class="metric-sub" style="color:{color_pnl(tdf_pnl)}">
+                {fmt_money(tdf_pnl)} ({fmt_pct(tdf_pct)})
+            </div>
         </div>""", unsafe_allow_html=True)
 
     with c4:
@@ -505,7 +533,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         <div class="metric-card">
             <div class="metric-label">현금성 자산</div>
             <div class="metric-value">{fmt_money(cash_eval)}</div>
-            <div class="metric-sub" style="color:gray">예수금 · 대기자금</div>
+            <div class="metric-sub" style="color:gray">전체의 {cash_pct_of_total:.1f}% · 예수금·대기자금</div>
         </div>""", unsafe_allow_html=True)
 
     # ── 계좌별 현황 ──
@@ -555,6 +583,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 <span class="tag tag-etf">TDF</span>
             </div>
             <div style="font-size:1.3rem;font-weight:700">{fmt_money(irp_total)}</div>
+            <div style="color:gray;font-size:0.78rem">원금 {fmt_money(irp_cost)}</div>
             <div style="color:{color_pnl(irp_pnl)};font-size:0.88rem;margin-top:0.2rem">
                 {fmt_money(irp_pnl)} ({fmt_pct(irp_pct)})
             </div>
@@ -571,6 +600,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 <span class="tag tag-stock">주식</span>
             </div>
             <div style="font-size:1.3rem;font-weight:700">{fmt_money(mira_total)}</div>
+            <div style="color:gray;font-size:0.78rem">원금 {fmt_money(mira_cost_total)}</div>
             <div style="color:{color_pnl(mira_pnl)};font-size:0.88rem;margin-top:0.2rem">
                 {fmt_money(mira_pnl)} ({fmt_pct(mira_pct)})
             </div>
@@ -617,6 +647,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     # ── 월별 자산 추이 ──
     if not monthly_df.empty:
         st.markdown('<div class="section-title">월별 자산 추이</div>', unsafe_allow_html=True)
+        st.caption("📌 빨간 막대 = 그 달 말 기준 통합 평가금액 · 파란 선·점 = 그 달 말 기준 통합 투자원금. 두 값의 차이가 누적 손익입니다.")
+        if len(monthly_df) < 2:
+            st.info("월별 데이터가 1개월치만 있어 추이(변화)를 비교할 수 없습니다. 매월 스냅샷이 쌓이면 추이선이 나타납니다.")
         try:
             mdf = monthly_df.copy()
             mdf["통합평가"] = pd.to_numeric(mdf["통합평가"], errors="coerce")
@@ -696,7 +729,7 @@ def render_holdings(holdings_df, prices):
         asset_info = ASSET_MASTER.get(code, {})
         type_label = asset_info.get("type", "")
         type_class = "tag-etf" if type_label == "ETF" else "tag-stock"
-        price_note = f"현재가 {fmt_money(current_price)}" if has_price else "⚠ 시세 미반영"
+        price_note = f"현재가 {fmt_money(current_price)}" if has_price else "⚠ 시세 미반영 (매입가로 표시 중)"
 
         st.markdown(f"""
         <div class="account-card">
@@ -818,16 +851,6 @@ def render_data_mgmt(nonstock_df, cash_df):
             )
     else:
         st.info("비주식자산 데이터 없음")
-
-    with st.expander("📁 현금성자산 시트 원본 (구버전 — 앱에서 미사용)", expanded=False):
-        st.caption("⚠ 이 시트는 구버전으로 현재 대시보드 계산에 사용되지 않습니다.")
-        if not cash_df.empty:
-            st.dataframe(
-                cash_df, use_container_width=True, hide_index=True,
-                column_config=build_number_column_config(cash_df, ["원금", "평가금액"]),
-            )
-        else:
-            st.info("데이터 없음")
 
     st.markdown('<div class="section-title">캐시 초기화</div>', unsafe_allow_html=True)
     if st.button("전체 캐시 초기화 (데이터 새로고침)", key="clear_cache_btn"):
