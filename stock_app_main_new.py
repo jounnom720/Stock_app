@@ -262,14 +262,14 @@ def fmt_pct(v) -> str:
     return f"{float(v):+.2f}%"
 
 def color_pnl(v) -> str:
-    """한국 주식앱 기준: 상승=파랑(#1976d2), 하락=빨강(#e53935)"""
+    """한국 주식앱 기준: 상승=빨강(#e53935), 하락=파랑(#1976d2)"""
     if v is None:
         return "#9e9e9e"
     try:
         f = float(v)
     except Exception:
         return "#9e9e9e"
-    return "#1976d2" if f > 0 else "#e53935" if f < 0 else "#9e9e9e"
+    return "#e53935" if f > 0 else "#1976d2" if f < 0 else "#9e9e9e"
 
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
@@ -611,20 +611,32 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             mdf["통합원금"] = pd.to_numeric(mdf["통합원금"], errors="coerce")
             mdf = mdf.dropna(subset=["통합평가"])
 
+            # 년월 컬럼을 문자열 "YYYY-MM" 형식으로 정규화
+            def normalize_yearmonth(v):
+                s = str(v).strip()
+                # datetime 형태로 들어온 경우 (예: "2026-06-01 00:00:00")
+                if len(s) > 7:
+                    return s[:7]
+                return s
+            mdf["년월_표시"] = mdf["년월"].apply(normalize_yearmonth)
+
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Bar(
-                x=mdf["년월"], y=mdf["통합평가"],
-                name="평가금액", marker_color="#1976d2", opacity=0.8,
+                x=mdf["년월_표시"], y=mdf["통합평가"],
+                name="평가금액", marker_color="#e53935", opacity=0.85,
             ))
             fig_trend.add_trace(go.Scatter(
-                x=mdf["년월"], y=mdf["통합원금"],
+                x=mdf["년월_표시"], y=mdf["통합원금"],
                 name="원금", mode="lines+markers",
-                line=dict(color="#e53935", width=2),
+                line=dict(color="#1976d2", width=2),
+                marker=dict(size=7),
             ))
             fig_trend.update_layout(
-                height=280, margin=dict(t=10, b=10, l=10, r=10),
-                legend=dict(orientation="h", y=1.05),
+                height=280,
+                margin=dict(t=10, b=30, l=10, r=10),
+                legend=dict(orientation="h", y=1.08),
                 yaxis=dict(tickformat=","),
+                xaxis=dict(type="category", tickangle=0),
             )
             st.plotly_chart(fig_trend, use_container_width=True)
         except Exception as e:
@@ -697,7 +709,7 @@ def render_holdings(holdings_df, prices):
     if len(display_df) > 0 and "수익률" in display_df.columns:
         st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
         chart_df = display_df.sort_values("수익률")
-        colors = ["#1976d2" if v >= 0 else "#e53935" for v in chart_df["수익률"]]
+        colors = ["#e53935" if v >= 0 else "#1976d2" for v in chart_df["수익률"]]
         fig = go.Figure(go.Bar(
             x=chart_df["수익률"],
             y=chart_df["종목명"],
