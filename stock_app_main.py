@@ -346,6 +346,12 @@ def fmt_money(v, suffix="원") -> str:
         return f"{v:,}{suffix}"
     return f"{v:,}{suffix}"
 
+def fmt_money_full(v, suffix="원") -> str:
+    """억 단위 축약 없이 전체 자릿수를 콤마와 함께 표시 (메인 금액 강조용)."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "-"
+    return f"{int(v):,}{suffix}"
+
 def fmt_pct(v) -> str:
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return "-"
@@ -509,27 +515,22 @@ st.markdown("""
     color: var(--text-dim);
 }
 
-/* ── 시장 지표 카드 (그룹별, 화면 폭에 맞춰 그리드 확장) ── */
-.mkt-group-label {
-    font-size: 0.72rem;
-    color: var(--text-dim2);
-    margin: 0.6rem 0 0.35rem 0;
-    font-weight: 600;
-}
+/* ── 시장 지표 카드 (9개 전체를 한 그리드에 가로로 펼침) ── */
 .mkt-row {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: 0.6rem;
 }
 .mkt-card {
     background: var(--card-bg);
     border: 1px solid var(--card-border);
     border-radius: 10px;
-    padding: 0.75rem 0.9rem;
+    padding: 0.7rem 0.85rem;
 }
-.mkt-name { font-size: 0.74rem; color: var(--text-dim); }
-.mkt-value { font-size: 1.15rem; font-weight: 700; margin-top: 0.15rem; }
-.mkt-change { font-size: 0.78rem; font-weight: 600; margin-top: 0.15rem; }
+.mkt-group-tag { font-size: 0.62rem; color: var(--text-dim2); margin-bottom: 0.15rem; }
+.mkt-name { font-size: 0.76rem; color: var(--text-dim); font-weight: 600; }
+.mkt-value { font-size: 1.05rem; font-weight: 700; margin-top: 0.15rem; }
+.mkt-change { font-size: 0.76rem; font-weight: 600; margin-top: 0.15rem; }
 
 .section-title {
     font-size: 1.05rem;
@@ -630,44 +631,35 @@ def main():
 # 탭1: 통합 대시보드
 # ============================================================
 def render_market_indices():
-    """대시보드 상단 시장 지표 카드 (성격별 4그룹: 국내증시 / 환율·원자재 / 미국증시 / 위험심리·금리)."""
+    """대시보드 상단 시장 지표 카드 — 9개 지표를 한 그리드에 가로로 펼쳐 배치."""
     st.markdown('<div class="section-title">시장 지표</div>', unsafe_allow_html=True)
 
     data = get_market_index_data()
 
-    groups = []
-    seen = []
-    for m in MARKET_INDICES:
-        if m["group"] not in seen:
-            seen.append(m["group"])
-    for g in seen:
-        groups.append((g, [m for m in MARKET_INDICES if m["group"] == g]))
-
-    for group_name, items in groups:
-        st.markdown(f'<div class="mkt-group-label">{group_name}</div>', unsafe_allow_html=True)
-        cards = []
-        for item in items:
-            info = data.get(item["ticker"])
-            if info is None:
-                value_str = "-"
-                change_str = "조회 실패"
-                color = "#9e9e9e"
+    cards = []
+    for item in MARKET_INDICES:
+        info = data.get(item["ticker"])
+        if info is None:
+            value_str = "-"
+            change_str = "조회 실패"
+            color = "#8a8d96"
+        else:
+            cur = info["current"]
+            chg = info["change_pct"]
+            if item["ticker"] == "^TNX":
+                value_str = f"{cur:,.2f}%"
             else:
-                cur = info["current"]
-                chg = info["change_pct"]
-                if item["ticker"] == "^TNX":
-                    value_str = f"{cur:,.2f}%"
-                else:
-                    value_str = f"{cur:,.2f}" if abs(cur) < 1000 else f"{cur:,.0f}"
-                change_str = f"{chg:+.2f}%"
-                color = color_pnl(chg)
-            cards.append(f"""
-            <div class="mkt-card">
-                <div class="mkt-name">{item['name']}</div>
-                <div class="mkt-value">{value_str}</div>
-                <div class="mkt-change" style="color:{color}">{change_str}</div>
-            </div>""")
-        st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
+                value_str = f"{cur:,.2f}" if abs(cur) < 1000 else f"{cur:,.0f}"
+            change_str = f"{chg:+.2f}%"
+            color = color_pnl(chg)
+        cards.append(f"""
+        <div class="mkt-card">
+            <div class="mkt-group-tag">{item['group']}</div>
+            <div class="mkt-name">{item['name']}</div>
+            <div class="mkt-value">{value_str}</div>
+            <div class="mkt-change" style="color:{color}">{change_str}</div>
+        </div>""")
+    st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
 def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df, prices):
@@ -724,7 +716,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     <div class="hero-card">
         <div class="hero-label">총 투자원금 {fmt_money(total_cost)} → 통합 평가금액</div>
         <div class="hero-row">
-            <div class="hero-value">{fmt_money(total_eval)}</div>
+            <div class="hero-value">{fmt_money_full(total_eval)}</div>
             <div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money(total_pnl)} ({fmt_pct(total_pct)})</div>
         </div>
         <div class="hero-bar">
@@ -783,7 +775,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         <div class="acct-card">
             <span class="acct-badge badge-irp">신한은행 IRP · ETF·TDF</span>
             <div class="acct-main-row">
-                <div class="acct-value">{fmt_money(irp_total)}</div>
+                <div class="acct-value">{fmt_money_full(irp_total)}</div>
                 <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money(irp_pnl)} ({fmt_pct(irp_pct)})</div>
             </div>
             <div class="acct-grid">
@@ -799,7 +791,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         <div class="acct-card">
             <span class="acct-badge badge-mira">미래에셋증권 · 주식</span>
             <div class="acct-main-row">
-                <div class="acct-value">{fmt_money(mira_total)}</div>
+                <div class="acct-value">{fmt_money_full(mira_total)}</div>
                 <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money(mira_pnl)} ({fmt_pct(mira_pct)})</div>
             </div>
             <div class="acct-grid">
