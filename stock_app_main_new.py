@@ -264,12 +264,12 @@ def fmt_pct(v) -> str:
 def color_pnl(v) -> str:
     """한국 주식앱 기준: 상승=파랑(#1976d2), 하락=빨강(#e53935)"""
     if v is None:
-        return "var(--color-flat)"
+        return "#9e9e9e"
     try:
         f = float(v)
     except Exception:
-        return "var(--color-flat)"
-    return "var(--color-up)" if f > 0 else "var(--color-down)" if f < 0 else "var(--color-flat)"
+        return "#9e9e9e"
+    return "#1976d2" if f > 0 else "#e53935" if f < 0 else "#9e9e9e"
 
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
