@@ -12,7 +12,6 @@ import numpy as np
 import gspread
 import yfinance as yf
 import plotly.graph_objects as go
-import plotly.express as px
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -109,31 +108,6 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
     except Exception as e:
         logging.warning("시트 로드 실패 [%s]: %s", sheet_name, e)
         return pd.DataFrame()
-
-def save_sheet_rows(sheet_name: str, rows: list[dict]) -> bool:
-    try:
-        spreadsheet = get_spreadsheet()
-        if spreadsheet is None:
-            return False
-        ws = spreadsheet.worksheet(sheet_name)
-        for row in rows:
-            ws.append_row(list(row.values()), value_input_option="USER_ENTERED")
-        return True
-    except Exception as e:
-        logging.warning("시트 저장 실패 [%s]: %s", sheet_name, e)
-        return False
-
-def update_sheet_cell(sheet_name: str, row: int, col: int, value) -> bool:
-    try:
-        spreadsheet = get_spreadsheet()
-        if spreadsheet is None:
-            return False
-        ws = spreadsheet.worksheet(sheet_name)
-        ws.update_cell(row, col, value)
-        return True
-    except Exception as e:
-        logging.warning("셀 업데이트 실패: %s", e)
-        return False
 
 # ============================================================
 # 실시간 시세 조회
@@ -439,30 +413,6 @@ st.markdown("""
 .acct-cost  { font-size: 0.8rem; color: var(--text-dim); margin: 0.15rem 0; }
 .acct-pnl   { font-size: 0.85rem; font-weight: 600; }
 .acct-detail{ font-size: 0.76rem; color: var(--text-dim2); margin-top: 0.5rem; }
-
-/* ── 보유종목 1줄 리스트 ── */
-.holding-row {
-    display: flex;
-    align-items: center;
-    padding: 0.85rem 0.2rem;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
-}
-.holding-row:last-child { border-bottom: none; }
-.holding-icon {
-    width: 36px; height: 36px;
-    border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 0.68rem; font-weight: 700;
-    margin-right: 0.85rem;
-    flex-shrink: 0;
-}
-.icon-etf   { background: rgba(29,158,117,0.22); color: #5DCAA5; }
-.icon-stock { background: rgba(83,74,183,0.22);  color: #AFA9EC; }
-.holding-name { font-weight: 600; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.holding-sub  { font-size: 0.78rem; color: var(--text-dim); margin-top: 0.1rem; }
-.holding-right { text-align: right; flex-shrink: 0; margin-left: 0.7rem; }
-.holding-amt  { font-weight: 700; font-size: 0.95rem; }
-.holding-pnl  { font-size: 0.78rem; font-weight: 600; margin-top: 0.1rem; }
 
 .section-title {
     font-size: 1.05rem;
@@ -804,42 +754,62 @@ def render_holdings(holdings_df, prices):
         ["_type_rank", "매입금액"], ascending=[True, False]
     )
 
-    # 1줄형 압축 리스트
-    rows_html = []
+    # 표시용 데이터프레임 구성
+    table_rows = []
     for _, row in display_df.iterrows():
         code = row["종목코드"]
-        name = row["종목명"]
         계좌 = row["계좌"]
-        qty  = row["보유수량"]
-        avg  = row["평균단가"]
-        cost = row["매입금액"]
-        eval_amt = row["평가금액"]
-        pnl  = row["평가손익"]
-        pct  = row["수익률"]
         has_price = row.get("시세반영", False)
         current_price = row.get("현재가", None)
-
         acct_short = "IRP" if "신한" in 계좌 else "미래에셋"
         asset_info = ASSET_MASTER.get(code, {})
         type_label = asset_info.get("type", "")
-        icon_class = "icon-etf" if type_label == "ETF" else "icon-stock"
-        cur_str = fmt_money(current_price) if has_price else "매입가 적용"
+        cur_val = current_price if has_price else row["평균단가"]
 
-        rows_html.append(f"""
-        <div class="holding-row">
-            <div class="holding-icon {icon_class}">{type_label}</div>
-            <div style="flex:1;min-width:0">
-                <div class="holding-name">{name} <span style="color:var(--text-dim2);font-weight:400;font-size:0.74rem">{acct_short}</span></div>
-                <div class="holding-sub">{qty}주 · 평단 {fmt_money(avg)} · 현재 {cur_str} · 투자원금 {fmt_money(cost)}</div>
-            </div>
-            <div class="holding-right">
-                <div class="holding-amt">{fmt_money(eval_amt)}</div>
-                <div class="holding-pnl" style="color:{color_pnl(pnl)}">{fmt_money(pnl)} ({fmt_pct(pct)})</div>
-            </div>
-        </div>""")
+        table_rows.append({
+            "구분": type_label,
+            "종목명": row["종목명"],
+            "계좌": acct_short,
+            "수량": int(row["보유수량"]),
+            "평단": int(row["평균단가"]),
+            "현재가": int(cur_val) if pd.notna(cur_val) else None,
+            "투자원금": int(row["매입금액"]),
+            "평가금액": int(row["평가금액"]),
+            "손익": int(row["평가손익"]),
+            "수익률": float(row["수익률"]),
+            "시세반영": bool(has_price),
+        })
 
-    list_html = f'<div class="acct-card">{"".join(rows_html)}</div>'
-    st.markdown(list_html, unsafe_allow_html=True)
+    table_df = pd.DataFrame(table_rows)
+
+    def _style_holding_pnl(v):
+        try:
+            f = float(v)
+        except Exception:
+            return ""
+        color = "#ef5350" if f > 0 else "#42a5f5" if f < 0 else "inherit"
+        return f"color: {color}; font-weight: 600"
+
+    show_cols = ["구분", "종목명", "계좌", "수량", "평단", "현재가", "투자원금", "평가금액", "손익", "수익률"]
+    styled_table = table_df[show_cols].style.map(_style_holding_pnl, subset=["손익", "수익률"])
+
+    col_config = {
+        "수량": st.column_config.NumberColumn("수량", format="localized"),
+        "평단": st.column_config.NumberColumn("평단", format="localized"),
+        "현재가": st.column_config.NumberColumn("현재가", format="localized"),
+        "투자원금": st.column_config.NumberColumn("투자원금", format="localized"),
+        "평가금액": st.column_config.NumberColumn("평가금액", format="localized"),
+        "손익": st.column_config.NumberColumn("손익", format="localized"),
+        "수익률": st.column_config.NumberColumn("수익률", format="%.2f%%"),
+    }
+
+    st.dataframe(
+        styled_table,
+        use_container_width=True,
+        hide_index=True,
+        column_config=col_config,
+        height=min(440, 40 + 35 * len(table_df)),
+    )
 
     미반영수 = (~display_df["시세반영"]).sum() if "시세반영" in display_df.columns else 0
     if 미반영수 > 0:
