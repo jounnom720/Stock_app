@@ -464,9 +464,50 @@ st.markdown("""
 .badge-irp  { background: rgba(83,74,183,0.22);  color: #AFA9EC; }
 .badge-mira { background: rgba(29,158,117,0.22); color: #5DCAA5; }
 .acct-value { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
-.acct-cost  { font-size: 0.8rem; color: var(--text-dim); margin: 0.15rem 0; }
 .acct-pnl   { font-size: 0.85rem; font-weight: 600; }
-.acct-detail{ font-size: 0.76rem; color: var(--text-dim2); margin-top: 0.5rem; }
+
+/* ── 계좌 카드: 메인 수치 행 ── */
+.acct-main-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    margin-top: 0.3rem;
+    flex-wrap: wrap;
+}
+
+/* ── 계좌 카드: 2열 정보 그리드 (빈 공간 방지) ── */
+.acct-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem 1rem;
+    margin-top: 0.75rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--card-border);
+}
+.acct-grid-item { display: flex; justify-content: space-between; font-size: 0.8rem; }
+.acct-grid-label { color: var(--text-dim); }
+.acct-grid-val { font-weight: 600; }
+
+/* ── 매도 이벤트 카드 (자금흐름 타임라인) ── */
+.sell-event-card { max-width: 560px; }
+.sell-event-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.sell-event-name { font-weight: 600; font-size: 0.92rem; }
+.sell-event-date { color: var(--text-dim); font-size: 0.78rem; }
+.sell-event-spacer { flex: 1; min-width: 0.5rem; }
+.sell-event-amount { font-weight: 700; font-size: 0.9rem; white-space: nowrap; }
+.sell-event-pnl { font-size: 0.78rem; font-weight: 600; white-space: nowrap; }
+.sell-follow-item, .sell-follow-empty {
+    margin-top: 0.4rem;
+    padding-left: 0.8rem;
+    border-left: 2px solid var(--card-border);
+    font-size: 0.8rem;
+    color: var(--text-dim);
+}
 
 /* ── 시장 지표 카드 (그룹별) ── */
 .mkt-group-label {
@@ -744,11 +785,15 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         st.markdown(f"""
         <div class="acct-card">
             <span class="acct-badge badge-irp">신한은행 IRP · ETF·TDF</span>
-            <div class="acct-value">{fmt_money(irp_total)}</div>
-            <div class="acct-cost">원금 {fmt_money(irp_cost)}</div>
-            <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money(irp_pnl)} ({fmt_pct(irp_pct)})</div>
-            <div class="acct-detail">
-                ETF {fmt_money(irp_stock_eval)} · TDF {fmt_money(irp_tdf_eval)} · 현금 {fmt_money(irp_cash_eval)}
+            <div class="acct-main-row">
+                <div class="acct-value">{fmt_money(irp_total)}</div>
+                <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money(irp_pnl)} ({fmt_pct(irp_pct)})</div>
+            </div>
+            <div class="acct-grid">
+                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money(irp_cost)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">ETF</span><span class="acct-grid-val">{fmt_money(irp_stock_eval)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">TDF</span><span class="acct-grid-val">{fmt_money(irp_tdf_eval)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">현금</span><span class="acct-grid-val">{fmt_money(irp_cash_eval)}</span></div>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -756,11 +801,15 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         st.markdown(f"""
         <div class="acct-card">
             <span class="acct-badge badge-mira">미래에셋증권 · 주식</span>
-            <div class="acct-value">{fmt_money(mira_total)}</div>
-            <div class="acct-cost">원금 {fmt_money(mira_cost_total)}</div>
-            <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money(mira_pnl)} ({fmt_pct(mira_pct)})</div>
-            <div class="acct-detail">
-                주식 {fmt_money(mira_eval)} · 예수금 {fmt_money(mira_cash)}
+            <div class="acct-main-row">
+                <div class="acct-value">{fmt_money(mira_total)}</div>
+                <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money(mira_pnl)} ({fmt_pct(mira_pct)})</div>
+            </div>
+            <div class="acct-grid">
+                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money(mira_cost_total)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">주식</span><span class="acct-grid-val">{fmt_money(mira_eval)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">예수금</span><span class="acct-grid-val">{fmt_money(mira_cash)}</span></div>
+                <div class="acct-grid-item"></div>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -1105,32 +1154,30 @@ def render_cashflow(trade_df, nonstock_df):
             (trade_sorted["거래구분"] == "매수")
         ].head(5)
 
-        st.markdown(f"""
-        <div class="acct-card">
-            <div style="display:flex;justify-content:space-between;align-items:baseline">
-                <div>
-                    <span class="acct-badge {'badge-irp' if '신한' in sell_account else 'badge-mira'}">{sell_account}</span>
-                    <strong style="margin-left:0.4rem">{sell_row['종목명']} 매도</strong>
-                    <span style="color:var(--text-dim);font-size:0.8rem;margin-left:0.4rem">{sell_date.strftime('%Y-%m-%d')}</span>
-                </div>
-                <div style="text-align:right">
-                    <div style="font-weight:700">{fmt_money(sell_amount)} 회수</div>
-                    <div style="font-size:0.8rem;color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</div>
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
-
         if 후속매수.empty:
-            st.markdown('<div style="margin-top:0.5rem;font-size:0.82rem;color:var(--text-dim)">↳ 이후 같은 계좌에서 매수 내역 없음 (예수금으로 남아있을 가능성)</div>', unsafe_allow_html=True)
+            buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 매수 내역 없음 (예수금으로 남아있을 가능성)</div>'
         else:
+            items = []
             for _, buy in 후속매수.iterrows():
                 buy_amt = int(buy["거래수량"]) * float(buy["거래단가"])
-                st.markdown(f"""
-                <div style="margin-top:0.4rem;padding-left:0.8rem;border-left:2px solid var(--card-border);font-size:0.82rem">
-                    ↳ {buy['거래일자_dt'].strftime('%Y-%m-%d')} · {buy['종목명']} 매수 {int(buy['거래수량'])}주 · {fmt_money(buy_amt)}
-                </div>""", unsafe_allow_html=True)
+                items.append(
+                    f'<div class="sell-follow-item">↳ {buy["거래일자_dt"].strftime("%Y-%m-%d")} · '
+                    f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
+                )
+            buy_html = "".join(items)
 
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="acct-card sell-event-card">
+            <div class="sell-event-header">
+                <span class="acct-badge {'badge-irp' if '신한' in sell_account else 'badge-mira'}">{sell_account}</span>
+                <span class="sell-event-name">{sell_row['종목명']} 매도</span>
+                <span class="sell-event-date">{sell_date.strftime('%Y-%m-%d')}</span>
+                <span class="sell-event-spacer"></span>
+                <span class="sell-event-amount">{fmt_money(sell_amount)} 회수</span>
+                <span class="sell-event-pnl" style="color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</span>
+            </div>
+            {buy_html}
+        </div>""", unsafe_allow_html=True)
 
     if sell_events.empty:
         st.info("매도 내역이 없습니다.")
