@@ -404,11 +404,11 @@ st.markdown("""
     background: var(--card-bg);
     border: 1px solid var(--card-border);
     border-radius: 16px;
-    padding: 1.4rem 1.6rem;
+    padding: 1.7rem 1.9rem;
     margin-bottom: 1rem;
 }
 .hero-label {
-    font-size: 0.82rem;
+    font-size: 0.95rem;
     color: var(--text-dim);
     margin-bottom: 0.3rem;
 }
@@ -419,12 +419,12 @@ st.markdown("""
     flex-wrap: wrap;
 }
 .hero-value {
-    font-size: 2.1rem;
+    font-size: 2.5rem;
     font-weight: 700;
     line-height: 1.1;
 }
 .hero-pnl {
-    font-size: 1.05rem;
+    font-size: 1.3rem;
     font-weight: 600;
 }
 .hero-bar {
@@ -438,8 +438,8 @@ st.markdown("""
 .hero-legend {
     display: flex;
     gap: 1.1rem;
-    margin-top: 0.55rem;
-    font-size: 0.76rem;
+    margin-top: 0.6rem;
+    font-size: 0.92rem;
     color: var(--text-dim);
     flex-wrap: wrap;
 }
@@ -456,21 +456,21 @@ st.markdown("""
     background: var(--card-bg);
     border: 1px solid var(--card-border);
     border-radius: 14px;
-    padding: 1.1rem 1.3rem;
+    padding: 1.4rem 1.6rem;
     margin-bottom: 0.5rem;
 }
 .acct-badge {
     display: inline-block;
     border-radius: 6px;
-    padding: 0.18rem 0.6rem;
-    font-size: 0.74rem;
+    padding: 0.22rem 0.7rem;
+    font-size: 0.88rem;
     font-weight: 600;
     margin-bottom: 0.5rem;
 }
 .badge-irp  { background: rgba(83,74,183,0.22);  color: #AFA9EC; }
 .badge-mira { background: rgba(29,158,117,0.22); color: #5DCAA5; }
-.acct-value { font-size: 1.5rem; font-weight: 700; line-height: 1.2; }
-.acct-pnl   { font-size: 0.85rem; font-weight: 600; }
+.acct-value { font-size: 1.9rem; font-weight: 700; line-height: 1.2; }
+.acct-pnl   { font-size: 1.1rem; font-weight: 600; }
 
 /* ── 계좌 카드: 메인 수치 행 ── */
 .acct-main-row {
@@ -490,7 +490,7 @@ st.markdown("""
     padding-top: 0.6rem;
     border-top: 1px solid var(--card-border);
 }
-.acct-grid-item { display: flex; justify-content: space-between; font-size: 0.8rem; }
+.acct-grid-item { display: flex; justify-content: space-between; font-size: 0.95rem; }
 .acct-grid-label { color: var(--text-dim); }
 .acct-grid-val { font-weight: 600; }
 
@@ -525,15 +525,15 @@ st.markdown("""
     background: var(--card-bg);
     border: 1px solid var(--card-border);
     border-radius: 10px;
-    padding: 0.7rem 0.85rem;
+    padding: 0.9rem 1.05rem;
 }
-.mkt-group-tag { font-size: 0.62rem; color: var(--text-dim2); margin-bottom: 0.15rem; }
-.mkt-name { font-size: 0.76rem; color: var(--text-dim); font-weight: 600; }
-.mkt-value { font-size: 1.05rem; font-weight: 700; margin-top: 0.15rem; }
-.mkt-change { font-size: 0.76rem; font-weight: 600; margin-top: 0.15rem; }
+.mkt-group-tag { font-size: 0.74rem; color: var(--text-dim2); margin-bottom: 0.2rem; }
+.mkt-name { font-size: 0.92rem; color: var(--text-dim); font-weight: 600; }
+.mkt-value { font-size: 1.35rem; font-weight: 700; margin-top: 0.2rem; }
+.mkt-change { font-size: 0.92rem; font-weight: 600; margin-top: 0.2rem; }
 
 .section-title {
-    font-size: 1.05rem;
+    font-size: 1.25rem;
     font-weight: 700;
     margin: 1.4rem 0 0.7rem 0;
     padding-bottom: 0.35rem;
