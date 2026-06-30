@@ -1,9 +1,0 @@
-.streamlit/
-backup/
-*.json
-*.xlsx
-*.xls
-*.csv
-__pycache__/
-*.pyc
-.env
