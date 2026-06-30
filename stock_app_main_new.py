@@ -99,7 +99,13 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
             return pd.DataFrame()
         ws = spreadsheet.worksheet(sheet_name)
         records = ws.get_all_records()
-        return pd.DataFrame(records)
+        df = pd.DataFrame(records)
+        # gspread가 숫자 셀을 int로 반환 → 종목코드 앞자리 0 유실 방지
+        if "종목코드" in df.columns:
+            df["종목코드"] = df["종목코드"].apply(
+                lambda x: str(int(x)).zfill(6) if str(x).strip().isdigit() else str(x).strip()
+            )
+        return df
     except Exception as e:
         logging.warning("시트 로드 실패 [%s]: %s", sheet_name, e)
         return pd.DataFrame()
@@ -256,9 +262,14 @@ def fmt_pct(v) -> str:
     return f"{float(v):+.2f}%"
 
 def color_pnl(v) -> str:
+    """한국 주식앱 기준: 상승=파랑(#1976d2), 하락=빨강(#e53935)"""
     if v is None:
-        return "gray"
-    return "#e53935" if float(v) > 0 else "#1e88e5" if float(v) < 0 else "gray"
+        return "var(--color-flat)"
+    try:
+        f = float(v)
+    except Exception:
+        return "var(--color-flat)"
+    return "var(--color-up)" if f > 0 else "var(--color-down)" if f < 0 else "var(--color-flat)"
 
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
@@ -268,6 +279,13 @@ def now_kst() -> str:
 # ============================================================
 st.markdown("""
 <style>
+
+/* 한국 주식앱 색상 기준: 상승=파랑, 하락=빨강 */
+:root {
+    --color-up:   #1976d2;
+    --color-down: #e53935;
+    --color-flat: #9e9e9e;
+}
 .metric-card {
     background: var(--secondary-background-color);
     border-radius: 12px;
@@ -679,7 +697,7 @@ def render_holdings(holdings_df, prices):
     if len(display_df) > 0 and "수익률" in display_df.columns:
         st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
         chart_df = display_df.sort_values("수익률")
-        colors = ["#e53935" if v >= 0 else "#1e88e5" for v in chart_df["수익률"]]
+        colors = ["#1976d2" if v >= 0 else "#e53935" for v in chart_df["수익률"]]
         fig = go.Figure(go.Bar(
             x=chart_df["수익률"],
             y=chart_df["종목명"],
@@ -748,18 +766,27 @@ def render_trades(trade_df):
 # 탭4: 데이터 관리
 # ============================================================
 def render_data_mgmt(nonstock_df, cash_df):
-    st.markdown('<div class="section-title">비주식자산 현황</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">비주식자산 현황 (TDF · 현금성자산)</div>', unsafe_allow_html=True)
+    st.caption("💡 대시보드의 현금성자산 금액은 이 시트 기준입니다. 잔액 변경 시 비주식자산 시트를 업데이트하세요.")
 
     if not nonstock_df.empty:
-        st.dataframe(nonstock_df, use_container_width=True, hide_index=True)
+        tdf_rows  = nonstock_df[nonstock_df["자산군"] == "TDF"]
+        cash_rows = nonstock_df[nonstock_df["자산군"] == "현금성자산"]
+        if not tdf_rows.empty:
+            st.markdown("**TDF / 펀드**")
+            st.dataframe(tdf_rows, use_container_width=True, hide_index=True)
+        if not cash_rows.empty:
+            st.markdown("**현금성자산 (예수금 · 대기자금)**")
+            st.dataframe(cash_rows, use_container_width=True, hide_index=True)
     else:
         st.info("비주식자산 데이터 없음")
 
-    st.markdown('<div class="section-title">현금성자산 현황</div>', unsafe_allow_html=True)
-    if not cash_df.empty:
-        st.dataframe(cash_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("현금성자산 데이터 없음")
+    with st.expander("📁 현금성자산 시트 원본 (구버전 — 앱에서 미사용)", expanded=False):
+        st.caption("⚠ 이 시트는 구버전으로 현재 대시보드 계산에 사용되지 않습니다.")
+        if not cash_df.empty:
+            st.dataframe(cash_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("데이터 없음")
 
     st.markdown('<div class="section-title">캐시 초기화</div>', unsafe_allow_html=True)
     if st.button("전체 캐시 초기화 (데이터 새로고침)", key="clear_cache_btn"):
