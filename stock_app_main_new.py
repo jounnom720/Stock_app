@@ -225,26 +225,8 @@ def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # ============================================================
-# 현금흐름 계산 (거래이력 기반 자동 산출, 별도 시트 없음)
+# 실현손익 계산 (단일 함수 — 모든 화면이 이것 하나만 참조)
 # ============================================================
-def calc_cashflow(trade_df: pd.DataFrame) -> pd.DataFrame:
-    """거래이력에서 계좌별 현금 변화를 시간순으로 환산.
-    매수 = 현금 감소(-), 매도 = 현금 증가(+).
-    같은 사실(거래이력)을 두 번 입력하지 않도록 별도 시트 없이 계산만으로 도출한다.
-    """
-    if trade_df.empty:
-        return pd.DataFrame()
-
-    df = trade_df.copy()
-    df["거래일자"] = pd.to_datetime(df["거래일자"], errors="coerce")
-    df["거래금액"] = df["거래수량"].astype(float) * df["거래단가"].astype(float)
-    df["현금변화"] = df.apply(
-        lambda r: -r["거래금액"] if r["거래구분"] == "매수" else r["거래금액"], axis=1
-    )
-    df = df.sort_values("거래일자").reset_index(drop=True)
-    df["계좌별누적변화"] = df.groupby("운용사")["현금변화"].cumsum()
-    return df
-
 def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
     """매도 건별 실현손익을 평균매입가법으로 계산하는 단일 함수.
     주식/ETF 전체가 이 함수 하나만 거쳐가므로 화면마다 다른 숫자가 나올 수 없다.
@@ -941,99 +923,141 @@ def render_trades(trade_df):
 # 탭4: 현금흐름 (거래이력 기반 자동 계산 — 별도 시트 없음)
 # ============================================================
 def render_cashflow(trade_df, nonstock_df):
-    st.markdown('<div class="section-title">현금흐름 추적</div>', unsafe_allow_html=True)
-    st.caption("💡 거래이력 시트만으로 자동 계산됩니다. 매수=현금 감소, 매도=현금 증가로 환산하며, 별도 입력은 필요 없습니다.")
+    st.markdown('<div class="section-title">자금흐름 추적</div>', unsafe_allow_html=True)
+    st.caption("💡 거래이력 시트만으로 자동 계산됩니다. 매도 한 건이 발생하면 그 이후 같은 계좌에서 일어난 매수 내역을 시간순으로 보여줍니다.")
+    st.caption("⚠ 참고용입니다. 매도금이 정확히 어느 매수에 쓰였는지는 계좌 잔액이 섞이기 때문에 100% 단정할 수 없고, 시간 순서로 정황만 보여줍니다.")
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
         return
 
-    cashflow_df = calc_cashflow(trade_df)
     realized_df = calc_realized_pnl(trade_df)
 
-    # ── 요약 카드: 계좌별 누적 현금 유출입 ──
-    계좌목록 = sorted(cashflow_df["운용사"].unique().tolist())
-    cols = st.columns(len(계좌목록)) if 계좌목록 else []
-    for i, acct in enumerate(계좌목록):
-        acct_flow = cashflow_df[cashflow_df["운용사"] == acct]["현금변화"].sum()
-        with cols[i]:
-            st.markdown(f"""
-            <div class="acct-card">
-                <span class="acct-badge {'badge-irp' if '신한' in acct else 'badge-mira'}">{acct}</span>
-                <div class="acct-value" style="font-size:1.25rem">{fmt_money(acct_flow)}</div>
-                <div class="acct-cost">거래로 인한 누적 현금 유출입</div>
-            </div>""", unsafe_allow_html=True)
-
-    # ── 계좌별 현금 누적 변화 그래프 ──
-    st.markdown('<div class="section-title">계좌별 누적 현금 변화</div>', unsafe_allow_html=True)
-    st.caption("📌 매수 시점마다 내려가고 매도 시점마다 올라갑니다. 절대 잔액이 아니라 거래로 인한 변화량의 누적입니다.")
-
-    fig = go.Figure()
-    color_map = {"신한은행 IRP": "#534AB7", "미래에셋증권": "#1D9E75"}
-    for acct in 계좌목록:
-        sub = cashflow_df[cashflow_df["운용사"] == acct]
-        fig.add_trace(go.Scatter(
-            x=sub["거래일자"], y=sub["계좌별누적변화"],
-            name=acct, mode="lines+markers",
-            line=dict(color=color_map.get(acct, "#888"), width=2),
-            marker=dict(size=5),
-        ))
-    fig.update_layout(
-        height=320,
-        margin=dict(t=10, b=10, l=10, r=10),
-        legend=dict(orientation="h", y=1.08),
-        yaxis=dict(tickformat=","),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── 실현손익 (매도 건별, 평균매입가법 단일 계산) ──
+    # ── 실현손익 요약 ──
     st.markdown('<div class="section-title">실현손익 (매도 건 기준)</div>', unsafe_allow_html=True)
     st.caption("📌 평균매입가법으로 계산하며, 이 화면과 다른 모든 화면이 동일한 계산 함수 하나를 공유합니다.")
 
     if realized_df.empty:
         st.info("매도 거래가 없어 실현손익이 없습니다.")
+        return
+
+    total_realized = int(realized_df["실현손익"].sum())
+    win_count = int((realized_df["실현손익"] > 0).sum())
+    lose_count = int((realized_df["실현손익"] < 0).sum())
+
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+            <div class="metric-label">총 실현손익</div>
+            <div class="metric-value" style="color:{color_pnl(total_realized)}">{fmt_money(total_realized)}</div>
+        </div>""", unsafe_allow_html=True)
+    with r2:
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+            <div class="metric-label">수익 매도</div>
+            <div class="metric-value" style="color:#ef5350">{win_count}건</div>
+        </div>""", unsafe_allow_html=True)
+    with r3:
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+            <div class="metric-label">손실 매도</div>
+            <div class="metric-value" style="color:#42a5f5">{lose_count}건</div>
+        </div>""", unsafe_allow_html=True)
+
+    # 실현손익 표 — 손익 색상 적용 (Styler 사용)
+    display_realized = realized_df.sort_values("거래일자", ascending=False).copy()
+    display_realized["거래일자"] = display_realized["거래일자"].dt.strftime("%Y-%m-%d")
+
+    def _style_pnl(v):
+        try:
+            f = float(v)
+        except Exception:
+            return ""
+        color = "#ef5350" if f > 0 else "#42a5f5" if f < 0 else "inherit"
+        return f"color: {color}; font-weight: 600"
+
+    styled = display_realized.style
+    if hasattr(styled, "map"):
+        styled = styled.map(_style_pnl, subset=["실현손익"])
     else:
-        total_realized = int(realized_df["실현손익"].sum())
-        win_count = (realized_df["실현손익"] > 0).sum()
-        lose_count = (realized_df["실현손익"] < 0).sum()
+        styled = styled.applymap(_style_pnl, subset=["실현손익"])
+    col_config = build_number_column_config(
+        display_realized,
+        money_cols=["매도단가", "평균매입단가", "매도금액", "매입금액", "실현손익"],
+    )
+    st.dataframe(
+        styled, use_container_width=True, hide_index=True,
+        column_config=col_config,
+    )
 
-        r1, r2, r3 = st.columns(3)
-        with r1:
-            st.markdown(f"""
-            <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
-                <div class="metric-label">총 실현손익</div>
-                <div class="metric-value" style="color:{color_pnl(total_realized)}">{fmt_money(total_realized)}</div>
-            </div>""", unsafe_allow_html=True)
-        with r2:
-            st.markdown(f"""
-            <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
-                <div class="metric-label">수익 매도</div>
-                <div class="metric-value" style="color:#ef5350">{win_count}건</div>
-            </div>""", unsafe_allow_html=True)
-        with r3:
-            st.markdown(f"""
-            <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
-                <div class="metric-label">손실 매도</div>
-                <div class="metric-value" style="color:#42a5f5">{lose_count}건</div>
-            </div>""", unsafe_allow_html=True)
+    # ── 매도 → 이후 매수 타임라인 ──
+    st.markdown('<div class="section-title">매도 이후 자금 사용 타임라인</div>', unsafe_allow_html=True)
+    st.caption("📌 매도 건 아래에 그 이후 같은 계좌에서 발생한 매수 내역을 표시합니다. 매도금이 그대로 쓰였다는 뜻이 아니라 시간 순서상 정황입니다.")
 
-        display_realized = realized_df.sort_values("거래일자", ascending=False).copy()
-        display_realized["거래일자"] = display_realized["거래일자"].dt.strftime("%Y-%m-%d")
-        col_config = build_number_column_config(
-            display_realized,
-            money_cols=["매도단가", "평균매입단가", "매도금액", "매입금액", "실현손익"],
-        )
-        st.dataframe(
-            display_realized, use_container_width=True, hide_index=True,
-            column_config=col_config,
-        )
+    trade_sorted = trade_df.copy()
+    trade_sorted["거래일자_dt"] = pd.to_datetime(trade_sorted["거래일자"], errors="coerce")
+    trade_sorted = trade_sorted.sort_values("거래일자_dt")
 
-    # ── TDF 환매 등 거래이력 외 현금 변동 안내 ──
+    sell_events = realized_df.sort_values("거래일자", ascending=False).reset_index(drop=True)
+
+    def _render_sell_block(sell_row):
+        sell_date = sell_row["거래일자"]
+        sell_account = sell_row["계좌"]
+        sell_amount = sell_row["매도금액"]
+        pnl = sell_row["실현손익"]
+
+        후속매수 = trade_sorted[
+            (trade_sorted["거래일자_dt"] > sell_date) &
+            (trade_sorted["운용사"] == sell_account) &
+            (trade_sorted["거래구분"] == "매수")
+        ].head(5)
+
+        st.markdown(f"""
+        <div class="acct-card">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+                <div>
+                    <span class="acct-badge {'badge-irp' if '신한' in sell_account else 'badge-mira'}">{sell_account}</span>
+                    <strong style="margin-left:0.4rem">{sell_row['종목명']} 매도</strong>
+                    <span style="color:var(--text-dim);font-size:0.8rem;margin-left:0.4rem">{sell_date.strftime('%Y-%m-%d')}</span>
+                </div>
+                <div style="text-align:right">
+                    <div style="font-weight:700">{fmt_money(sell_amount)} 회수</div>
+                    <div style="font-size:0.8rem;color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</div>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        if 후속매수.empty:
+            st.markdown('<div style="margin-top:0.5rem;font-size:0.82rem;color:var(--text-dim)">↳ 이후 같은 계좌에서 매수 내역 없음 (예수금으로 남아있을 가능성)</div>', unsafe_allow_html=True)
+        else:
+            for _, buy in 후속매수.iterrows():
+                buy_amt = int(buy["거래수량"]) * float(buy["거래단가"])
+                st.markdown(f"""
+                <div style="margin-top:0.4rem;padding-left:0.8rem;border-left:2px solid var(--card-border);font-size:0.82rem">
+                    ↳ {buy['거래일자_dt'].strftime('%Y-%m-%d')} · {buy['종목명']} 매수 {int(buy['거래수량'])}주 · {fmt_money(buy_amt)}
+                </div>""", unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if sell_events.empty:
+        st.info("매도 내역이 없습니다.")
+    else:
+        최근표시건수 = 3
+        for i in range(min(최근표시건수, len(sell_events))):
+            _render_sell_block(sell_events.iloc[i])
+
+        if len(sell_events) > 최근표시건수:
+            with st.expander(f"이전 매도 건 {len(sell_events) - 최근표시건수}건 더 보기", expanded=False):
+                for i in range(최근표시건수, len(sell_events)):
+                    _render_sell_block(sell_events.iloc[i])
+
+    # ── TDF/비주식자산 변동 (참고용) ──
     if not nonstock_df.empty:
         cash_notes = nonstock_df[nonstock_df["비고"].notna() & (nonstock_df["비고"] != "")]
         if not cash_notes.empty:
-            with st.expander("📁 TDF 환매 등 거래이력 외 현금 변동 (비주식자산 시트 비고 참조)", expanded=False):
-                st.caption("⚠ TDF 환매나 계좌 간 이체는 거래이력에 기록되지 않아 위 그래프에 포함되지 않습니다. 참고용입니다.")
+            with st.expander("📁 TDF/비주식자산 변동 내역 (참고용)", expanded=False):
+                st.caption("TDF 환매나 비주식자산 계좌 간 이체는 별도 비주식자산 시트에서 관리됩니다. 위 매도 타임라인과는 별개입니다.")
                 st.dataframe(
                     cash_notes[["계좌", "자산군", "상품명", "반영일자", "비고"]],
                     use_container_width=True, hide_index=True,
