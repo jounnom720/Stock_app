@@ -274,6 +274,18 @@ def color_pnl(v) -> str:
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
 
+def build_number_column_config(df: pd.DataFrame, money_cols: list[str] = None, pct_cols: list[str] = None) -> dict:
+    """st.dataframe에 천 단위 콤마(,) 포맷을 적용하는 column_config 생성."""
+    money_cols = money_cols or []
+    pct_cols = pct_cols or []
+    config = {}
+    for col in df.columns:
+        if col in money_cols:
+            config[col] = st.column_config.NumberColumn(col, format="localized")
+        elif col in pct_cols:
+            config[col] = st.column_config.NumberColumn(col, format="%.2f%%")
+    return config
+
 # ============================================================
 # CSS
 # ============================================================
@@ -767,10 +779,15 @@ def render_trades(trade_df):
     # 테이블
     show_cols = ["거래일자", "운용사", "종목명", "거래구분", "거래수량", "거래단가", "거래금액", "비고"]
     show_cols = [c for c in show_cols if c in df.columns]
+    display_df = df[show_cols].rename(columns={"운용사": "계좌"})
+    col_config = build_number_column_config(
+        display_df, money_cols=["거래수량", "거래단가", "거래금액"]
+    )
     st.dataframe(
-        df[show_cols].rename(columns={"운용사": "계좌"}),
+        display_df,
         use_container_width=True,
         hide_index=True,
+        column_config=col_config,
     )
 
 
@@ -781,22 +798,34 @@ def render_data_mgmt(nonstock_df, cash_df):
     st.markdown('<div class="section-title">비주식자산 현황 (TDF · 현금성자산)</div>', unsafe_allow_html=True)
     st.caption("💡 대시보드의 현금성자산 금액은 이 시트 기준입니다. 잔액 변경 시 비주식자산 시트를 업데이트하세요.")
 
+    money_cols_nonstock = ["원금", "평가금액"]
+    pct_cols_nonstock = ["예상연수익률"]
+
     if not nonstock_df.empty:
         tdf_rows  = nonstock_df[nonstock_df["자산군"] == "TDF"]
         cash_rows = nonstock_df[nonstock_df["자산군"] == "현금성자산"]
         if not tdf_rows.empty:
             st.markdown("**TDF / 펀드**")
-            st.dataframe(tdf_rows, use_container_width=True, hide_index=True)
+            st.dataframe(
+                tdf_rows, use_container_width=True, hide_index=True,
+                column_config=build_number_column_config(tdf_rows, money_cols_nonstock, pct_cols_nonstock),
+            )
         if not cash_rows.empty:
             st.markdown("**현금성자산 (예수금 · 대기자금)**")
-            st.dataframe(cash_rows, use_container_width=True, hide_index=True)
+            st.dataframe(
+                cash_rows, use_container_width=True, hide_index=True,
+                column_config=build_number_column_config(cash_rows, money_cols_nonstock, pct_cols_nonstock),
+            )
     else:
         st.info("비주식자산 데이터 없음")
 
     with st.expander("📁 현금성자산 시트 원본 (구버전 — 앱에서 미사용)", expanded=False):
         st.caption("⚠ 이 시트는 구버전으로 현재 대시보드 계산에 사용되지 않습니다.")
         if not cash_df.empty:
-            st.dataframe(cash_df, use_container_width=True, hide_index=True)
+            st.dataframe(
+                cash_df, use_container_width=True, hide_index=True,
+                column_config=build_number_column_config(cash_df, ["원금", "평가금액"]),
+            )
         else:
             st.info("데이터 없음")
 
