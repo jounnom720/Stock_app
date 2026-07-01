@@ -502,16 +502,16 @@ st.markdown("""
     gap: 0.5rem;
     flex-wrap: wrap;
 }
-.sell-event-name { font-weight: 600; font-size: 0.92rem; }
-.sell-event-date { color: var(--text-dim); font-size: 0.78rem; }
+.sell-event-name { font-weight: 600; font-size: 1.05rem; }
+.sell-event-date { color: var(--text-dim); font-size: 0.9rem; }
 .sell-event-spacer { flex: 1; min-width: 0.5rem; }
-.sell-event-amount { font-weight: 700; font-size: 0.9rem; white-space: nowrap; }
-.sell-event-pnl { font-size: 0.78rem; font-weight: 600; white-space: nowrap; }
+.sell-event-amount { font-weight: 700; font-size: 1.05rem; white-space: nowrap; }
+.sell-event-pnl { font-size: 0.92rem; font-weight: 600; white-space: nowrap; }
 .sell-follow-item, .sell-follow-empty {
     margin-top: 0.4rem;
     padding-left: 0.8rem;
     border-left: 2px solid var(--card-border);
-    font-size: 0.8rem;
+    font-size: 0.95rem;
     color: var(--text-dim);
 }
 
@@ -538,6 +538,23 @@ st.markdown("""
     margin: 1.4rem 0 0.7rem 0;
     padding-bottom: 0.35rem;
     border-bottom: 2px solid rgba(255,255,255,0.1);
+}
+
+/* ── 통계/지표 메트릭 카드 (거래이력·자금흐름 탭) ── */
+.metric-card {
+    border-radius: 12px;
+    padding: 1.1rem 1.3rem;
+    margin-bottom: 0.5rem;
+}
+.metric-label {
+    font-size: 0.95rem;
+    color: var(--text-dim);
+    margin-bottom: 0.35rem;
+}
+.metric-value {
+    font-size: 1.65rem;
+    font-weight: 700;
+    line-height: 1.2;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -968,7 +985,7 @@ def render_holdings(holdings_df, prices):
         use_container_width=True,
         hide_index=True,
         column_config=col_config,
-        height=min(440, 40 + 35 * len(table_df)),
+        height=min(560, 50 + 45 * len(table_df)),
     )
 
     미반영수 = (~display_df["시세반영"]).sum() if "시세반영" in display_df.columns else 0
@@ -989,10 +1006,12 @@ def render_holdings(holdings_df, prices):
             textposition="outside",
         ))
         fig.update_layout(
-            height=max(200, len(chart_df) * 45),
-            margin=dict(t=10, b=10, l=10, r=80),
+            height=max(200, len(chart_df) * 52),
+            margin=dict(t=10, b=10, l=10, r=90),
             xaxis_title="수익률(%)",
-            xaxis=dict(zeroline=True),
+            xaxis=dict(zeroline=True, tickfont=dict(size=14)),
+            yaxis=dict(tickfont=dict(size=14)),
+            font=dict(size=14),
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1030,9 +1049,21 @@ def render_trades(trade_df):
 
     # 통계
     s1, s2, s3 = st.columns(3)
-    s1.metric("총 거래 건수", f"{len(df):,}건")
-    s2.metric("매수 건수", f"{len(df[df['거래구분']=='매수']):,}건")
-    s3.metric("매도 건수", f"{len(df[df['거래구분']=='매도']):,}건")
+    s1.markdown(f"""
+    <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+        <div class="metric-label">총 거래 건수</div>
+        <div class="metric-value">{len(df):,}건</div>
+    </div>""", unsafe_allow_html=True)
+    s2.markdown(f"""
+    <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+        <div class="metric-label">매수 건수</div>
+        <div class="metric-value" style="color:#e0635e">{len(df[df['거래구분']=='매수']):,}건</div>
+    </div>""", unsafe_allow_html=True)
+    s3.markdown(f"""
+    <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+        <div class="metric-label">매도 건수</div>
+        <div class="metric-value" style="color:#5b9bd8">{len(df[df['거래구분']=='매도']):,}건</div>
+    </div>""", unsafe_allow_html=True)
 
     # 테이블
     show_cols = ["거래일자", "운용사", "종목명", "거래구분", "거래수량", "거래단가", "거래금액", "비고"]
@@ -1046,6 +1077,7 @@ def render_trades(trade_df):
         use_container_width=True,
         hide_index=True,
         column_config=col_config,
+        height=min(600, 50 + 45 * len(display_df)),
     )
 
 
@@ -1119,6 +1151,7 @@ def render_cashflow(trade_df, nonstock_df):
     st.dataframe(
         styled, use_container_width=True, hide_index=True,
         column_config=col_config,
+        height=min(560, 50 + 45 * len(display_realized)),
     )
 
     # ── 매도 → 이후 매수 타임라인 ──
