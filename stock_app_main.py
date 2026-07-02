@@ -1069,28 +1069,58 @@ def render_holdings(holdings_df, prices):
     if 미반영수 > 0:
         st.caption(f"⚠ {미반영수}종목은 실시간 시세 조회에 실패해 매입가로 표시 중입니다. '시세 새로고침'을 눌러 다시 시도하세요.")
 
-    # 종목별 수익률 바 차트
-    if len(display_df) > 0 and "수익률" in display_df.columns:
-        st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
-        chart_df = display_df.sort_values("수익률")
-        colors = ["#e0635e" if v >= 0 else "#5b9bd8" for v in chart_df["수익률"]]
-        fig = go.Figure(go.Bar(
-            x=chart_df["수익률"],
-            y=chart_df["종목명"],
-            orientation="h",
-            marker_color=colors,
-            text=[fmt_pct(v) for v in chart_df["수익률"]],
-            textposition="outside",
-        ))
-        fig.update_layout(
-            height=max(200, len(chart_df) * 52),
-            margin=dict(t=10, b=10, l=10, r=90),
-            xaxis_title="수익률(%)",
-            xaxis=dict(zeroline=True, tickfont=dict(size=14)),
-            yaxis=dict(tickfont=dict(size=14)),
-            font=dict(size=14),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    # ── 종목별 보유 비중 도넛 + 수익률 바 차트 ──
+    if len(display_df) > 0:
+        ch1, ch2 = st.columns([1, 1])
+
+        with ch1:
+            st.markdown('<div class="section-title">종목별 보유 비중</div>', unsafe_allow_html=True)
+            donut_labels = display_df["종목명"].tolist()
+            donut_values = display_df["평가금액"].tolist()
+            # 종목 유형별 색상 팔레트
+            palette = [
+                "#534AB7", "#7b5ea7", "#1976d2", "#0288d1",
+                "#f57c00", "#e65100", "#388e3c", "#1b5e20",
+                "#c62828", "#ad1457",
+            ]
+            donut_colors = [palette[i % len(palette)] for i in range(len(donut_labels))]
+            fig_donut = go.Figure(go.Pie(
+                labels=donut_labels,
+                values=donut_values,
+                hole=0.52,
+                textinfo="label+percent",
+                marker_colors=donut_colors,
+                textfont=dict(size=13),
+            ))
+            fig_donut.update_layout(
+                height=360,
+                margin=dict(t=10, b=10, l=10, r=10),
+                showlegend=False,
+                font=dict(size=13),
+            )
+            st.plotly_chart(fig_donut, use_container_width=True)
+
+        with ch2:
+            st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
+            chart_df = display_df.sort_values("수익률")
+            colors = ["#e0635e" if v >= 0 else "#5b9bd8" for v in chart_df["수익률"]]
+            fig = go.Figure(go.Bar(
+                x=chart_df["수익률"],
+                y=chart_df["종목명"],
+                orientation="h",
+                marker_color=colors,
+                text=[fmt_pct(v) for v in chart_df["수익률"]],
+                textposition="outside",
+            ))
+            fig.update_layout(
+                height=360,
+                margin=dict(t=10, b=10, l=10, r=90),
+                xaxis_title="수익률(%)",
+                xaxis=dict(zeroline=True, tickfont=dict(size=13)),
+                yaxis=dict(tickfont=dict(size=13)),
+                font=dict(size=13),
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
 
 # ============================================================
@@ -1231,30 +1261,97 @@ def render_cashflow(trade_df, nonstock_df):
         height=min(560, 50 + 45 * len(display_realized)),
     )
 
-    # ── 매도 → 이후 매수 타임라인 ──
-    st.markdown('<div class="section-title">매도 이후 자금 사용 타임라인</div>', unsafe_allow_html=True)
-    st.caption("📌 매도 건 아래에 그 이후 같은 계좌에서 발생한 매수 내역을 표시합니다. 매도금이 그대로 쓰였다는 뜻이 아니라 시간 순서상 정황입니다.")
+    # ── 통합 자금흐름 타임라인 (주식 매도 + TDF 환매 통합) ──
+    st.markdown('<div class="section-title">통합 자금흐름 타임라인</div>', unsafe_allow_html=True)
+    st.caption("📌 주식/ETF 매도와 TDF 환매를 날짜순으로 통합해 보여줍니다. 각 이벤트 이후 같은 계좌에서 발생한 매수·입금 내역을 시간순으로 표시합니다.")
+    st.caption("⚠ 참고용입니다. 자금 흐름의 정황만 보여주며 100% 단정할 수 없습니다.")
 
     trade_sorted = trade_df.copy()
     trade_sorted["거래일자_dt"] = pd.to_datetime(trade_sorted["거래일자"], errors="coerce")
     trade_sorted = trade_sorted.sort_values("거래일자_dt")
 
-    sell_events = realized_df.sort_values("거래일자", ascending=False).reset_index(drop=True)
+    # ── 이벤트 목록 구성: 주식/ETF 매도 ──
+    events = []
+    for _, row in realized_df.iterrows():
+        events.append({
+            "날짜": row["거래일자"],
+            "계좌": row["계좌"],
+            "유형": "stock_sell",
+            "제목": f"{row['종목명']} 매도",
+            "금액": row["매도금액"],
+            "손익": row["실현손익"],
+            "비고": "",
+        })
 
-    def _render_sell_block(sell_row):
-        sell_date = sell_row["거래일자"]
-        sell_account = sell_row["계좌"]
-        sell_amount = sell_row["매도금액"]
-        pnl = sell_row["실현손익"]
+    # ── 이벤트 목록 구성: TDF 환매 (비주식자산 시트의 비고에 '매도' 포함 행) ──
+    if not nonstock_df.empty:
+        tdf_rows = nonstock_df[
+            (nonstock_df["자산군"].isin(["TDF", "펀드"])) &
+            (nonstock_df["비고"].notna()) &
+            (nonstock_df["비고"].str.contains("매도|환매|해지", na=False))
+        ].copy()
+        for _, row in tdf_rows.iterrows():
+            try:
+                날짜 = pd.to_datetime(row.get("반영일자", ""), errors="coerce")
+                if pd.isna(날짜):
+                    continue
+                금액 = float(str(row.get("평가금액", 0) or 0).replace(",", "") or 0)
+                events.append({
+                    "날짜": 날짜,
+                    "계좌": str(row.get("계좌", "")),
+                    "유형": "tdf_sell",
+                    "제목": f"{row.get('상품명', 'TDF')} 환매",
+                    "금액": 금액,
+                    "손익": None,
+                    "비고": str(row.get("비고", "")),
+                })
+            except Exception:
+                continue
 
+    # 날짜 내림차순 정렬
+    events = sorted(events, key=lambda x: x["날짜"], reverse=True)
+
+    def _render_event_block(ev):
+        ev_date = ev["날짜"]
+        ev_account = ev["계좌"]
+        ev_amount = ev["금액"]
+        pnl = ev["손익"]
+        is_tdf = ev["유형"] == "tdf_sell"
+
+        # 이후 같은 계좌 매수 내역 (거래이력 시트)
         후속매수 = trade_sorted[
-            (trade_sorted["거래일자_dt"] >= sell_date) &
-            (trade_sorted["운용사"] == sell_account) &
+            (trade_sorted["거래일자_dt"] >= ev_date) &
+            (trade_sorted["운용사"] == ev_account) &
             (trade_sorted["거래구분"] == "매수")
         ].head(5)
 
-        if 후속매수.empty:
-            buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 매수 내역 없음 (예수금으로 남아있을 가능성)</div>'
+        # TDF 이후엔 현금성자산 입금도 후속 흐름으로 표시
+        후속현금_html = ""
+        if is_tdf and not nonstock_df.empty:
+            try:
+                ev_date_ts = pd.Timestamp(ev_date)
+                후속현금 = nonstock_df[
+                    (nonstock_df["자산군"] == "현금성자산") &
+                    (pd.to_datetime(nonstock_df["반영일자"], errors="coerce") >= ev_date_ts)
+                ].copy()
+                후속현금["반영일자_dt"] = pd.to_datetime(후속현금["반영일자"], errors="coerce")
+                후속현금 = 후속현금.sort_values("반영일자_dt").head(3)
+                items = []
+                for _, cr in 후속현금.iterrows():
+                    amt = float(str(cr.get("평가금액", 0) or 0).replace(",", "") or 0)
+                    d = cr["반영일자_dt"].strftime("%Y-%m-%d") if pd.notna(cr["반영일자_dt"]) else "-"
+                    note = str(cr.get("비고", ""))
+                    note_str = f" · {note}" if note else ""
+                    items.append(
+                        f'<div class="sell-follow-item">💰 {d} · {cr.get("상품명","현금성자산")} '
+                        f'{fmt_money(amt)} 입금{note_str}</div>'
+                    )
+                후속현금_html = "".join(items)
+            except Exception:
+                pass
+
+        if 후속매수.empty and not 후속현금_html:
+            buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 매수·입금 내역 없음</div>'
         else:
             items = []
             for _, buy in 후속매수.iterrows():
@@ -1263,39 +1360,51 @@ def render_cashflow(trade_df, nonstock_df):
                     f'<div class="sell-follow-item">↳ {buy["거래일자_dt"].strftime("%Y-%m-%d")} · '
                     f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
                 )
-            buy_html = "".join(items)
+            buy_html = 후속현금_html + "".join(items)
 
-        st.markdown(f"""
-        <div class="acct-card sell-event-card">
-            <div class="sell-event-header">
-                <span class="acct-badge {'badge-irp' if '신한' in sell_account else 'badge-mira'}">{sell_account}</span>
-                <span class="sell-event-name">{sell_row['종목명']} 매도</span>
-                <span class="sell-event-date">{sell_date.strftime('%Y-%m-%d')}</span>
-                <span class="sell-event-spacer"></span>
-                <span class="sell-event-amount">{fmt_money(sell_amount)} 회수</span>
-                <span class="sell-event-pnl" style="color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</span>
-            </div>
-            {buy_html}
-        </div>""", unsafe_allow_html=True)
+        # 배지 및 라벨
+        badge_class = "badge-irp" if "신한" in ev_account else "badge-mira"
+        type_tag = '<span style="font-size:0.8rem;color:var(--text-dim2);margin-left:4px;">[TDF]</span>' if is_tdf else ""
+        pnl_html = ""
+        if pnl is not None:
+            pnl_html = f'<span class="sell-event-pnl" style="color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</span>'
+        elif ev["비고"]:
+            pnl_html = f'<span class="sell-event-pnl" style="color:var(--text-dim2)">{ev["비고"]}</span>'
 
-    if sell_events.empty:
-        st.info("매도 내역이 없습니다.")
+        st.markdown(
+            '<div class="acct-card sell-event-card">'
+            '<div class="sell-event-header">'
+            f'<span class="acct-badge {badge_class}">{ev_account}</span>'
+            f'<span class="sell-event-name">{ev["제목"]}</span>'
+            f'{type_tag}'
+            f'<span class="sell-event-date">{ev_date.strftime("%Y-%m-%d")}</span>'
+            '<span class="sell-event-spacer"></span>'
+            f'<span class="sell-event-amount">{fmt_money(ev_amount)} 회수</span>'
+            f'{pnl_html}'
+            '</div>'
+            f'{buy_html}'
+            '</div>',
+            unsafe_allow_html=True
+        )
+
+    if not events:
+        st.info("매도·환매 내역이 없습니다.")
     else:
         최근표시건수 = 3
-        for i in range(min(최근표시건수, len(sell_events))):
-            _render_sell_block(sell_events.iloc[i])
+        for i in range(min(최근표시건수, len(events))):
+            _render_event_block(events[i])
 
-        if len(sell_events) > 최근표시건수:
-            with st.expander(f"이전 매도 건 {len(sell_events) - 최근표시건수}건 더 보기", expanded=False):
-                for i in range(최근표시건수, len(sell_events)):
-                    _render_sell_block(sell_events.iloc[i])
+        if len(events) > 최근표시건수:
+            with st.expander(f"이전 이벤트 {len(events) - 최근표시건수}건 더 보기", expanded=False):
+                for i in range(최근표시건수, len(events)):
+                    _render_event_block(events[i])
 
-    # ── TDF/비주식자산 변동 (참고용) ──
+    # ── TDF/비주식자산 변동 전체 내역 (참고용) ──
     if not nonstock_df.empty:
         cash_notes = nonstock_df[nonstock_df["비고"].notna() & (nonstock_df["비고"] != "")]
         if not cash_notes.empty:
             with st.expander("📁 TDF/비주식자산 변동 내역 (참고용)", expanded=False):
-                st.caption("TDF 환매나 비주식자산 계좌 간 이체는 별도 비주식자산 시트에서 관리됩니다. 위 매도 타임라인과는 별개입니다.")
+                st.caption("비주식자산 시트 전체 변동 내역입니다. 위 타임라인과는 별개로 원본 기록을 확인할 수 있습니다.")
                 st.dataframe(
                     cash_notes[["계좌", "자산군", "상품명", "반영일자", "비고"]],
                     use_container_width=True, hide_index=True,
