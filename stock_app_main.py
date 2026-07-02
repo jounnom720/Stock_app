@@ -127,7 +127,6 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
 # ============================================================
 # 실시간 시세 조회
 # ============================================================
-@st.cache_data(ttl=180)
 @st.cache_data(ttl=60)
 def get_prices(tickers: tuple) -> dict[str, float]:
     """yfinance로 현재가 조회. 일괄 조회 실패 시 종목별 개별 재시도.
@@ -485,6 +484,28 @@ st.markdown("""
     flex-wrap: wrap;
 }
 
+/* ── 계좌 카드: 구분선 ── */
+.acct-divider {
+    margin: 0.75rem 0 0.55rem 0;
+    border-top: 1px solid var(--card-border);
+}
+.acct-divider-light {
+    margin: 0.3rem 0;
+    border-top: 1px dashed rgba(255,255,255,0.06);
+}
+
+/* ── 계좌 카드: 항목 행 (라벨 + 값 좌우 정렬) ── */
+.acct-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0.22rem 0;
+    font-size: 0.95rem;
+}
+.acct-row-label { color: var(--text-dim); }
+.acct-row-sub   { color: var(--text-dim2); font-size: 0.88rem; }
+.acct-row-val   { font-weight: 600; }
+
 /* ── 계좌 카드: 2열 정보 그리드 (빈 공간 방지) ── */
 .acct-grid {
     display: grid;
@@ -803,11 +824,23 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 <div class="acct-value">{fmt_money_full(irp_total)}</div>
                 <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money_full(irp_pnl)} ({fmt_pct(irp_pct)})</div>
             </div>
-            <div class="acct-grid">
-                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money_full(irp_cost)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">ETF</span><span class="acct-grid-val">{fmt_money_full(irp_stock_eval)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">TDF</span><span class="acct-grid-val">{fmt_money_full(irp_tdf_eval)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">현금</span><span class="acct-grid-val">{fmt_money_full(irp_cash_eval)}</span></div>
+            <div class="acct-divider"></div>
+            <div class="acct-row">
+                <span class="acct-row-label">투자원금</span>
+                <span class="acct-row-val">{fmt_money_full(irp_cost)}</span>
+            </div>
+            <div class="acct-divider-light"></div>
+            <div class="acct-row">
+                <span class="acct-row-label acct-row-sub">├ ETF 평가</span>
+                <span class="acct-row-val">{fmt_money_full(irp_stock_eval)}</span>
+            </div>
+            <div class="acct-row">
+                <span class="acct-row-label acct-row-sub">├ TDF 평가</span>
+                <span class="acct-row-val">{fmt_money_full(irp_tdf_eval)}</span>
+            </div>
+            <div class="acct-row">
+                <span class="acct-row-label acct-row-sub">└ 현금</span>
+                <span class="acct-row-val">{fmt_money_full(irp_cash_eval)}</span>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -819,11 +852,19 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 <div class="acct-value">{fmt_money_full(mira_total)}</div>
                 <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money_full(mira_pnl)} ({fmt_pct(mira_pct)})</div>
             </div>
-            <div class="acct-grid">
-                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money_full(mira_cost_total)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">주식</span><span class="acct-grid-val">{fmt_money_full(mira_eval)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">예수금</span><span class="acct-grid-val">{fmt_money_full(mira_cash)}</span></div>
-                <div class="acct-grid-item"></div>
+            <div class="acct-divider"></div>
+            <div class="acct-row">
+                <span class="acct-row-label">투자원금</span>
+                <span class="acct-row-val">{fmt_money_full(mira_cost_total)}</span>
+            </div>
+            <div class="acct-divider-light"></div>
+            <div class="acct-row">
+                <span class="acct-row-label acct-row-sub">├ 주식 평가</span>
+                <span class="acct-row-val">{fmt_money_full(mira_eval)}</span>
+            </div>
+            <div class="acct-row">
+                <span class="acct-row-label acct-row-sub">└ 예수금</span>
+                <span class="acct-row-val">{fmt_money_full(mira_cash)}</span>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -851,45 +892,44 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         st.plotly_chart(fig_type, use_container_width=True)
 
     with col_table:
-        st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)  # 도넛 제목 높이 맞춤
+        st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
+        # f-string 중첩 따옴표 충돌 방지: 행을 개별 문자열로 조립
+        p_cell = "padding:0.55rem 0.8rem;"
+        p_right = "padding:0.55rem 0.8rem;text-align:right;"
         rows_html = ""
         for label, value, color in zip(_labels, _values, _colors):
             pct = value / _total_for_pct * 100
-            rows_html += f"""
-            <tr>
-                <td style="padding:0.55rem 0.8rem;">
-                    <span style="display:inline-block;width:10px;height:10px;border-radius:50%;
-                    background:{color};margin-right:6px;vertical-align:middle;"></span>
-                    {label}
-                </td>
-                <td style="padding:0.55rem 0.8rem;text-align:right;font-weight:600;">
-                    {fmt_money_full(value)}
-                </td>
-                <td style="padding:0.55rem 0.8rem;text-align:right;color:var(--text-dim);">
-                    {pct:.1f}%
-                </td>
-            </tr>"""
-        st.markdown(f"""
-        <table style="width:100%;border-collapse:collapse;font-size:0.97rem;">
-            <thead>
-                <tr style="border-bottom:1px solid var(--card-border);color:var(--text-dim);font-size:0.85rem;">
-                    <th style="padding:0.4rem 0.8rem;text-align:left;font-weight:400;">자산군</th>
-                    <th style="padding:0.4rem 0.8rem;text-align:right;font-weight:400;">평가금액</th>
-                    <th style="padding:0.4rem 0.8rem;text-align:right;font-weight:400;">비중</th>
-                </tr>
-            </thead>
-            <tbody style="border-bottom:1px solid var(--card-border);">
-                {rows_html}
-            </tbody>
-            <tfoot>
-                <tr style="border-top:1px solid var(--card-border);font-weight:700;">
-                    <td style="padding:0.55rem 0.8rem;">합계</td>
-                    <td style="padding:0.55rem 0.8rem;text-align:right;">{fmt_money_full(sum(_values))}</td>
-                    <td style="padding:0.55rem 0.8rem;text-align:right;">100%</td>
-                </tr>
-            </tfoot>
-        </table>
-        """, unsafe_allow_html=True)
+            dot = (
+                '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+                'background:' + color + ';margin-right:6px;vertical-align:middle;"></span>'
+            )
+            amt = fmt_money_full(value)
+            rows_html += (
+                "<tr>"
+                + "<td style='" + p_cell + "'>" + dot + label + "</td>"
+                + "<td style='" + p_right + "font-weight:600;'>" + amt + "</td>"
+                + "<td style='" + p_right + "color:var(--text-dim);'>" + f"{pct:.1f}%" + "</td>"
+                + "</tr>"
+            )
+        total_amt = fmt_money_full(sum(_values))
+        table_html = (
+            "<table style='width:100%;border-collapse:collapse;font-size:0.97rem;'>"
+            "<thead><tr style='border-bottom:1px solid var(--card-border);color:var(--text-dim);font-size:0.85rem;'>"
+            "<th style='padding:0.4rem 0.8rem;text-align:left;font-weight:400;'>자산군</th>"
+            "<th style='padding:0.4rem 0.8rem;text-align:right;font-weight:400;'>평가금액</th>"
+            "<th style='padding:0.4rem 0.8rem;text-align:right;font-weight:400;'>비중</th>"
+            "</tr></thead>"
+            "<tbody style='border-bottom:1px solid var(--card-border);'>"
+            + rows_html +
+            "</tbody>"
+            "<tfoot><tr style='border-top:1px solid var(--card-border);font-weight:700;'>"
+            "<td style='" + p_cell + "'>합계</td>"
+            "<td style='" + p_right + "'>" + total_amt + "</td>"
+            "<td style='" + p_right + "'>100%</td>"
+            "</tr></tfoot>"
+            "</table>"
+        )
+        st.markdown(table_html, unsafe_allow_html=True)
 
     # ── 월별 자산 추이 ──
     if not monthly_df.empty:
