@@ -128,15 +128,19 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
 # 실시간 시세 조회
 # ============================================================
 @st.cache_data(ttl=180)
-def get_prices(tickers: list[str]) -> dict[str, float]:
-    """yfinance로 현재가 조회. 일괄 조회 실패 시 종목별 개별 재시도."""
+@st.cache_data(ttl=60)
+def get_prices(tickers: tuple) -> dict[str, float]:
+    """yfinance로 현재가 조회. 일괄 조회 실패 시 종목별 개별 재시도.
+    st.cache_data는 list를 해시할 수 없으므로 tuple로 받음.
+    """
     if not tickers:
         return {}
     prices = {}
+    ticker_list = list(tickers)
     # 1차: 일괄 조회
     try:
-        ticker_str = " ".join(tickers)
-        data = yf.download(ticker_str, period="5d", progress=False, auto_adjust=True, threads=True)
+        ticker_str = " ".join(ticker_list)
+        data = yf.download(ticker_str, period="5d", progress=False, auto_adjust=True, threads=False)
         if "Close" in data.columns:
             close = data["Close"].dropna(how="all")
             if not close.empty:
@@ -145,13 +149,13 @@ def get_prices(tickers: list[str]) -> dict[str, float]:
                     for t, p in latest.items():
                         if pd.notna(p):
                             prices[t] = float(p)
-                elif len(tickers) == 1 and pd.notna(latest):
-                    prices[tickers[0]] = float(latest)
+                elif len(ticker_list) == 1 and pd.notna(latest):
+                    prices[ticker_list[0]] = float(latest)
     except Exception as e:
         logging.warning("일괄 시세 조회 실패: %s", e)
 
     # 2차: 누락된 종목 개별 재시도
-    missing = [t for t in tickers if t not in prices]
+    missing = [t for t in ticker_list if t not in prices]
     for t in missing:
         try:
             hist = yf.Ticker(t).history(period="5d")
@@ -605,8 +609,12 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    prices = get_prices(tickers) if tickers else {}
+    prices = get_prices(tuple(tickers)) if tickers else {}
     holdings_df = enrich_with_prices(holdings_df, prices)
+
+    # 시세 반영 현황 표시 (조회 실패 시 경고)
+    if tickers and not prices:
+        st.warning("⚠ 실시간 시세 조회에 실패했습니다. 잠시 후 '시세 새로고침'을 눌러주세요. (yfinance 서버 응답 없음)")
 
     # ──────────────────────────────────────────────
     # 탭 구성
@@ -731,7 +739,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
 
     st.markdown(f"""
     <div class="hero-card">
-        <div class="hero-label">총 투자원금 {fmt_money(total_cost)} → 통합 평가금액</div>
+        <div class="hero-label">총 투자원금 {fmt_money_full(total_cost)} → 통합 평가금액</div>
         <div class="hero-row">
             <div class="hero-value">{fmt_money_full(total_eval)}</div>
             <div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money(total_pnl)} ({fmt_pct(total_pct)})</div>
@@ -742,9 +750,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             <div style="width:{cash_pct_w:.1f}%;background:#5F5E5A"></div>
         </div>
         <div class="hero-legend">
-            <span><span class="hero-dot" style="background:#534AB7"></span>주식/ETF {fmt_money(stock_eval)} ({stock_pct_w:.0f}%) · {fmt_pct(stock_pct)}</span>
-            <span><span class="hero-dot" style="background:#1D9E75"></span>TDF/펀드 {fmt_money(tdf_eval)} ({tdf_pct_w:.0f}%) · {fmt_pct(tdf_pct)}</span>
-            <span><span class="hero-dot" style="background:#5F5E5A"></span>현금성자산 {fmt_money(cash_eval)} ({cash_pct_w:.0f}%)</span>
+            <span><span class="hero-dot" style="background:#534AB7"></span>주식/ETF {fmt_money_full(stock_eval)} ({stock_pct_w:.0f}%) · {fmt_pct(stock_pct)}</span>
+            <span><span class="hero-dot" style="background:#1D9E75"></span>TDF/펀드 {fmt_money_full(tdf_eval)} ({tdf_pct_w:.0f}%) · {fmt_pct(tdf_pct)}</span>
+            <span><span class="hero-dot" style="background:#5F5E5A"></span>현금성자산 {fmt_money_full(cash_eval)} ({cash_pct_w:.0f}%)</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -793,13 +801,13 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             <span class="acct-badge badge-irp">신한은행 IRP · ETF·TDF</span>
             <div class="acct-main-row">
                 <div class="acct-value">{fmt_money_full(irp_total)}</div>
-                <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money(irp_pnl)} ({fmt_pct(irp_pct)})</div>
+                <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money_full(irp_pnl)} ({fmt_pct(irp_pct)})</div>
             </div>
             <div class="acct-grid">
-                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money(irp_cost)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">ETF</span><span class="acct-grid-val">{fmt_money(irp_stock_eval)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">TDF</span><span class="acct-grid-val">{fmt_money(irp_tdf_eval)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">현금</span><span class="acct-grid-val">{fmt_money(irp_cash_eval)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money_full(irp_cost)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">ETF</span><span class="acct-grid-val">{fmt_money_full(irp_stock_eval)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">TDF</span><span class="acct-grid-val">{fmt_money_full(irp_tdf_eval)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">현금</span><span class="acct-grid-val">{fmt_money_full(irp_cash_eval)}</span></div>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -809,50 +817,79 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             <span class="acct-badge badge-mira">미래에셋증권 · 주식</span>
             <div class="acct-main-row">
                 <div class="acct-value">{fmt_money_full(mira_total)}</div>
-                <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money(mira_pnl)} ({fmt_pct(mira_pct)})</div>
+                <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money_full(mira_pnl)} ({fmt_pct(mira_pct)})</div>
             </div>
             <div class="acct-grid">
-                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money(mira_cost_total)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">주식</span><span class="acct-grid-val">{fmt_money(mira_eval)}</span></div>
-                <div class="acct-grid-item"><span class="acct-grid-label">예수금</span><span class="acct-grid-val">{fmt_money(mira_cash)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">원금</span><span class="acct-grid-val">{fmt_money_full(mira_cost_total)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">주식</span><span class="acct-grid-val">{fmt_money_full(mira_eval)}</span></div>
+                <div class="acct-grid-item"><span class="acct-grid-label">예수금</span><span class="acct-grid-val">{fmt_money_full(mira_cash)}</span></div>
                 <div class="acct-grid-item"></div>
             </div>
         </div>""", unsafe_allow_html=True)
 
-    # ── 자산 구성 도넛 차트 ──
+    # ── 자산 구성 (도넛 + 표 병행) ──
     st.markdown('<div class="section-title">자산 구성</div>', unsafe_allow_html=True)
 
-    cc, cd = st.columns([1, 1])
-    with cc:
-        # 계좌별 비중
-        labels_acc = ["신한은행 IRP", "미래에셋증권"]
-        values_acc = [irp_total, mira_total]
-        fig_acc = go.Figure(go.Pie(
-            labels=labels_acc, values=values_acc,
-            hole=0.55, textinfo="label+percent",
-            marker_colors=["#1976d2", "#388e3c"],
-        ))
-        fig_acc.update_layout(
-            title="계좌별 비중", height=300, margin=dict(t=40, b=10, l=10, r=10),
-            showlegend=False,
-        )
-        st.plotly_chart(fig_acc, use_container_width=True)
+    _colors = ["#7b1fa2", "#0288d1", "#f57c00", "#78909c"]
+    _labels = ["ETF (IRP)", "TDF", "국내주식", "현금성자산"]
+    _values = [max(0, v) for v in [irp_stock_eval, tdf_eval, mira_eval, cash_eval]]
+    _total_for_pct = sum(_values) or 1
 
-    with cd:
-        # 자산군별 비중
-        labels_type = ["ETF (IRP)", "TDF", "국내주식", "현금성자산"]
-        values_type = [irp_stock_eval, tdf_eval, mira_eval, cash_eval]
-        values_type = [max(0, v) for v in values_type]
+    col_donut, col_table = st.columns([1, 1])
+    with col_donut:
         fig_type = go.Figure(go.Pie(
-            labels=labels_type, values=values_type,
+            labels=_labels, values=_values,
             hole=0.55, textinfo="label+percent",
-            marker_colors=["#7b1fa2", "#0288d1", "#f57c00", "#78909c"],
+            marker_colors=_colors,
         ))
         fig_type.update_layout(
-            title="자산군별 비중", height=300, margin=dict(t=40, b=10, l=10, r=10),
+            title="자산군별 비중", height=320,
+            margin=dict(t=40, b=10, l=10, r=10),
             showlegend=False,
+            font=dict(size=14),
         )
         st.plotly_chart(fig_type, use_container_width=True)
+
+    with col_table:
+        st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)  # 도넛 제목 높이 맞춤
+        rows_html = ""
+        for label, value, color in zip(_labels, _values, _colors):
+            pct = value / _total_for_pct * 100
+            rows_html += f"""
+            <tr>
+                <td style="padding:0.55rem 0.8rem;">
+                    <span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+                    background:{color};margin-right:6px;vertical-align:middle;"></span>
+                    {label}
+                </td>
+                <td style="padding:0.55rem 0.8rem;text-align:right;font-weight:600;">
+                    {fmt_money_full(value)}
+                </td>
+                <td style="padding:0.55rem 0.8rem;text-align:right;color:var(--text-dim);">
+                    {pct:.1f}%
+                </td>
+            </tr>"""
+        st.markdown(f"""
+        <table style="width:100%;border-collapse:collapse;font-size:0.97rem;">
+            <thead>
+                <tr style="border-bottom:1px solid var(--card-border);color:var(--text-dim);font-size:0.85rem;">
+                    <th style="padding:0.4rem 0.8rem;text-align:left;font-weight:400;">자산군</th>
+                    <th style="padding:0.4rem 0.8rem;text-align:right;font-weight:400;">평가금액</th>
+                    <th style="padding:0.4rem 0.8rem;text-align:right;font-weight:400;">비중</th>
+                </tr>
+            </thead>
+            <tbody style="border-bottom:1px solid var(--card-border);">
+                {rows_html}
+            </tbody>
+            <tfoot>
+                <tr style="border-top:1px solid var(--card-border);font-weight:700;">
+                    <td style="padding:0.55rem 0.8rem;">합계</td>
+                    <td style="padding:0.55rem 0.8rem;text-align:right;">{fmt_money_full(sum(_values))}</td>
+                    <td style="padding:0.55rem 0.8rem;text-align:right;">100%</td>
+                </tr>
+            </tfoot>
+        </table>
+        """, unsafe_allow_html=True)
 
     # ── 월별 자산 추이 ──
     if not monthly_df.empty:
@@ -1171,7 +1208,7 @@ def render_cashflow(trade_df, nonstock_df):
         pnl = sell_row["실현손익"]
 
         후속매수 = trade_sorted[
-            (trade_sorted["거래일자_dt"] > sell_date) &
+            (trade_sorted["거래일자_dt"] >= sell_date) &
             (trade_sorted["운용사"] == sell_account) &
             (trade_sorted["거래구분"] == "매수")
         ].head(5)
