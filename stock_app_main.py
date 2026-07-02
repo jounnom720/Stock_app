@@ -709,8 +709,14 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     tdf_cost = 0
     if not nonstock_df.empty:
         for _, row in nonstock_df.iterrows():
-            eva = float(row.get("평가금액", 0) or 0)
-            pri = float(row.get("원금", 0) or 0)
+            def _to_float(val):
+                try:
+                    v = str(val).strip().replace(",", "")
+                    return float(v) if v and v not in ("-", "") else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+            eva = _to_float(row.get("평가금액", 0))
+            pri = _to_float(row.get("원금", 0))
             유형 = str(row.get("자산군", ""))
             if 유형 in ("TDF", "펀드", "채권"):
                 tdf_eval += eva
@@ -720,7 +726,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     cash_eval = 0
     if not nonstock_df.empty:
         cash_rows = nonstock_df[nonstock_df["자산군"] == "현금성자산"]
-        cash_eval = int(cash_rows["평가금액"].apply(lambda x: float(x or 0)).sum())
+        cash_eval = int(cash_rows["평가금액"].apply(lambda x: float(str(x).strip().replace(',','')) if str(x).strip() not in ('', '-') else 0.0).sum())
 
     # 비주식 전체 (TDF + 현금)
     nonstock_eval = tdf_eval + cash_eval
@@ -781,7 +787,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             (nonstock_df["자산군"] == "현금성자산") &
             (nonstock_df["계좌"].str.contains("신한", na=False))
         ]
-        irp_cash_eval = int(irp_cash_rows["평가금액"].apply(lambda x: float(x or 0)).sum())
+        irp_cash_eval = int(irp_cash_rows["평가금액"].apply(lambda x: float(str(x).strip().replace(',','')) if str(x).strip() not in ('', '-') else 0.0).sum())
     irp_total = irp_stock_eval + irp_tdf_eval + irp_cash_eval
     irp_cost  = irp_stock_cost + tdf_cost + irp_cash_eval
     irp_pnl   = irp_total - irp_cost
@@ -796,7 +802,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             (nonstock_df["자산군"] == "현금성자산") &
             (nonstock_df["계좌"].str.contains("미래에셋", na=False))
         ]
-        mira_cash = int(mira_cash_rows["평가금액"].apply(lambda x: float(x or 0)).sum())
+        mira_cash = int(mira_cash_rows["평가금액"].apply(lambda x: float(str(x).strip().replace(',','')) if str(x).strip() not in ('', '-') else 0.0).sum())
     mira_total = mira_eval + mira_cash
     mira_cost_total = mira_cost + mira_cash
     mira_pnl  = mira_total - mira_cost_total
