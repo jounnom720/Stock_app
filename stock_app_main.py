@@ -506,19 +506,6 @@ st.markdown("""
 .acct-row-sub   { color: var(--text-dim2); font-size: 0.88rem; }
 .acct-row-val   { font-weight: 600; }
 
-/* ── 계좌 카드: 2열 정보 그리드 (빈 공간 방지) ── */
-.acct-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.5rem 1rem;
-    margin-top: 0.75rem;
-    padding-top: 0.6rem;
-    border-top: 1px solid var(--card-border);
-}
-.acct-grid-item { display: flex; justify-content: space-between; font-size: 0.95rem; }
-.acct-grid-label { color: var(--text-dim); }
-.acct-grid-val { font-weight: 600; }
-
 /* ── 매도 이벤트 카드 (자금흐름 타임라인) ── */
 .sell-event-card { max-width: 560px; }
 .sell-event-header {
@@ -664,7 +651,7 @@ def main():
     # 탭4: 현금흐름 (거래이력 기반 자동 계산)
     # ══════════════════════════════════════════════
     with tab4:
-        render_cashflow(trade_df, nonstock_df)
+        render_cashflow(trade_df)
 
     # ══════════════════════════════════════════════
     # 탭5: 데이터 관리
@@ -763,7 +750,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
         <div class="hero-label">총 투자원금 {fmt_money_full(total_cost)} → 통합 평가금액</div>
         <div class="hero-row">
             <div class="hero-value">{fmt_money_full(total_eval)}</div>
-            <div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money(total_pnl)} ({fmt_pct(total_pct)})</div>
+            <div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money_full(total_pnl)} ({fmt_pct(total_pct)})</div>
         </div>
         <div class="hero-bar">
             <div style="width:{stock_pct_w:.1f}%;background:#534AB7"></div>
@@ -1191,7 +1178,7 @@ def render_trades(trade_df):
 # ============================================================
 # 탭4: 현금흐름 (거래이력 기반 자동 계산 — 별도 시트 없음)
 # ============================================================
-def render_cashflow(trade_df, nonstock_df):
+def render_cashflow(trade_df):
     st.markdown('<div class="section-title">자금흐름 추적</div>', unsafe_allow_html=True)
     st.caption("💡 거래이력 시트만으로 자동 계산됩니다. 매도 한 건이 발생하면 그 이후 같은 계좌에서 일어난 매수 내역을 시간순으로 보여줍니다.")
     st.caption("⚠ 참고용입니다. 매도금이 정확히 어느 매수에 쓰였는지는 계좌 잔액이 섞이기 때문에 100% 단정할 수 없고, 시간 순서로 정황만 보여줍니다.")
@@ -1219,7 +1206,7 @@ def render_cashflow(trade_df, nonstock_df):
         st.markdown(f"""
         <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
             <div class="metric-label">총 실현손익</div>
-            <div class="metric-value" style="color:{color_pnl(total_realized)}">{fmt_money(total_realized)}</div>
+            <div class="metric-value" style="color:{color_pnl(total_realized)}">{fmt_money_full(total_realized)}</div>
         </div>""", unsafe_allow_html=True)
     with r2:
         st.markdown(f"""
@@ -1262,51 +1249,23 @@ def render_cashflow(trade_df, nonstock_df):
     )
 
     # ── 통합 자금흐름 타임라인 (주식 매도 + TDF 환매 통합) ──
-    st.markdown('<div class="section-title">통합 자금흐름 타임라인</div>', unsafe_allow_html=True)
-    st.caption("📌 주식/ETF 매도와 TDF 환매를 날짜순으로 통합해 보여줍니다. 각 이벤트 이후 같은 계좌에서 발생한 매수·입금 내역을 시간순으로 표시합니다.")
-    st.caption("⚠ 참고용입니다. 자금 흐름의 정황만 보여주며 100% 단정할 수 없습니다.")
+    st.markdown('<div class="section-title">매도 이후 자금 사용 타임라인</div>', unsafe_allow_html=True)
+    st.caption("📌 매도 건 아래에 그 이후 같은 계좌에서 발생한 매수 내역을 표시합니다. 매도금이 그대로 쓰였다는 뜻이 아니라 시간 순서상 정황입니다.")
 
     trade_sorted = trade_df.copy()
     trade_sorted["거래일자_dt"] = pd.to_datetime(trade_sorted["거래일자"], errors="coerce")
     trade_sorted = trade_sorted.sort_values("거래일자_dt")
 
-    # ── 이벤트 목록 구성: 주식/ETF 매도 ──
+    # ── 이벤트 목록 구성: 주식/ETF 매도만 ──
     events = []
     for _, row in realized_df.iterrows():
         events.append({
             "날짜": row["거래일자"],
             "계좌": row["계좌"],
-            "유형": "stock_sell",
             "제목": f"{row['종목명']} 매도",
             "금액": row["매도금액"],
             "손익": row["실현손익"],
-            "비고": "",
         })
-
-    # ── 이벤트 목록 구성: TDF 환매 (비주식자산 시트의 비고에 '매도' 포함 행) ──
-    if not nonstock_df.empty:
-        tdf_rows = nonstock_df[
-            (nonstock_df["자산군"].isin(["TDF", "펀드"])) &
-            (nonstock_df["비고"].notna()) &
-            (nonstock_df["비고"].str.contains("매도|환매|해지", na=False))
-        ].copy()
-        for _, row in tdf_rows.iterrows():
-            try:
-                날짜 = pd.to_datetime(row.get("반영일자", ""), errors="coerce")
-                if pd.isna(날짜):
-                    continue
-                금액 = float(str(row.get("평가금액", 0) or 0).replace(",", "") or 0)
-                events.append({
-                    "날짜": 날짜,
-                    "계좌": str(row.get("계좌", "")),
-                    "유형": "tdf_sell",
-                    "제목": f"{row.get('상품명', 'TDF')} 환매",
-                    "금액": 금액,
-                    "손익": None,
-                    "비고": str(row.get("비고", "")),
-                })
-            except Exception:
-                continue
 
     # 날짜 내림차순 정렬
     events = sorted(events, key=lambda x: x["날짜"], reverse=True)
@@ -1316,42 +1275,16 @@ def render_cashflow(trade_df, nonstock_df):
         ev_account = ev["계좌"]
         ev_amount = ev["금액"]
         pnl = ev["손익"]
-        is_tdf = ev["유형"] == "tdf_sell"
 
-        # 이후 같은 계좌 매수 내역 (거래이력 시트)
+        # 매도일 이후 같은 계좌의 매수 내역
         후속매수 = trade_sorted[
             (trade_sorted["거래일자_dt"] >= ev_date) &
             (trade_sorted["운용사"] == ev_account) &
             (trade_sorted["거래구분"] == "매수")
         ].head(5)
 
-        # TDF 이후엔 현금성자산 입금도 후속 흐름으로 표시
-        후속현금_html = ""
-        if is_tdf and not nonstock_df.empty:
-            try:
-                ev_date_ts = pd.Timestamp(ev_date)
-                후속현금 = nonstock_df[
-                    (nonstock_df["자산군"] == "현금성자산") &
-                    (pd.to_datetime(nonstock_df["반영일자"], errors="coerce") >= ev_date_ts)
-                ].copy()
-                후속현금["반영일자_dt"] = pd.to_datetime(후속현금["반영일자"], errors="coerce")
-                후속현금 = 후속현금.sort_values("반영일자_dt").head(3)
-                items = []
-                for _, cr in 후속현금.iterrows():
-                    amt = float(str(cr.get("평가금액", 0) or 0).replace(",", "") or 0)
-                    d = cr["반영일자_dt"].strftime("%Y-%m-%d") if pd.notna(cr["반영일자_dt"]) else "-"
-                    note = str(cr.get("비고", ""))
-                    note_str = f" · {note}" if note else ""
-                    items.append(
-                        f'<div class="sell-follow-item">💰 {d} · {cr.get("상품명","현금성자산")} '
-                        f'{fmt_money(amt)} 입금{note_str}</div>'
-                    )
-                후속현금_html = "".join(items)
-            except Exception:
-                pass
-
-        if 후속매수.empty and not 후속현금_html:
-            buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 매수·입금 내역 없음</div>'
+        if 후속매수.empty:
+            buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 매수 내역 없음 (예수금으로 남아있을 가능성)</div>'
         else:
             items = []
             for _, buy in 후속매수.iterrows():
@@ -1360,23 +1293,16 @@ def render_cashflow(trade_df, nonstock_df):
                     f'<div class="sell-follow-item">↳ {buy["거래일자_dt"].strftime("%Y-%m-%d")} · '
                     f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
                 )
-            buy_html = 후속현금_html + "".join(items)
+            buy_html = "".join(items)
 
-        # 배지 및 라벨
         badge_class = "badge-irp" if "신한" in ev_account else "badge-mira"
-        type_tag = '<span style="font-size:0.8rem;color:var(--text-dim2);margin-left:4px;">[TDF]</span>' if is_tdf else ""
-        pnl_html = ""
-        if pnl is not None:
-            pnl_html = f'<span class="sell-event-pnl" style="color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</span>'
-        elif ev["비고"]:
-            pnl_html = f'<span class="sell-event-pnl" style="color:var(--text-dim2)">{ev["비고"]}</span>'
+        pnl_html = f'<span class="sell-event-pnl" style="color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</span>'
 
         st.markdown(
             '<div class="acct-card sell-event-card">'
             '<div class="sell-event-header">'
             f'<span class="acct-badge {badge_class}">{ev_account}</span>'
             f'<span class="sell-event-name">{ev["제목"]}</span>'
-            f'{type_tag}'
             f'<span class="sell-event-date">{ev_date.strftime("%Y-%m-%d")}</span>'
             '<span class="sell-event-spacer"></span>'
             f'<span class="sell-event-amount">{fmt_money(ev_amount)} 회수</span>'
@@ -1388,27 +1314,16 @@ def render_cashflow(trade_df, nonstock_df):
         )
 
     if not events:
-        st.info("매도·환매 내역이 없습니다.")
+        st.info("매도 내역이 없습니다.")
     else:
         최근표시건수 = 3
         for i in range(min(최근표시건수, len(events))):
             _render_event_block(events[i])
 
         if len(events) > 최근표시건수:
-            with st.expander(f"이전 이벤트 {len(events) - 최근표시건수}건 더 보기", expanded=False):
+            with st.expander(f"이전 매도 건 {len(events) - 최근표시건수}건 더 보기", expanded=False):
                 for i in range(최근표시건수, len(events)):
                     _render_event_block(events[i])
-
-    # ── TDF/비주식자산 변동 전체 내역 (참고용) ──
-    if not nonstock_df.empty:
-        cash_notes = nonstock_df[nonstock_df["비고"].notna() & (nonstock_df["비고"] != "")]
-        if not cash_notes.empty:
-            with st.expander("📁 TDF/비주식자산 변동 내역 (참고용)", expanded=False):
-                st.caption("비주식자산 시트 전체 변동 내역입니다. 위 타임라인과는 별개로 원본 기록을 확인할 수 있습니다.")
-                st.dataframe(
-                    cash_notes[["계좌", "자산군", "상품명", "반영일자", "비고"]],
-                    use_container_width=True, hide_index=True,
-                )
 
 
 # ============================================================
