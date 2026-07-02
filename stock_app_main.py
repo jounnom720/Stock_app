@@ -1070,26 +1070,38 @@ def render_holdings(holdings_df, prices):
             st.markdown('<div class="section-title">종목별 보유 비중</div>', unsafe_allow_html=True)
             donut_labels = display_df["종목명"].tolist()
             donut_values = display_df["평가금액"].tolist()
-            # 종목 유형별 색상 팔레트
             palette = [
-                "#534AB7", "#7b5ea7", "#1976d2", "#0288d1",
-                "#f57c00", "#e65100", "#388e3c", "#1b5e20",
-                "#c62828", "#ad1457",
+                "#534AB7", "#1976d2", "#f57c00", "#388e3c",
+                "#c62828", "#0288d1", "#7b5ea7", "#e65100",
+                "#1b5e20", "#ad1457",
             ]
             donut_colors = [palette[i % len(palette)] for i in range(len(donut_labels))]
+            total_val = sum(donut_values) or 1
+
             fig_donut = go.Figure(go.Pie(
                 labels=donut_labels,
                 values=donut_values,
                 hole=0.52,
-                textinfo="label+percent",
+                textinfo="percent",          # 슬라이스 안에는 %만 표시
+                textposition="inside",
                 marker_colors=donut_colors,
-                textfont=dict(size=13),
+                textfont=dict(size=12),
+                insidetextorientation="horizontal",
+                # 비중 5% 미만 슬라이스는 텍스트 숨김 (겹침 방지)
+                texttemplate="%{percent:.1%}" ,
+                pull=[0.03 if v / total_val < 0.06 else 0 for v in donut_values],
             ))
             fig_donut.update_layout(
-                height=360,
+                height=380,
                 margin=dict(t=10, b=10, l=10, r=10),
-                showlegend=False,
-                font=dict(size=13),
+                showlegend=True,
+                legend=dict(
+                    orientation="v",
+                    x=1.01, y=0.5,
+                    font=dict(size=12),
+                    itemsizing="constant",
+                ),
+                font=dict(size=12),
             )
             st.plotly_chart(fig_donut, use_container_width=True)
 
@@ -1097,6 +1109,13 @@ def render_holdings(holdings_df, prices):
             st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
             chart_df = display_df.sort_values("수익률")
             colors = ["#e0635e" if v >= 0 else "#5b9bd8" for v in chart_df["수익률"]]
+
+            # x축 범위: 최대/최소값 기준 20% 여유 확보 (% 텍스트 잘림 방지)
+            max_v = max(chart_df["수익률"].max(), 0)
+            min_v = min(chart_df["수익률"].min(), 0)
+            x_range = [min_v * 1.35 if min_v < 0 else -5,
+                       max_v * 1.35 if max_v > 0 else 5]
+
             fig = go.Figure(go.Bar(
                 x=chart_df["수익률"],
                 y=chart_df["종목명"],
@@ -1104,14 +1123,19 @@ def render_holdings(holdings_df, prices):
                 marker_color=colors,
                 text=[fmt_pct(v) for v in chart_df["수익률"]],
                 textposition="outside",
+                cliponaxis=False,           # 축 범위 밖 텍스트 잘림 방지
             ))
             fig.update_layout(
-                height=360,
-                margin=dict(t=10, b=10, l=10, r=90),
-                xaxis_title="수익률(%)",
-                xaxis=dict(zeroline=True, tickfont=dict(size=13)),
-                yaxis=dict(tickfont=dict(size=13)),
-                font=dict(size=13),
+                height=max(320, len(chart_df) * 44),
+                margin=dict(t=10, b=30, l=10, r=10),
+                xaxis=dict(
+                    title="수익률(%)",
+                    range=x_range,
+                    zeroline=True,
+                    tickfont=dict(size=12),
+                ),
+                yaxis=dict(tickfont=dict(size=12)),
+                font=dict(size=12),
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -1290,7 +1314,7 @@ def render_cashflow(trade_df):
         ].head(5)
 
         if 후속매수.empty:
-            buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 매수 내역 없음 (예수금으로 남아있을 가능성)</div>'
+            buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 추가 매수 없음 · 매도금은 예수금에 합산 보관 중</div>'
         else:
             items = []
             for _, buy in 후속매수.iterrows():
