@@ -1103,6 +1103,17 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
     else:
         display_df = holdings_df
 
+    # ── 동일 종목명이 여러 계좌에 걸쳐 있을 때 구분용 표시명 생성 (차트 라벨 겹침 방지) ──
+    def _acct_short(acct):
+        return "IRP" if "신한" in str(acct) else "미래에셋" if "미래에셋" in str(acct) else str(acct)
+
+    display_df = display_df.copy()
+    _name_counts = display_df["종목명"].value_counts()
+    display_df["표시명"] = display_df.apply(
+        lambda r: f"{r['종목명']}({_acct_short(r['계좌'])})" if _name_counts[r["종목명"]] > 1 else r["종목명"],
+        axis=1,
+    )
+
     # ── 필터 적용된 보유종목 합계 (계좌 필터 반영) ──
     filt_eval = int(display_df["평가금액"].sum()) if not display_df.empty else 0
     filt_cost = int(display_df["매입금액"].sum()) if not display_df.empty else 0
@@ -1236,7 +1247,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
         with ch1:
             st.markdown('<div class="section-title">종목별 보유 비중</div>', unsafe_allow_html=True)
-            donut_labels = display_df["종목명"].tolist()
+            donut_labels = display_df["표시명"].tolist()
             donut_values = display_df["평가금액"].tolist()
             palette = [
                 "#534AB7", "#1976d2", "#f57c00", "#388e3c",
@@ -1286,7 +1297,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
             fig = go.Figure(go.Bar(
                 x=chart_df["수익률"],
-                y=chart_df["종목명"],
+                y=chart_df["표시명"],
                 orientation="h",
                 marker_color=colors,
                 text=[fmt_pct(v) for v in chart_df["수익률"]],
