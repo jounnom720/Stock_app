@@ -41,6 +41,7 @@ ASSET_MASTER = {
     "487240": {"name": "KODEX AI전력핵심설비",  "ticker": "487240.KS", "type": "ETF",  "market": "KS"},
     "229200": {"name": "KODEX 코스닥150",     "ticker": "229200.KS", "type": "ETF",  "market": "KS"},
     "0148J0": {"name": "TIGER 코리아휴머노이드로봇산업", "ticker": "148J0.KS", "type": "ETF", "market": "KS"},
+    "292150": {"name": "TIGER 코리아TOP10",     "ticker": "292150.KS", "type": "ETF",  "market": "KS"},
     "005930": {"name": "삼성전자",            "ticker": "005930.KS", "type": "주식", "market": "KS"},
     "000660": {"name": "SK하이닉스",          "ticker": "000660.KS", "type": "주식", "market": "KS"},
     "278470": {"name": "에이피알",            "ticker": "278470.KS", "type": "주식", "market": "KS"},
@@ -904,9 +905,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     mira_pnl  = mira_total - mira_cost_total
     mira_pct  = mira_pnl / mira_cost_total * 100 if mira_cost_total else 0
 
-    ca, cb = st.columns(2)
-    with ca:
-        st.markdown(f"""
+    irp_card_html = f"""
         <div class="acct-card">
             <span class="acct-badge badge-irp">신한은행 IRP · ETF·TDF</span>
             <div class="acct-main-row">
@@ -931,10 +930,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 <span class="acct-row-label acct-row-sub">└ 현금</span>
                 <span class="acct-row-val">{fmt_money_full(irp_cash_eval)}</span>
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>"""
 
-    with cb:
-        st.markdown(f"""
+    mira_card_html = f"""
         <div class="acct-card">
             <span class="acct-badge badge-mira">미래에셋증권 · 주식</span>
             <div class="acct-main-row">
@@ -955,7 +953,16 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 <span class="acct-row-label acct-row-sub">└ 예수금</span>
                 <span class="acct-row-val">{fmt_money_full(mira_cash)}</span>
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>"""
+
+    # 평가금액이 큰 계좌를 왼쪽에 배치
+    cards_in_order = [mira_card_html, irp_card_html] if mira_total >= irp_total else [irp_card_html, mira_card_html]
+
+    ca, cb = st.columns(2)
+    with ca:
+        st.markdown(cards_in_order[0], unsafe_allow_html=True)
+    with cb:
+        st.markdown(cards_in_order[1], unsafe_allow_html=True)
 
     # ── 자산 구성 (도넛 + 표 병행) ──
     st.markdown('<div class="section-title">자산 구성</div>', unsafe_allow_html=True)
@@ -1249,10 +1256,11 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
             st.markdown('<div class="section-title">종목별 보유 비중</div>', unsafe_allow_html=True)
             donut_labels = display_df["표시명"].tolist()
             donut_values = display_df["평가금액"].tolist()
+            # 색상군(파랑/빨강/주황/초록/보라 등)이 최대한 겹치지 않도록 배치한 12색 팔레트
             palette = [
-                "#534AB7", "#1976d2", "#f57c00", "#388e3c",
-                "#c62828", "#0288d1", "#7b5ea7", "#e65100",
-                "#1b5e20", "#ad1457",
+                "#4C6FFF", "#FF6B6B", "#FFB84C", "#2EC4B6",
+                "#9B5DE5", "#F15BB5", "#00BBF9", "#43AA8B",
+                "#E76F51", "#8338EC", "#06D6A0", "#FEE440",
             ]
             donut_colors = [palette[i % len(palette)] for i in range(len(donut_labels))]
             total_val = sum(donut_values) or 1
@@ -1266,8 +1274,8 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 marker_colors=donut_colors,
                 textfont=dict(size=12),
                 insidetextorientation="horizontal",
-                # 비중 5% 미만 슬라이스는 텍스트 숨김 (겹침 방지)
-                texttemplate="%{percent:.1%}" ,
+                # 비중 3% 미만 슬라이스는 텍스트를 숨겨 겹침 방지 (범례로 확인 가능)
+                texttemplate=["%{percent:.1%}" if v / total_val >= 0.03 else "" for v in donut_values],
                 pull=[0.03 if v / total_val < 0.06 else 0 for v in donut_values],
             ))
             fig_donut.update_layout(
