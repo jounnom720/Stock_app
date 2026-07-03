@@ -639,7 +639,7 @@ def main():
     # 탭2: 보유 종목 상세
     # ══════════════════════════════════════════════
     with tab2:
-        render_holdings(holdings_df, prices)
+        render_holdings(holdings_df, prices, nonstock_df)
 
     # ══════════════════════════════════════════════
     # 탭3: 거래이력
@@ -695,11 +695,9 @@ def render_market_indices():
     st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
-def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df, prices):
-
-    render_market_indices()
-
-    # 자산 합산
+def calc_asset_summary(holdings_df, nonstock_df):
+    """전체 자산(주식/ETF + TDF/펀드 + 현금성자산) 합산 요약을 계산.
+    render_dashboard, render_holdings 등 여러 탭에서 공통으로 사용."""
     # 1) 주식/ETF 평가금액
     stock_eval  = int(holdings_df["평가금액"].sum()) if not holdings_df.empty else 0
     stock_cost  = int(holdings_df["매입금액"].sum()) if not holdings_df.empty else 0
@@ -743,6 +741,25 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     tdf_pnl = tdf_eval - tdf_cost
     tdf_pct = tdf_pnl / tdf_cost * 100 if tdf_cost else 0
     cash_pct_of_total = cash_eval / total_eval * 100 if total_eval else 0
+
+    return {
+        "stock_eval": stock_eval, "stock_cost": stock_cost, "stock_pnl": stock_pnl, "stock_pct": stock_pct,
+        "tdf_eval": tdf_eval, "tdf_cost": tdf_cost, "tdf_pnl": tdf_pnl, "tdf_pct": tdf_pct,
+        "cash_eval": cash_eval, "cash_pct_of_total": cash_pct_of_total,
+        "nonstock_eval": nonstock_eval,
+        "total_eval": total_eval, "total_cost": total_cost, "total_pnl": total_pnl, "total_pct": total_pct,
+    }
+
+
+def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df, prices):
+
+    render_market_indices()
+
+    s = calc_asset_summary(holdings_df, nonstock_df)
+    stock_eval, stock_cost, stock_pnl, stock_pct = s["stock_eval"], s["stock_cost"], s["stock_pnl"], s["stock_pct"]
+    tdf_eval, tdf_cost, tdf_pnl, tdf_pct = s["tdf_eval"], s["tdf_cost"], s["tdf_pnl"], s["tdf_pct"]
+    cash_eval, cash_pct_of_total = s["cash_eval"], s["cash_pct_of_total"]
+    total_eval, total_cost, total_pnl, total_pct = s["total_eval"], s["total_cost"], s["total_pnl"], s["total_pct"]
 
     # ── 히어로 카드: 원금 → 평가금액 → 손익 한눈에 + 비중 바 ──
     st.markdown('<div class="section-title">통합 자산 현황</div>', unsafe_allow_html=True)
@@ -971,12 +988,29 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
 # ============================================================
 # 탭2: 보유 종목 상세
 # ============================================================
-def render_holdings(holdings_df, prices):
+def render_holdings(holdings_df, prices, nonstock_df=None):
     st.markdown('<div class="section-title">보유 종목 상세</div>', unsafe_allow_html=True)
 
     if holdings_df.empty:
         st.info("보유 종목이 없습니다.")
         return
+
+    # ── 전체 자산총액 요약 (주식/ETF + TDF/펀드 + 현금성자산) ──
+    if nonstock_df is not None:
+        s = calc_asset_summary(holdings_df, nonstock_df)
+        stock_pct_w = s["stock_eval"] / s["total_eval"] * 100 if s["total_eval"] else 0
+        st.markdown(f"""
+        <div class="hero-card">
+            <div class="hero-label">나의 전체 자산총액 (주식/ETF + TDF/펀드 + 현금성자산)</div>
+            <div class="hero-row">
+                <div class="hero-value">{fmt_money_full(s['total_eval'])}</div>
+                <div class="hero-pnl" style="color:{color_pnl(s['total_pnl'])}">{fmt_money_full(s['total_pnl'])} ({fmt_pct(s['total_pct'])})</div>
+            </div>
+            <div class="hero-legend">
+                <span><span class="hero-dot" style="background:#534AB7"></span>이 화면의 주식/ETF 평가금액 {fmt_money_full(s['stock_eval'])} (전체 자산의 {stock_pct_w:.0f}%) · {fmt_pct(s['stock_pct'])}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     시세반영수 = holdings_df["시세반영"].sum() if "시세반영" in holdings_df.columns else 0
     전체수 = len(holdings_df)
@@ -989,6 +1023,31 @@ def render_holdings(holdings_df, prices):
         display_df = holdings_df[holdings_df["계좌"] == 선택계좌]
     else:
         display_df = holdings_df
+
+    # ── 필터 적용된 보유종목 합계 (계좌 필터 반영) ──
+    filt_eval = int(display_df["평가금액"].sum()) if not display_df.empty else 0
+    filt_cost = int(display_df["매입금액"].sum()) if not display_df.empty else 0
+    filt_pnl = filt_eval - filt_cost
+    filt_pct = filt_pnl / filt_cost * 100 if filt_cost else 0
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+            <div class="metric-label">보유종목 투자원금 ({선택계좌})</div>
+            <div class="metric-value">{fmt_money_full(filt_cost)}</div>
+        </div>""", unsafe_allow_html=True)
+    with m2:
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+            <div class="metric-label">보유종목 평가금액 ({선택계좌})</div>
+            <div class="metric-value">{fmt_money_full(filt_eval)}</div>
+        </div>""", unsafe_allow_html=True)
+    with m3:
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+            <div class="metric-label">평가손익 ({선택계좌})</div>
+            <div class="metric-value" style="color:{color_pnl(filt_pnl)}">{fmt_money_full(filt_pnl)} ({fmt_pct(filt_pct)})</div>
+        </div>""", unsafe_allow_html=True)
 
     # ETF 먼저, 그 다음 주식 — 각 그룹 내에서는 투자원금(매입금액) 큰 순서
     def _type_rank(code):
