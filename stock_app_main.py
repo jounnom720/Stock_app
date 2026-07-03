@@ -228,24 +228,25 @@ def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
         account = str(row.get("운용사", "")).strip()
         구분 = str(row.get("거래구분", "")).strip()
 
-        if code not in holdings:
-            holdings[code] = {"종목코드": code, "종목명": name, "계좌": account,
-                               "보유수량": 0, "매수금액합계": 0.0}
+        key = (account, code)  # 계좌+종목코드 단위로 집계 (동일 종목이 여러 계좌에 있을 수 있음)
+        if key not in holdings:
+            holdings[key] = {"종목코드": code, "종목명": name, "계좌": account,
+                              "보유수량": 0, "매수금액합계": 0.0}
         if 구분 == "매수":
-            holdings[code]["보유수량"] += qty
-            holdings[code]["매수금액합계"] += qty * price
+            holdings[key]["보유수량"] += qty
+            holdings[key]["매수금액합계"] += qty * price
         elif 구분 == "매도":
-            if holdings[code]["보유수량"] > 0:
-                avg = holdings[code]["매수금액합계"] / holdings[code]["보유수량"]
-                holdings[code]["보유수량"] = max(0, holdings[code]["보유수량"] - qty)
-                holdings[code]["매수금액합계"] = avg * holdings[code]["보유수량"]
+            if holdings[key]["보유수량"] > 0:
+                avg = holdings[key]["매수금액합계"] / holdings[key]["보유수량"]
+                holdings[key]["보유수량"] = max(0, holdings[key]["보유수량"] - qty)
+                holdings[key]["매수금액합계"] = avg * holdings[key]["보유수량"]
 
     rows = []
-    for code, h in holdings.items():
+    for key, h in holdings.items():
         if h["보유수량"] > 0:
             avg = h["매수금액합계"] / h["보유수량"] if h["보유수량"] else 0
             rows.append({
-                "종목코드": code,
+                "종목코드": h["종목코드"],
                 "종목명": h["종목명"],
                 "계좌": h["계좌"],
                 "보유수량": h["보유수량"],
@@ -280,16 +281,17 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
         price = float(row["거래단가"])
         account = row["운용사"]
         date = row["거래일자"]
+        key = (str(account).strip(), code)  # 계좌+종목코드 단위로 평균단가 분리 관리
 
         if row["거래구분"] == "매수":
-            prev_qty = qty_held.get(code, 0)
-            prev_avg = avg_cost.get(code, 0.0)
+            prev_qty = qty_held.get(key, 0)
+            prev_avg = avg_cost.get(key, 0.0)
             new_qty = prev_qty + qty
             new_avg = (prev_avg * prev_qty + price * qty) / new_qty if new_qty else price
-            qty_held[code] = new_qty
-            avg_cost[code] = new_avg
+            qty_held[key] = new_qty
+            avg_cost[key] = new_avg
         elif row["거래구분"] == "매도":
-            prev_avg = avg_cost.get(code, price)
+            prev_avg = avg_cost.get(key, price)
             매도금액 = qty * price
             매입금액 = qty * prev_avg
             실현손익 = 매도금액 - 매입금액
@@ -299,7 +301,7 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
                 "매도금액": round(매도금액), "매입금액": round(매입금액),
                 "실현손익": round(실현손익),
             })
-            qty_held[code] = max(0, qty_held.get(code, 0) - qty)
+            qty_held[key] = max(0, qty_held.get(key, 0) - qty)
 
     return pd.DataFrame(realized_rows)
 
@@ -567,6 +569,83 @@ st.markdown("""
     font-size: 1.65rem;
     font-weight: 700;
     line-height: 1.2;
+}
+
+/* ── 보유종목 카드형 리스트 (토스 스타일 참고) ── */
+.holding-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 0.6rem;
+}
+.holding-top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+.holding-name-block {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+.holding-type-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.12rem 0.5rem;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.08);
+    color: var(--text-dim);
+}
+.holding-acct-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.12rem 0.5rem;
+    border-radius: 6px;
+}
+.holding-acct-irp { background: rgba(59,130,246,0.16); color: #7fb2f5; }
+.holding-acct-mira { background: rgba(29,158,117,0.16); color: #4ecb9a; }
+.holding-name {
+    font-size: 1.08rem;
+    font-weight: 700;
+}
+.holding-pct-badge {
+    font-size: 1.15rem;
+    font-weight: 700;
+    text-align: right;
+}
+.holding-main-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-top: 0.5rem;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+.holding-eval {
+    font-size: 1.4rem;
+    font-weight: 700;
+}
+.holding-pnl {
+    font-size: 0.98rem;
+    font-weight: 600;
+}
+.holding-sub {
+    margin-top: 0.55rem;
+    padding-top: 0.55rem;
+    border-top: 1px solid var(--card-border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.9rem;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+}
+.holding-sub span b {
+    color: var(--text-dim2);
+    font-weight: 500;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1096,26 +1175,56 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
         return f"color: {color}; font-weight: 600"
 
-    show_cols = ["구분", "종목명", "계좌", "수량", "평단", "현재가", "투자원금", "평가금액", "손익", "수익률"]
-    styled_table = table_df[show_cols].style.map(_style_holding_pnl, subset=["손익", "수익률"])
+    보기방식 = st.radio("보기 방식", ["카드형", "표"], horizontal=True, key="holding_view_mode")
 
-    col_config = {
-        "수량": st.column_config.NumberColumn("수량", format="localized"),
-        "평단": st.column_config.NumberColumn("평단", format="localized"),
-        "현재가": st.column_config.NumberColumn("현재가", format="localized"),
-        "투자원금": st.column_config.NumberColumn("투자원금", format="localized"),
-        "평가금액": st.column_config.NumberColumn("평가금액", format="localized"),
-        "손익": st.column_config.NumberColumn("손익", format="localized"),
-        "수익률": st.column_config.NumberColumn("수익률", format="%.2f%%"),
-    }
+    if 보기방식 == "카드형":
+        for _, r in table_df.iterrows():
+            acct_class = "holding-acct-irp" if r["계좌"] == "IRP" else "holding-acct-mira"
+            현재가_str = f"{r['현재가']:,}" if r["현재가"] is not None else "-"
+            시세표시 = "" if r["시세반영"] else ' <span style="color:#c9a227">(매입가 기준)</span>'
+            st.markdown(f"""
+            <div class="holding-card">
+                <div class="holding-top-row">
+                    <div class="holding-name-block">
+                        <span class="holding-type-badge">{r['구분']}</span>
+                        <span class="holding-acct-badge {acct_class}">{r['계좌']}</span>
+                        <span class="holding-name">{r['종목명']}</span>
+                    </div>
+                    <div class="holding-pct-badge" style="color:{color_pnl(r['수익률'])}">{fmt_pct(r['수익률'])}</div>
+                </div>
+                <div class="holding-main-row">
+                    <div class="holding-eval">{fmt_money_full(r['평가금액'])}</div>
+                    <div class="holding-pnl" style="color:{color_pnl(r['손익'])}">{fmt_money_full(r['손익'])}</div>
+                </div>
+                <div class="holding-sub">
+                    <span><b>현재가</b> {현재가_str}원{시세표시}</span>
+                    <span><b>평단</b> {r['평단']:,}원</span>
+                    <span><b>수량</b> {r['수량']:,}주</span>
+                    <span><b>투자원금</b> {r['투자원금']:,}원</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        show_cols = ["구분", "종목명", "계좌", "수량", "평단", "현재가", "투자원금", "평가금액", "손익", "수익률"]
+        styled_table = table_df[show_cols].style.map(_style_holding_pnl, subset=["손익", "수익률"])
 
-    st.dataframe(
-        styled_table,
-        use_container_width=True,
-        hide_index=True,
-        column_config=col_config,
-        height=min(560, 50 + 45 * len(table_df)),
-    )
+        col_config = {
+            "수량": st.column_config.NumberColumn("수량", format="localized"),
+            "평단": st.column_config.NumberColumn("평단", format="localized"),
+            "현재가": st.column_config.NumberColumn("현재가", format="localized"),
+            "투자원금": st.column_config.NumberColumn("투자원금", format="localized"),
+            "평가금액": st.column_config.NumberColumn("평가금액", format="localized"),
+            "손익": st.column_config.NumberColumn("손익", format="localized"),
+            "수익률": st.column_config.NumberColumn("수익률", format="%.2f%%"),
+        }
+
+        st.dataframe(
+            styled_table,
+            use_container_width=True,
+            hide_index=True,
+            column_config=col_config,
+            height=min(560, 50 + 45 * len(table_df)),
+        )
 
     미반영수 = (~display_df["시세반영"]).sum() if "시세반영" in display_df.columns else 0
     if 미반영수 > 0:
