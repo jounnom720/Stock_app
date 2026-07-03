@@ -1370,99 +1370,82 @@ def render_data_mgmt(nonstock_df, cash_df):
         except (ValueError, TypeError):
             return 0.0
 
+    def _render_nonstock_table(rows, show_pnl=False):
+        """비주식자산 행을 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가."""
+        p = "padding:0.6rem 1rem;"
+        p_r = "padding:0.6rem 1rem;text-align:right;"
+        th_style = "padding:0.45rem 1rem;text-align:left;font-weight:400;color:var(--text-dim);font-size:0.85rem;border-bottom:1px solid var(--card-border);"
+        th_r = "padding:0.45rem 1rem;text-align:right;font-weight:400;color:var(--text-dim);font-size:0.85rem;border-bottom:1px solid var(--card-border);"
+        row_sep = "border-bottom:1px solid rgba(255,255,255,0.05);"
+
+        # 헤더
+        pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
+        html = (
+            "<table style='width:100%;border-collapse:collapse;font-size:0.95rem;'>"
+            "<thead><tr>"
+            f"<th style='{th_style}'>계좌</th>"
+            f"<th style='{th_style}'>상품명</th>"
+            f"<th style='{th_r}'>투자원금</th>"
+            f"<th style='{th_r}'>평가금액</th>"
+            f"{pnl_th}"
+            f"<th style='{th_r}'>반영일자</th>"
+            f"<th style='{th_style}'>비고</th>"
+            "</tr></thead><tbody>"
+        )
+
+        for _, row in rows.iterrows():
+            acct = str(row.get("계좌", "")).strip()
+            name = str(row.get("상품명", "")).strip()
+            cost = _safe_float(row.get("원금", 0))
+            eva  = _safe_float(row.get("평가금액", 0))
+            pnl  = eva - cost
+            date = str(row.get("반영일자", "")).strip()
+            note = str(row.get("비고", "")).strip()
+
+            badge_bg = "#1e3a5f" if "신한" in acct else "#1a3d2b"
+            badge_color = "#90caf9" if "신한" in acct else "#80cfa9"
+            badge_html = (
+                f'<span style="background:{badge_bg};color:{badge_color};'
+                f'font-size:0.75rem;padding:2px 8px;border-radius:4px;'
+                f'margin-right:6px;white-space:nowrap;">{acct}</span>'
+            )
+
+            pnl_color = color_pnl(pnl)
+            pnl_td = (
+                f"<td style='{p_r}color:{pnl_color};font-weight:600;'>"
+                f"{fmt_money_full(pnl)} ({fmt_pct(pnl / cost * 100 if cost else 0)})"
+                f"</td>"
+            ) if show_pnl else ""
+
+            cost_str = fmt_money_full(cost) if cost else "-"
+            eva_str  = fmt_money_full(eva)  if eva  else "-"
+
+            html += (
+                f"<tr style='{row_sep}'>"
+                f"<td style='{p}'>{badge_html}</td>"
+                f"<td style='{p};font-weight:600;'>{name}</td>"
+                f"<td style='{p_r}'>{cost_str}</td>"
+                f"<td style='{p_r};font-weight:600;'>{eva_str}</td>"
+                f"{pnl_td}"
+                f"<td style='{p_r};color:var(--text-dim);font-size:0.88rem;'>{date}</td>"
+                f"<td style='{p};color:var(--text-dim);font-size:0.88rem;'>{note}</td>"
+                "</tr>"
+            )
+
+        html += "</tbody></table>"
+        st.markdown(html, unsafe_allow_html=True)
+
     if not nonstock_df.empty:
         tdf_rows  = nonstock_df[nonstock_df["자산군"] == "TDF"]
         cash_rows = nonstock_df[nonstock_df["자산군"] == "현금성자산"]
 
-        # ── TDF / 펀드 ──
         if not tdf_rows.empty:
             st.markdown('<div class="section-title" style="font-size:1rem;margin-top:1rem;">TDF / 펀드</div>', unsafe_allow_html=True)
-            for _, row in tdf_rows.iterrows():
-                eval_amt = _safe_float(row.get("평가금액", 0))
-                cost_amt = _safe_float(row.get("원금", 0))
-                pnl = eval_amt - cost_amt
-                pnl_pct = (pnl / cost_amt * 100) if cost_amt else 0
-                date_str = str(row.get("반영일자", "")).strip()
-                note_str = str(row.get("비고", "")).strip()
-                acct_str = str(row.get("계좌", "")).strip()
-                name_str = str(row.get("상품명", "")).strip()
-                badge = "badge-irp" if "신한" in acct_str else "badge-mira"
-                pnl_color = color_pnl(pnl)
+            _render_nonstock_table(tdf_rows, show_pnl=True)
 
-                note_html = (
-                    '<div class="acct-row" style="margin-top:0.4rem;">'
-                    '<span class="acct-row-label" style="font-size:0.85rem;">비고</span>'
-                    f'<span style="font-size:0.85rem;color:var(--text-dim);">{note_str}</span>'
-                    '</div>'
-                ) if note_str else ""
-
-                st.markdown(
-                    '<div class="acct-card">'
-                    f'<span class="acct-badge {badge}">{acct_str}</span>'
-                    f'<div style="font-size:1.05rem;font-weight:700;margin:0.5rem 0 0.2rem;">{name_str}</div>'
-                    '<div class="acct-divider"></div>'
-                    '<div class="acct-row">'
-                    '<span class="acct-row-label">투자원금</span>'
-                    f'<span class="acct-row-val">{fmt_money_full(cost_amt)}</span>'
-                    '</div>'
-                    '<div class="acct-row">'
-                    '<span class="acct-row-label">평가금액</span>'
-                    f'<span class="acct-row-val">{fmt_money_full(eval_amt)}</span>'
-                    '</div>'
-                    '<div class="acct-row">'
-                    '<span class="acct-row-label">평가손익</span>'
-                    f'<span class="acct-row-val" style="color:{pnl_color};">'
-                    f'{fmt_money_full(pnl)} ({fmt_pct(pnl_pct)})'
-                    '</span>'
-                    '</div>'
-                    '<div class="acct-divider-light"></div>'
-                    '<div class="acct-row">'
-                    '<span class="acct-row-label acct-row-sub">반영일자</span>'
-                    f'<span style="font-size:0.88rem;color:var(--text-dim);">{date_str}</span>'
-                    '</div>'
-                    f'{note_html}'
-                    '</div>',
-                    unsafe_allow_html=True
-                )
-
-        # ── 현금성자산 ──
         if not cash_rows.empty:
             st.markdown('<div class="section-title" style="font-size:1rem;margin-top:1.5rem;">현금성자산 (예수금 · 대기자금)</div>', unsafe_allow_html=True)
-            cols = st.columns(min(len(cash_rows), 2))
-            for idx, (_, row) in enumerate(cash_rows.iterrows()):
-                eval_amt = _safe_float(row.get("평가금액", 0))
-                date_str = str(row.get("반영일자", "")).strip()
-                note_str = str(row.get("비고", "")).strip()
-                acct_str = str(row.get("계좌", "")).strip()
-                name_str = str(row.get("상품명", "")).strip()
-                badge = "badge-irp" if "신한" in acct_str else "badge-mira"
-
-                note_html = (
-                    '<div class="acct-divider-light"></div>'
-                    '<div class="acct-row" style="margin-top:0.3rem;">'
-                    '<span class="acct-row-label acct-row-sub">비고</span>'
-                    f'<span style="font-size:0.82rem;color:var(--text-dim);word-break:break-all;">{note_str}</span>'
-                    '</div>'
-                ) if note_str else ""
-
-                with cols[idx % len(cols)]:
-                    st.markdown(
-                        '<div class="acct-card">'
-                        f'<span class="acct-badge {badge}">{acct_str}</span>'
-                        f'<div style="font-size:1.05rem;font-weight:700;margin:0.5rem 0 0.2rem;">{name_str}</div>'
-                        '<div class="acct-divider"></div>'
-                        '<div class="acct-row">'
-                        '<span class="acct-row-label">잔액</span>'
-                        f'<span class="acct-row-val" style="font-size:1.2rem;">{fmt_money_full(eval_amt)}</span>'
-                        '</div>'
-                        '<div class="acct-row">'
-                        '<span class="acct-row-label acct-row-sub">반영일자</span>'
-                        f'<span style="font-size:0.88rem;color:var(--text-dim);">{date_str}</span>'
-                        '</div>'
-                        f'{note_html}'
-                        '</div>',
-                        unsafe_allow_html=True
-                    )
+            _render_nonstock_table(cash_rows, show_pnl=False)
     else:
         st.info("비주식자산 데이터 없음")
 
