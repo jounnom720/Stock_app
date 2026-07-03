@@ -740,6 +740,73 @@ st.markdown("""
     color: var(--text-dim2);
     font-weight: 500;
 }
+
+/* ── 데이터 관리 탭 ── */
+.mgmt-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.7rem;
+    margin: 0.9rem 0 1.6rem;
+}
+@media (max-width: 700px) {
+    .mgmt-summary-grid { grid-template-columns: 1fr; }
+}
+.mgmt-summary-item {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 0.85rem 1.05rem;
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+}
+.mgmt-summary-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.05rem;
+    flex-shrink: 0;
+}
+.mgmt-summary-label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 0.15rem;
+}
+.mgmt-summary-value {
+    font-size: 1.18rem;
+    font-weight: 700;
+}
+.mgmt-section-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 1.7rem 0 0.7rem;
+}
+.mgmt-table-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    overflow: hidden;
+}
+.mgmt-warn-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 1.1rem 1.3rem;
+    margin-top: 0.7rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+.mgmt-warn-text { font-size: 0.88rem; color: var(--text-dim); max-width: 480px; }
+.mgmt-warn-text b { color: rgba(255,255,255,0.85); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -941,49 +1008,45 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     cash_pct_w  = cash_eval / total_eval * 100 if total_eval else 0
 
     def _asset_tile(icon, name, stripe, value, pct_w, sub_label, sub_value, pct_val=None):
-        """자산 구성 카드(아이콘 배지 + 좌측 컬러 스트라이프) 1개 생성."""
+        """자산 구성 카드(아이콘 배지 + 좌측 컬러 스트라이프) 1개 생성 (한 줄 문자열로 반환 — 마크다운 코드블록 오인 방지)."""
         if pct_val is None:
             pct_html = f'<span style="color:var(--text-dim2)">{sub_value}</span>'
         else:
             arrow = "▲" if pct_val > 0 else "▼" if pct_val < 0 else "―"
             pct_html = f'<span class="asset-breakdown-pct" style="color:{color_pnl(pct_val)}">{arrow} {fmt_pct(pct_val)}</span>'
-        return f"""
-            <div class="asset-breakdown-item" style="--stripe:{stripe};--tint:{stripe}22;--tint-strong:{stripe}33">
-                <div class="asset-breakdown-head">
-                    <span class="asset-breakdown-name"><span class="asset-breakdown-icon">{icon}</span>{name}</span>
-                    <span class="asset-breakdown-badge">{pct_w:.0f}%</span>
-                </div>
-                <div class="asset-breakdown-value">{fmt_money_full(value)}</div>
-                <div class="asset-breakdown-sub">
-                    <span>{sub_label}</span>
-                    {pct_html}
-                </div>
-                <div class="asset-breakdown-bar"><div style="width:{pct_w:.1f}%;background:{stripe}"></div></div>
-            </div>"""
+        return (
+            f'<div class="asset-breakdown-item" style="--stripe:{stripe};--tint:{stripe}22;--tint-strong:{stripe}33">'
+            f'<div class="asset-breakdown-head">'
+            f'<span class="asset-breakdown-name"><span class="asset-breakdown-icon">{icon}</span>{name}</span>'
+            f'<span class="asset-breakdown-badge">{pct_w:.0f}%</span>'
+            f'</div>'
+            f'<div class="asset-breakdown-value">{fmt_money_full(value)}</div>'
+            f'<div class="asset-breakdown-sub"><span>{sub_label}</span>{pct_html}</div>'
+            f'<div class="asset-breakdown-bar"><div style="width:{pct_w:.1f}%;background:{stripe}"></div></div>'
+            f'</div>'
+        )
 
     stock_tile = _asset_tile("📈", "주식/ETF", "#7C6CF0", stock_eval, stock_pct_w, f"원금 {fmt_money_full(stock_cost)}", "", stock_pct)
     tdf_tile   = _asset_tile("🏦", "TDF/펀드", "#1FBFA0", tdf_eval, tdf_pct_w, f"원금 {fmt_money_full(tdf_cost)}", "", tdf_pct)
     cash_tile  = _asset_tile("💰", "현금성자산", "#6B6F7A", cash_eval, cash_pct_w, "예수금 등", "변동 없음", None)
+    breakdown_grid_html = f'<div class="asset-breakdown-grid">{stock_tile}{tdf_tile}{cash_tile}</div>'
 
-    st.markdown(f"""
-    <div class="hero-card">
-        <div class="hero-label">총 투자원금 {fmt_money_full(total_cost)} → 통합 평가금액</div>
-        <div class="hero-row">
-            <div class="hero-value">{fmt_money_full(total_eval)}</div>
-            <div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money_full(total_pnl)} ({fmt_pct(total_pct)})</div>
-        </div>
-        <div class="hero-bar">
-            <div style="width:{stock_pct_w:.1f}%;background:#7C6CF0"></div>
-            <div style="width:{tdf_pct_w:.1f}%;background:#1FBFA0"></div>
-            <div style="width:{cash_pct_w:.1f}%;background:#6B6F7A"></div>
-        </div>
-        <div class="asset-breakdown-grid">
-            {stock_tile}
-            {tdf_tile}
-            {cash_tile}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    hero_html = (
+        f'<div class="hero-card">'
+        f'<div class="hero-label">총 투자원금 {fmt_money_full(total_cost)} → 통합 평가금액</div>'
+        f'<div class="hero-row">'
+        f'<div class="hero-value">{fmt_money_full(total_eval)}</div>'
+        f'<div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money_full(total_pnl)} ({fmt_pct(total_pct)})</div>'
+        f'</div>'
+        f'<div class="hero-bar">'
+        f'<div style="width:{stock_pct_w:.1f}%;background:#7C6CF0"></div>'
+        f'<div style="width:{tdf_pct_w:.1f}%;background:#1FBFA0"></div>'
+        f'<div style="width:{cash_pct_w:.1f}%;background:#6B6F7A"></div>'
+        f'</div>'
+        f'{breakdown_grid_html}'
+        f'</div>'
+    )
+    st.markdown(hero_html, unsafe_allow_html=True)
 
     # ── 계좌별 현황 ──
     st.markdown('<div class="section-title">계좌별 현황</div>', unsafe_allow_html=True)
@@ -1674,18 +1737,40 @@ def render_data_mgmt(nonstock_df, cash_df):
         except (ValueError, TypeError):
             return 0.0
 
-    def _render_nonstock_table(rows, show_pnl=False):
-        """비주식자산 행을 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가."""
-        p = "padding:0.6rem 1rem;"
-        p_r = "padding:0.6rem 1rem;text-align:right;"
-        th_style = "padding:0.45rem 1rem;text-align:left;font-weight:400;color:var(--text-dim);font-size:0.85rem;border-bottom:1px solid var(--card-border);"
-        th_r = "padding:0.45rem 1rem;text-align:right;font-weight:400;color:var(--text-dim);font-size:0.85rem;border-bottom:1px solid var(--card-border);"
+    tdf_rows  = nonstock_df[nonstock_df["자산군"] == "TDF"] if not nonstock_df.empty else pd.DataFrame()
+    cash_rows = nonstock_df[nonstock_df["자산군"] == "현금성자산"] if not nonstock_df.empty else pd.DataFrame()
+    tdf_total  = sum(_safe_float(r.get("평가금액", 0)) for _, r in tdf_rows.iterrows())
+    cash_total = sum(_safe_float(r.get("평가금액", 0)) for _, r in cash_rows.iterrows())
+
+    # ── 상단 요약 카드 (한눈에 보는 총액) ──
+    summary_html = (
+        '<div class="mgmt-summary-grid">'
+        '<div class="mgmt-summary-item">'
+        '<div class="mgmt-summary-icon" style="background:#1FBFA033;color:#1FBFA0">🏦</div>'
+        '<div><div class="mgmt-summary-label">TDF·펀드 총 평가금액</div>'
+        f'<div class="mgmt-summary-value">{fmt_money_full(tdf_total)}</div></div>'
+        '</div>'
+        '<div class="mgmt-summary-item">'
+        '<div class="mgmt-summary-icon" style="background:#6B6F7A33;color:#c9cbd1">💰</div>'
+        '<div><div class="mgmt-summary-label">현금성자산 총액</div>'
+        f'<div class="mgmt-summary-value">{fmt_money_full(cash_total)}</div></div>'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(summary_html, unsafe_allow_html=True)
+
+    def _render_nonstock_table(rows, show_pnl=False, total_eval=0):
+        """비주식자산 행을 카드로 감싼 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가, 하단에 합계행 표시."""
+        p = "padding:0.65rem 1.1rem;"
+        p_r = "padding:0.65rem 1.1rem;text-align:right;"
+        th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:rgba(255,255,255,0.02);"
+        th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:rgba(255,255,255,0.02);"
         row_sep = "border-bottom:1px solid rgba(255,255,255,0.05);"
 
-        # 헤더
         pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
         html = (
-            "<table style='width:100%;border-collapse:collapse;font-size:0.95rem;'>"
+            '<div class="mgmt-table-card">'
+            "<table style='width:100%;border-collapse:collapse;font-size:0.92rem;'>"
             "<thead><tr>"
             f"<th style='{th_style}'>계좌</th>"
             f"<th style='{th_style}'>상품명</th>"
@@ -1736,25 +1821,39 @@ def render_data_mgmt(nonstock_df, cash_df):
                 "</tr>"
             )
 
-        html += "</tbody></table>"
+        # 합계행 (계좌+상품명+투자원금=3열 라벨, 평가금액 합계 1열, 나머지는 빈칸)
+        trail_colspan = 3 if show_pnl else 2
+        html += (
+            "<tr style='background:rgba(255,255,255,0.03);'>"
+            f"<td colspan='3' style='{p};font-weight:700;color:var(--text-dim);'>합계</td>"
+            f"<td style='{p_r};font-weight:700;'>{fmt_money_full(total_eval)}</td>"
+            f"<td colspan='{trail_colspan}' style='{p};'></td>"
+            "</tr>"
+        )
+        html += "</tbody></table></div>"
         st.markdown(html, unsafe_allow_html=True)
 
     if not nonstock_df.empty:
-        tdf_rows  = nonstock_df[nonstock_df["자산군"] == "TDF"]
-        cash_rows = nonstock_df[nonstock_df["자산군"] == "현금성자산"]
-
         if not tdf_rows.empty:
-            st.markdown('<div class="section-title" style="font-size:1rem;margin-top:1rem;">TDF / 펀드</div>', unsafe_allow_html=True)
-            _render_nonstock_table(tdf_rows, show_pnl=True)
+            st.markdown('<div class="mgmt-section-head">🏦 TDF / 펀드</div>', unsafe_allow_html=True)
+            _render_nonstock_table(tdf_rows, show_pnl=True, total_eval=tdf_total)
 
         if not cash_rows.empty:
-            st.markdown('<div class="section-title" style="font-size:1rem;margin-top:1.5rem;">현금성자산 (예수금 · 대기자금)</div>', unsafe_allow_html=True)
-            _render_nonstock_table(cash_rows, show_pnl=False)
+            st.markdown('<div class="mgmt-section-head">💰 현금성자산 (예수금 · 대기자금)</div>', unsafe_allow_html=True)
+            _render_nonstock_table(cash_rows, show_pnl=False, total_eval=cash_total)
     else:
         st.info("비주식자산 데이터 없음")
 
-    st.markdown('<div class="section-title" style="margin-top:2rem;">캐시 초기화</div>', unsafe_allow_html=True)
-    if st.button("전체 캐시 초기화 (데이터 새로고침)", key="clear_cache_btn"):
+    st.markdown('<div class="mgmt-section-head">🧹 캐시 초기화</div>', unsafe_allow_html=True)
+    warn_html = (
+        '<div class="mgmt-warn-card">'
+        '<div class="mgmt-warn-text">'
+        '<b>실시간 시세와 구글시트 데이터를 모두 지우고 새로 불러옵니다.</b><br>'
+        '숫자가 이상하게 보이거나 방금 구글시트에 입력한 내용이 반영되지 않을 때 눌러주세요.'
+        '</div></div>'
+    )
+    st.markdown(warn_html, unsafe_allow_html=True)
+    if st.button("🔄 전체 캐시 초기화 (데이터 새로고침)", key="clear_cache_btn", use_container_width=False):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.success("캐시가 초기화되었습니다. 페이지를 새로고침하세요.")
