@@ -457,7 +457,7 @@ st.markdown("""
     margin-right: 4px;
 }
 
-/* ── 자산 구성 요약 카드 (주식/ETF·TDF·현금 각각 분리 표시) ── */
+/* ── 자산 구성 요약 카드: 컬러 스트라이프 + 아이콘 배지 (제안 3 확정판) ── */
 .asset-breakdown-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -468,60 +468,85 @@ st.markdown("""
     .asset-breakdown-grid { grid-template-columns: 1fr; }
 }
 .asset-breakdown-item {
-    background: rgba(255,255,255,0.03);
+    position: relative;
+    background: linear-gradient(160deg, var(--tint) 0%, rgba(255,255,255,0.03) 55%);
     border: 1px solid var(--card-border);
-    border-radius: 12px;
-    padding: 0.95rem 1.05rem;
+    border-radius: 14px;
+    padding: 1rem 1.1rem 1rem 1.25rem;
+    overflow: hidden;
+}
+.asset-breakdown-item::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 4px;
+    background: var(--stripe);
 }
 .asset-breakdown-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 0.55rem;
+    margin-bottom: 0.7rem;
 }
 .asset-breakdown-name {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
-    font-size: 0.94rem;
+    gap: 0.5rem;
+    font-size: 0.92rem;
     font-weight: 700;
-    color: rgba(255,255,255,0.85);
+    color: rgba(255,255,255,0.88);
 }
-.asset-breakdown-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
+.asset-breakdown-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    background: var(--tint-strong);
     flex-shrink: 0;
 }
 .asset-breakdown-badge {
-    font-size: 0.76rem;
-    font-weight: 600;
-    padding: 0.1rem 0.5rem;
+    font-size: 0.74rem;
+    font-weight: 700;
+    padding: 0.12rem 0.5rem;
     border-radius: 6px;
-    background: rgba(255,255,255,0.08);
-    color: var(--text-dim);
+    background: var(--tint-strong);
+    color: rgba(255,255,255,0.75);
 }
 .asset-breakdown-value {
-    font-size: 1.5rem;
-    font-weight: 700;
+    font-size: 1.55rem;
+    font-weight: 800;
     line-height: 1.15;
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
 }
 .asset-breakdown-sub {
-    margin-top: 0.4rem;
+    margin-top: 0.45rem;
     display: flex;
     justify-content: space-between;
-    font-size: 0.85rem;
+    align-items: center;
+    font-size: 0.82rem;
     color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+.asset-breakdown-pct {
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
 }
 .asset-breakdown-bar {
-    margin-top: 0.6rem;
-    height: 5px;
+    margin-top: 0.7rem;
+    height: 4px;
     border-radius: 3px;
     background: rgba(255,255,255,0.08);
     overflow: hidden;
 }
 .asset-breakdown-bar > div {
     height: 100%;
+    border-radius: 3px;
 }
 
 /* ── 계좌별 카드 (2개 큰 카드) ── */
@@ -915,6 +940,31 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
     tdf_pct_w   = tdf_eval / total_eval * 100 if total_eval else 0
     cash_pct_w  = cash_eval / total_eval * 100 if total_eval else 0
 
+    def _asset_tile(icon, name, stripe, value, pct_w, sub_label, sub_value, pct_val=None):
+        """자산 구성 카드(아이콘 배지 + 좌측 컬러 스트라이프) 1개 생성."""
+        if pct_val is None:
+            pct_html = f'<span style="color:var(--text-dim2)">{sub_value}</span>'
+        else:
+            arrow = "▲" if pct_val > 0 else "▼" if pct_val < 0 else "―"
+            pct_html = f'<span class="asset-breakdown-pct" style="color:{color_pnl(pct_val)}">{arrow} {fmt_pct(pct_val)}</span>'
+        return f"""
+            <div class="asset-breakdown-item" style="--stripe:{stripe};--tint:{stripe}22;--tint-strong:{stripe}33">
+                <div class="asset-breakdown-head">
+                    <span class="asset-breakdown-name"><span class="asset-breakdown-icon">{icon}</span>{name}</span>
+                    <span class="asset-breakdown-badge">{pct_w:.0f}%</span>
+                </div>
+                <div class="asset-breakdown-value">{fmt_money_full(value)}</div>
+                <div class="asset-breakdown-sub">
+                    <span>{sub_label}</span>
+                    {pct_html}
+                </div>
+                <div class="asset-breakdown-bar"><div style="width:{pct_w:.1f}%;background:{stripe}"></div></div>
+            </div>"""
+
+    stock_tile = _asset_tile("📈", "주식/ETF", "#7C6CF0", stock_eval, stock_pct_w, f"원금 {fmt_money_full(stock_cost)}", "", stock_pct)
+    tdf_tile   = _asset_tile("🏦", "TDF/펀드", "#1FBFA0", tdf_eval, tdf_pct_w, f"원금 {fmt_money_full(tdf_cost)}", "", tdf_pct)
+    cash_tile  = _asset_tile("💰", "현금성자산", "#6B6F7A", cash_eval, cash_pct_w, "예수금 등", "변동 없음", None)
+
     st.markdown(f"""
     <div class="hero-card">
         <div class="hero-label">총 투자원금 {fmt_money_full(total_cost)} → 통합 평가금액</div>
@@ -923,47 +973,14 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             <div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money_full(total_pnl)} ({fmt_pct(total_pct)})</div>
         </div>
         <div class="hero-bar">
-            <div style="width:{stock_pct_w:.1f}%;background:#534AB7"></div>
-            <div style="width:{tdf_pct_w:.1f}%;background:#1D9E75"></div>
-            <div style="width:{cash_pct_w:.1f}%;background:#5F5E5A"></div>
+            <div style="width:{stock_pct_w:.1f}%;background:#7C6CF0"></div>
+            <div style="width:{tdf_pct_w:.1f}%;background:#1FBFA0"></div>
+            <div style="width:{cash_pct_w:.1f}%;background:#6B6F7A"></div>
         </div>
         <div class="asset-breakdown-grid">
-            <div class="asset-breakdown-item">
-                <div class="asset-breakdown-head">
-                    <span class="asset-breakdown-name"><span class="asset-breakdown-dot" style="background:#534AB7"></span>주식/ETF</span>
-                    <span class="asset-breakdown-badge">{stock_pct_w:.0f}%</span>
-                </div>
-                <div class="asset-breakdown-value">{fmt_money_full(stock_eval)}</div>
-                <div class="asset-breakdown-sub">
-                    <span>원금 {fmt_money_full(stock_cost)}</span>
-                    <span style="color:{color_pnl(stock_pnl)}">{fmt_pct(stock_pct)}</span>
-                </div>
-                <div class="asset-breakdown-bar"><div style="width:{stock_pct_w:.1f}%;background:#534AB7"></div></div>
-            </div>
-            <div class="asset-breakdown-item">
-                <div class="asset-breakdown-head">
-                    <span class="asset-breakdown-name"><span class="asset-breakdown-dot" style="background:#1D9E75"></span>TDF/펀드</span>
-                    <span class="asset-breakdown-badge">{tdf_pct_w:.0f}%</span>
-                </div>
-                <div class="asset-breakdown-value">{fmt_money_full(tdf_eval)}</div>
-                <div class="asset-breakdown-sub">
-                    <span>원금 {fmt_money_full(tdf_cost)}</span>
-                    <span style="color:{color_pnl(tdf_pnl)}">{fmt_pct(tdf_pct)}</span>
-                </div>
-                <div class="asset-breakdown-bar"><div style="width:{tdf_pct_w:.1f}%;background:#1D9E75"></div></div>
-            </div>
-            <div class="asset-breakdown-item">
-                <div class="asset-breakdown-head">
-                    <span class="asset-breakdown-name"><span class="asset-breakdown-dot" style="background:#5F5E5A"></span>현금성자산</span>
-                    <span class="asset-breakdown-badge">{cash_pct_w:.0f}%</span>
-                </div>
-                <div class="asset-breakdown-value">{fmt_money_full(cash_eval)}</div>
-                <div class="asset-breakdown-sub">
-                    <span>예수금 등</span>
-                    <span>변동 없음</span>
-                </div>
-                <div class="asset-breakdown-bar"><div style="width:{cash_pct_w:.1f}%;background:#5F5E5A"></div></div>
-            </div>
+            {stock_tile}
+            {tdf_tile}
+            {cash_tile}
         </div>
     </div>
     """, unsafe_allow_html=True)
