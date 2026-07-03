@@ -457,6 +457,73 @@ st.markdown("""
     margin-right: 4px;
 }
 
+/* ── 자산 구성 요약 카드 (주식/ETF·TDF·현금 각각 분리 표시) ── */
+.asset-breakdown-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.7rem;
+    margin-top: 1rem;
+}
+@media (max-width: 700px) {
+    .asset-breakdown-grid { grid-template-columns: 1fr; }
+}
+.asset-breakdown-item {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 0.95rem 1.05rem;
+}
+.asset-breakdown-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.55rem;
+}
+.asset-breakdown-name {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.94rem;
+    font-weight: 700;
+    color: rgba(255,255,255,0.85);
+}
+.asset-breakdown-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.asset-breakdown-badge {
+    font-size: 0.76rem;
+    font-weight: 600;
+    padding: 0.1rem 0.5rem;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.08);
+    color: var(--text-dim);
+}
+.asset-breakdown-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    line-height: 1.15;
+}
+.asset-breakdown-sub {
+    margin-top: 0.4rem;
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+.asset-breakdown-bar {
+    margin-top: 0.6rem;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.08);
+    overflow: hidden;
+}
+.asset-breakdown-bar > div {
+    height: 100%;
+}
+
 /* ── 계좌별 카드 (2개 큰 카드) ── */
 .acct-card {
     background: var(--card-bg);
@@ -860,10 +927,43 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             <div style="width:{tdf_pct_w:.1f}%;background:#1D9E75"></div>
             <div style="width:{cash_pct_w:.1f}%;background:#5F5E5A"></div>
         </div>
-        <div class="hero-legend">
-            <span><span class="hero-dot" style="background:#534AB7"></span>주식/ETF {fmt_money_full(stock_eval)} ({stock_pct_w:.0f}%) · {fmt_pct(stock_pct)}</span>
-            <span><span class="hero-dot" style="background:#1D9E75"></span>TDF/펀드 {fmt_money_full(tdf_eval)} ({tdf_pct_w:.0f}%) · {fmt_pct(tdf_pct)}</span>
-            <span><span class="hero-dot" style="background:#5F5E5A"></span>현금성자산 {fmt_money_full(cash_eval)} ({cash_pct_w:.0f}%)</span>
+        <div class="asset-breakdown-grid">
+            <div class="asset-breakdown-item">
+                <div class="asset-breakdown-head">
+                    <span class="asset-breakdown-name"><span class="asset-breakdown-dot" style="background:#534AB7"></span>주식/ETF</span>
+                    <span class="asset-breakdown-badge">{stock_pct_w:.0f}%</span>
+                </div>
+                <div class="asset-breakdown-value">{fmt_money_full(stock_eval)}</div>
+                <div class="asset-breakdown-sub">
+                    <span>원금 {fmt_money_full(stock_cost)}</span>
+                    <span style="color:{color_pnl(stock_pnl)}">{fmt_pct(stock_pct)}</span>
+                </div>
+                <div class="asset-breakdown-bar"><div style="width:{stock_pct_w:.1f}%;background:#534AB7"></div></div>
+            </div>
+            <div class="asset-breakdown-item">
+                <div class="asset-breakdown-head">
+                    <span class="asset-breakdown-name"><span class="asset-breakdown-dot" style="background:#1D9E75"></span>TDF/펀드</span>
+                    <span class="asset-breakdown-badge">{tdf_pct_w:.0f}%</span>
+                </div>
+                <div class="asset-breakdown-value">{fmt_money_full(tdf_eval)}</div>
+                <div class="asset-breakdown-sub">
+                    <span>원금 {fmt_money_full(tdf_cost)}</span>
+                    <span style="color:{color_pnl(tdf_pnl)}">{fmt_pct(tdf_pct)}</span>
+                </div>
+                <div class="asset-breakdown-bar"><div style="width:{tdf_pct_w:.1f}%;background:#1D9E75"></div></div>
+            </div>
+            <div class="asset-breakdown-item">
+                <div class="asset-breakdown-head">
+                    <span class="asset-breakdown-name"><span class="asset-breakdown-dot" style="background:#5F5E5A"></span>현금성자산</span>
+                    <span class="asset-breakdown-badge">{cash_pct_w:.0f}%</span>
+                </div>
+                <div class="asset-breakdown-value">{fmt_money_full(cash_eval)}</div>
+                <div class="asset-breakdown-sub">
+                    <span>예수금 등</span>
+                    <span>변동 없음</span>
+                </div>
+                <div class="asset-breakdown-bar"><div style="width:{cash_pct_w:.1f}%;background:#5F5E5A"></div></div>
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
