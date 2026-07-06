@@ -184,6 +184,43 @@ def add_account(user_id: str, password: str, name: str, spreadsheet_id: str) -> 
         logging.warning("계정 추가 실패: %s", e)
         return False
 
+def update_account_status(user_id: str, new_status: str) -> bool:
+    """'사용자계정' 시트에서 특정 아이디의 상태(활성/비활성)를 변경."""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        df = pd.DataFrame(ws.get_all_records())
+        if df.empty or user_id not in df["아이디"].values:
+            return False
+        row_idx = df.index[df["아이디"] == user_id][0] + 2  # 헤더 행 고려
+        status_col = df.columns.get_loc("상태") + 1
+        ws.update_cell(row_idx, status_col, new_status)
+        return True
+    except Exception as e:
+        logging.warning("계정 상태 변경 실패: %s", e)
+        return False
+
+def reset_account_password(user_id: str, new_password: str) -> bool:
+    """'사용자계정' 시트에서 특정 아이디의 비밀번호 해시를 재설정."""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        df = pd.DataFrame(ws.get_all_records())
+        if df.empty or user_id not in df["아이디"].values:
+            return False
+        row_idx = df.index[df["아이디"] == user_id][0] + 2
+        pw_col = df.columns.get_loc("비밀번호_해시") + 1
+        new_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        ws.update_cell(row_idx, pw_col, new_hash)
+        return True
+    except Exception as e:
+        logging.warning("비밀번호 초기화 실패: %s", e)
+        return False
+
 def show_login():
     """로그인 화면. 성공 시 session_state에 사용자 정보를 저장하고 재실행."""
     st.markdown("## 📊 통합자산관리 시스템")
@@ -198,6 +235,10 @@ def show_login():
             st.session_state["logged_in"] = True
             st.session_state["user_name"] = result["이름"]
             st.session_state["spreadsheet_id"] = result["spreadsheet_id"]
+            st.session_state["user_id"] = user_id
+            # secrets에 [admin] user_id = "본인 로그인 아이디" 를 등록해두면,
+            # 그 아이디로 로그인했을 때만 관리자 메뉴가 보이도록 함
+            st.session_state["is_admin"] = (user_id == st.secrets.get("admin", {}).get("user_id"))
             st.rerun()
         else:
             st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
@@ -997,6 +1038,88 @@ def load_all_data(spreadsheet_id: str):
 # ============================================================
 # 메인 앱
 # ============================================================
+# ============================================================
+# 관리자 메뉴 (본인 계정으로 로그인 후에만 노출)
+# ============================================================
+def render_admin_panel():
+    with st.expander("🔧 관리자 메뉴", expanded=False):
+        tab_a, tab_b, tab_c = st.tabs(["계정 관리", "사용자 현황", "시스템"])
+
+        # ---------- 계정 관리 ----------
+        with tab_a:
+            st.caption("새 계정 추가")
+            with st.form("admin_add_account_form"):
+                new_id = st.text_input("신규 아이디")
+                new_pw = st.text_input("신규 비밀번호", type="password")
+                new_name = st.text_input("이름")
+                new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
+                add_submitted = st.form_submit_button("계정 추가")
+            if add_submitted:
+                if new_id and new_pw and new_name and new_sheet_id:
+                    if add_account(new_id, new_pw, new_name, new_sheet_id):
+                        st.success(f"'{new_id}' 계정이 추가되었습니다.")
+                    else:
+                        st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
+                else:
+                    st.warning("모든 항목을 입력해주세요.")
+
+            st.markdown("---")
+            st.caption("기존 계정 상태 변경 / 비밀번호 초기화")
+            df_acc = load_accounts_df()
+            if not df_acc.empty:
+                target_id = st.selectbox("대상 계정", df_acc["아이디"].tolist(), key="admin_target_id")
+                col1, col2 = st.columns(2)
+                with col1:
+                    new_status = st.selectbox("상태 변경", ["활성", "비활성"], key="admin_new_status")
+                    if st.button("상태 적용", key="admin_status_btn"):
+                        if update_account_status(target_id, new_status):
+                            st.success(f"'{target_id}' 계정 상태가 '{new_status}'로 변경되었습니다.")
+                        else:
+                            st.error("상태 변경에 실패했습니다.")
+                with col2:
+                    reset_pw = st.text_input("새 비밀번호", type="password", key="admin_reset_pw")
+                    if st.button("비밀번호 초기화", key="admin_reset_btn"):
+                        if reset_pw:
+                            if reset_account_password(target_id, reset_pw):
+                                st.success(f"'{target_id}' 비밀번호가 초기화되었습니다.")
+                            else:
+                                st.error("비밀번호 초기화에 실패했습니다.")
+                        else:
+                            st.warning("새 비밀번호를 입력해주세요.")
+            else:
+                st.info("등록된 계정이 없습니다.")
+
+        # ---------- 사용자 현황 ----------
+        with tab_b:
+            df_acc = load_accounts_df()
+            if not df_acc.empty:
+                display_cols = [c for c in ["아이디", "이름", "상태", "등록일"] if c in df_acc.columns]
+                st.dataframe(df_acc[display_cols], width="stretch", hide_index=True)
+                st.caption(f"총 {len(df_acc)}개 계정 · 활성 {sum(df_acc['상태'] == '활성')}개")
+            else:
+                st.info("등록된 계정이 없습니다.")
+
+        # ---------- 시스템 ----------
+        with tab_c:
+            st.caption("캐시된 데이터를 지우고 구글시트/시세를 다시 불러옵니다.")
+            if st.button("🔄 전체 캐시 새로고침", key="admin_cache_clear"):
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                st.success("캐시가 초기화되었습니다. 페이지를 새로고침 해주세요.")
+                st.rerun()
+
+
+# ============================================================
+# 개발자 정보 (모달 팝업)
+# ============================================================
+@st.dialog("앱 정보")
+def show_developer_info():
+    st.markdown("**개발: 조현웅**")
+    st.markdown(f"**버전: {APP_VERSION}**")
+    st.markdown("**문의: hwcho@me.com**")
+    st.caption("버그 제보나 기능 제안은 위 이메일로 보내주세요.")
+
+
 def main(spreadsheet_id: str):
     # 헤더
     col_title, col_time = st.columns([4, 1])
@@ -1008,9 +1131,13 @@ def main(spreadsheet_id: str):
         st.markdown(f"<div style='text-align:right;color:gray;font-size:0.8rem;padding-top:1rem'>{now_kst()} 기준</div>",
                     unsafe_allow_html=True)
         if st.button("로그아웃", key="logout_btn"):
-            for k in ("logged_in", "user_name", "spreadsheet_id"):
+            for k in ("logged_in", "user_name", "spreadsheet_id", "user_id", "is_admin"):
                 st.session_state.pop(k, None)
             st.rerun()
+
+    # 관리자 메뉴 (본인 계정으로 로그인했을 때만 노출)
+    if st.session_state.get("is_admin"):
+        render_admin_panel()
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
@@ -1077,6 +1204,15 @@ def main(spreadsheet_id: str):
     # ══════════════════════════════════════════════
     with tab5:
         render_data_mgmt(nonstock_df, cash_df)
+
+    # 개발자 정보 (하단 푸터 + 모달 팝업)
+    st.markdown("---")
+    col_dev, col_btn = st.columns([5, 1])
+    with col_dev:
+        st.caption(f"제작: 조현웅 · {APP_VERSION}")
+    with col_btn:
+        if st.button("ℹ️ 앱 정보", key="dev_info_btn"):
+            show_developer_info()
 
 
 # ============================================================
