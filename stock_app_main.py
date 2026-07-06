@@ -72,11 +72,7 @@ MARKET_INDICES = [
 SHEET_NAMES = {
     "거래이력":        "거래이력",
     "비주식자산":      "비주식자산",
-    "통합요약":        "통합요약",
-    "자산변화로그":    "자산변화로그",
     "현금성자산":      "현금성자산",
-    "원금변동원장":    "원금변동원장",
-    "자산스냅샷":      "자산스냅샷",
     "월별자산스냅샷":  "월별자산스냅샷",
 }
 
@@ -818,11 +814,8 @@ def load_all_data():
     trade_df     = load_sheet("거래이력")
     nonstock_df  = load_sheet("비주식자산")
     cash_df      = load_sheet("현금성자산")
-    snapshot_df  = load_sheet("자산스냅샷")
-    log_df       = load_sheet("자산변화로그")
-    ledger_df    = load_sheet("원금변동원장")
     monthly_df   = load_sheet("월별자산스냅샷")
-    return trade_df, nonstock_df, cash_df, snapshot_df, log_df, ledger_df, monthly_df
+    return trade_df, nonstock_df, cash_df, monthly_df
 
 # ============================================================
 # 메인 앱
@@ -838,7 +831,7 @@ def main():
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
-        trade_df, nonstock_df, cash_df, snapshot_df, log_df, ledger_df, monthly_df = load_all_data()
+        trade_df, nonstock_df, cash_df, monthly_df = load_all_data()
 
     # 보유 종목 계산
     holdings_df = calc_holdings(trade_df)
@@ -872,7 +865,7 @@ def main():
     # 탭1: 통합 대시보드
     # ══════════════════════════════════════════════
     with tab1:
-        render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df, prices)
+        render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices)
 
     # ══════════════════════════════════════════════
     # 탭2: 보유 종목 상세
@@ -990,7 +983,7 @@ def calc_asset_summary(holdings_df, nonstock_df):
     }
 
 
-def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df, prices):
+def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices):
 
     render_market_indices()
 
@@ -1165,7 +1158,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
             showlegend=False,
             font=dict(size=14),
         )
-        st.plotly_chart(fig_type, use_container_width=True)
+        st.plotly_chart(fig_type, width="stretch")
 
     with col_table:
         st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
@@ -1246,7 +1239,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, snapshot_df, monthly_df,
                 yaxis=dict(tickformat=","),
                 xaxis=dict(type="category", tickangle=0),
             )
-            st.plotly_chart(fig_trend, use_container_width=True)
+            st.plotly_chart(fig_trend, width="stretch")
         except Exception as e:
             st.caption(f"추이 차트 오류: {e}")
 
@@ -1418,7 +1411,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
         st.dataframe(
             styled_table,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config=col_config,
             height=min(560, 50 + 45 * len(table_df)),
@@ -1470,7 +1463,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 ),
                 font=dict(size=12),
             )
-            st.plotly_chart(fig_donut, use_container_width=True)
+            st.plotly_chart(fig_donut, width="stretch")
 
         with ch2:
             st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
@@ -1504,7 +1497,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 yaxis=dict(tickfont=dict(size=12)),
                 font=dict(size=12),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 
 # ============================================================
@@ -1565,7 +1558,7 @@ def render_trades(trade_df):
     )
     st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config=col_config,
         height=min(600, 50 + 45 * len(display_df)),
@@ -1640,7 +1633,7 @@ def render_cashflow(trade_df):
         money_cols=["매도단가", "평균매입단가", "매도금액", "매입금액", "실현손익"],
     )
     st.dataframe(
-        styled, use_container_width=True, hide_index=True,
+        styled, width="stretch", hide_index=True,
         column_config=col_config,
         height=min(560, 50 + 45 * len(display_realized)),
     )
@@ -1853,7 +1846,7 @@ def render_data_mgmt(nonstock_df, cash_df):
         '</div></div>'
     )
     st.markdown(warn_html, unsafe_allow_html=True)
-    if st.button("🔄 전체 캐시 초기화 (데이터 새로고침)", key="clear_cache_btn", use_container_width=False):
+    if st.button("🔄 전체 캐시 초기화 (데이터 새로고침)", key="clear_cache_btn", width="content"):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.success("캐시가 초기화되었습니다. 페이지를 새로고침하세요.")
