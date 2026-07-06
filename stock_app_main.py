@@ -209,6 +209,82 @@ def get_market_index_data() -> dict[str, dict]:
     return result
 
 # ============================================================
+# 숫자 안전 변환 (빈 셀·하이픈·쉼표 등으로 인한 크래시 방지)
+# ============================================================
+def _safe_num(val, default=0.0):
+    """거래수량/거래단가 등 숫자 필드를 안전하게 변환.
+    빈 값, '-', 쉼표 포함 문자열 등 비정상 입력이 와도 앱이 죽지 않고 default를 반환."""
+    try:
+        s = str(val).strip().replace(",", "")
+        if s in ("", "-", "nan", "None"):
+            return default
+        return float(s)
+    except (ValueError, TypeError):
+        return default
+
+# ============================================================
+# 거래이력 사전 점검 (계산 전 잠재적 데이터 오류를 사용자에게 안내)
+# ============================================================
+def validate_trade_df(trade_df: pd.DataFrame) -> list:
+    """거래이력 데이터의 흔한 입력 오류를 사전 점검하여 경고 메시지 목록으로 반환.
+    실제 계산 로직(calc_holdings/calc_realized_pnl)은 이 함수와 무관하게 항상 안전하게 동작하며,
+    이 함수는 사용자에게 '어느 행에 문제가 있는지' 알려주는 용도."""
+    warnings_list = []
+    if trade_df.empty:
+        return warnings_list
+
+    # 1) 거래수량/거래단가가 비어있거나 숫자로 변환 안 되는 행
+    blank_count = 0
+    for _, row in trade_df.iterrows():
+        qty_raw = str(row.get("거래수량", "")).strip()
+        price_raw = str(row.get("거래단가", "")).strip()
+        if qty_raw in ("", "-", "nan", "None") or price_raw in ("", "-", "nan", "None"):
+            blank_count += 1
+    if blank_count:
+        warnings_list.append(
+            f"⚠ 거래이력 시트에 거래수량 또는 거래단가가 비어있는 행이 {blank_count}건 있습니다. "
+            f"해당 행은 계산에서 자동으로 제외되니, 구글시트에서 값을 채워주세요."
+        )
+
+    # 2) 거래구분이 '매수'/'매도'가 아닌 행 (오타 등)
+    if "거래구분" in trade_df.columns:
+        invalid_mask = ~trade_df["거래구분"].astype(str).str.strip().isin(["매수", "매도"])
+        invalid_count = int(invalid_mask.sum())
+        if invalid_count:
+            warnings_list.append(
+                f"⚠ 거래구분 값이 '매수'/'매도'가 아닌 행이 {invalid_count}건 있습니다 (오타 가능성). "
+                f"해당 거래는 계산에서 통째로 빠지니 확인해주세요."
+            )
+
+    # 3) 보유수량을 초과하는 매도 (계좌+종목코드 기준, 시간순)
+    df_sorted = trade_df.copy()
+    if "거래일자" in df_sorted.columns:
+        df_sorted["_정렬일자"] = pd.to_datetime(df_sorted["거래일자"], errors="coerce")
+        df_sorted = df_sorted.sort_values("_정렬일자")
+    holdings_qty = {}
+    overdraw_names = []
+    for _, row in df_sorted.iterrows():
+        code = str(row.get("종목코드", "")).strip()
+        account = str(row.get("운용사", "")).strip()
+        구분 = str(row.get("거래구분", "")).strip()
+        qty = _safe_num(row.get("거래수량", 0))
+        key = (account, code)
+        if 구분 == "매수":
+            holdings_qty[key] = holdings_qty.get(key, 0) + qty
+        elif 구분 == "매도":
+            if qty > holdings_qty.get(key, 0):
+                overdraw_names.append(f"{row.get('종목명', '')}({account})")
+            holdings_qty[key] = max(0, holdings_qty.get(key, 0) - qty)
+    if overdraw_names:
+        uniq = ", ".join(sorted(set(overdraw_names)))
+        warnings_list.append(
+            f"⚠ 보유수량보다 많은 매도 이력이 있는 종목: {uniq}. "
+            f"실현손익 계산 시 초과분은 자동으로 제외되지만, 입력값을 다시 확인해보세요."
+        )
+
+    return warnings_list
+
+# ============================================================
 # 보유 종목 계산
 # ============================================================
 def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
@@ -220,8 +296,8 @@ def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
     for _, row in trade_df.iterrows():
         code = str(row.get("종목코드", "")).strip()
         name = str(row.get("종목명", "")).strip()
-        qty = int(row.get("거래수량", 0))
-        price = float(row.get("거래단가", 0))
+        qty = int(_safe_num(row.get("거래수량", 0)))
+        price = _safe_num(row.get("거래단가", 0))
         account = str(row.get("운용사", "")).strip()
         구분 = str(row.get("거래구분", "")).strip()
 
@@ -274,8 +350,8 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         code = str(row["종목코드"]).strip()
         name = row["종목명"]
-        qty = int(row["거래수량"])
-        price = float(row["거래단가"])
+        qty = int(_safe_num(row["거래수량"]))
+        price = _safe_num(row["거래단가"])
         account = row["운용사"]
         date = row["거래일자"]
         key = (str(account).strip(), code)  # 계좌+종목코드 단위로 평균단가 분리 관리
@@ -289,8 +365,11 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
             avg_cost[key] = new_avg
         elif row["거래구분"] == "매도":
             prev_avg = avg_cost.get(key, price)
-            매도금액 = qty * price
-            매입금액 = qty * prev_avg
+            prev_qty = qty_held.get(key, 0)
+            # 보유수량을 초과하는 매도는 실현손익 계산에서 초과분을 제외 (데이터 입력 오류로 인한 손익 부풀림 방지)
+            effective_qty = min(qty, prev_qty) if prev_qty > 0 else 0
+            매도금액 = effective_qty * price
+            매입금액 = effective_qty * prev_avg
             실현손익 = 매도금액 - 매입금액
             realized_rows.append({
                 "거래일자": date, "계좌": account, "종목코드": code, "종목명": name,
@@ -298,7 +377,7 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
                 "매도금액": round(매도금액), "매입금액": round(매입금액),
                 "실현손익": round(실현손익),
             })
-            qty_held[key] = max(0, qty_held.get(key, 0) - qty)
+            qty_held[key] = max(0, prev_qty - qty)
 
     return pd.DataFrame(realized_rows)
 
@@ -832,6 +911,10 @@ def main():
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
         trade_df, nonstock_df, cash_df, monthly_df = load_all_data()
+
+    # 거래이력 사전 점검 (빈 셀, 거래구분 오타, 초과매도 등 흔한 입력 오류 안내)
+    for _msg in validate_trade_df(trade_df):
+        st.warning(_msg)
 
     # 보유 종목 계산
     holdings_df = calc_holdings(trade_df)
