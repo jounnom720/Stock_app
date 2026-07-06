@@ -1914,6 +1914,22 @@ def render_data_mgmt(nonstock_df, cash_df):
             st.markdown('<div class="mgmt-section-head">🏦 TDF / 펀드</div>', unsafe_allow_html=True)
             _render_nonstock_table(tdf_rows, show_pnl=True, total_eval=tdf_total)
 
+            # 환매 후 원금 중 일부만 재투자되어 평가손익이 큰 폭의 마이너스(-50% 이하)로 보이는 경우,
+            # 실제 손실로 오해하지 않도록 안내 문구 표시
+            partial_reinvest_names = []
+            for _, r in tdf_rows.iterrows():
+                cost = _safe_float(r.get("원금", 0))
+                eva = _safe_float(r.get("평가금액", 0))
+                if cost > 0 and (eva - cost) / cost <= -0.5:
+                    partial_reinvest_names.append(str(r.get("상품명", "")).strip())
+            if partial_reinvest_names:
+                st.caption(
+                    "💡 " + ", ".join(sorted(set(partial_reinvest_names))) +
+                    " 상품의 평가손익이 큰 폭의 마이너스로 보이는 건 실제 손실이 아닐 수 있습니다. "
+                    "환매 후 원금 중 일부만 재투자되고 나머지는 예수금 등으로 이동한 경우 이렇게 표시됩니다. "
+                    "정확한 내역은 비고란을 확인해주세요."
+                )
+
         if not cash_rows.empty:
             st.markdown('<div class="mgmt-section-head">💰 현금성자산 (예수금 · 대기자금)</div>', unsafe_allow_html=True)
             _render_nonstock_table(cash_rows, show_pnl=False, total_eval=cash_total)
