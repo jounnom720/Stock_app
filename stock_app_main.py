@@ -1220,6 +1220,16 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices):
     with cb:
         st.markdown(cards_in_order[1], unsafe_allow_html=True)
 
+    # TDF 환매 후 원금 중 일부만 재투자되어 신한은행 IRP 계좌의 손익이 큰 폭의 마이너스로 보이는 경우,
+    # 실제 손실로 오해하지 않도록 안내 문구 표시 (TDF 원금-평가금액 차이가 IRP 계좌 손실의 절반 이상을 차지할 때)
+    tdf_gap = tdf_cost - tdf_eval
+    if tdf_gap > 0 and irp_pnl < 0 and tdf_gap >= abs(irp_pnl) * 0.5:
+        st.caption(
+            "💡 신한은행 IRP 계좌의 평가손익이 큰 폭의 마이너스로 보이는 건 실제 손실이 아닐 수 있습니다. "
+            "TDF 환매 후 원금 중 일부만 재투자되고 나머지는 다른 계좌(예수금)로 이동한 경우 이렇게 표시됩니다. "
+            "자세한 내역은 '데이터 관리' 탭을 확인해주세요."
+        )
+
     # ── 자산 구성 (도넛 + 표 병행) ──
     st.markdown('<div class="section-title">자산 구성</div>', unsafe_allow_html=True)
 
