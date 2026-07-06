@@ -1,4 +1,5 @@
 streamlit
+bcrypt
 pandas
 numpy
 plotly
