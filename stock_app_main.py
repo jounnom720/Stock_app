@@ -16,6 +16,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import logging
+import bcrypt
 
 # ============================================================
 # 기본 설정
@@ -90,22 +91,23 @@ def get_gspread_client():
         return None
 
 @st.cache_resource(ttl=60)
-def get_spreadsheet():
+def get_spreadsheet(spreadsheet_id: str):
+    """사용자별 자산 데이터 시트를 연다.
+    spreadsheet_id를 인자로 받아 캐시 키에 포함시킴으로써,
+    사용자마다 다른 시트가 캐시에서 섞이지 않도록 함."""
     client = get_gspread_client()
     if client is None:
         return None
     try:
-        # Secrets 구조: [google_sheets] spreadsheet_id = "..."
-        sheet_id = st.secrets["google_sheets"]["spreadsheet_id"]
-        return client.open_by_key(sheet_id)
+        return client.open_by_key(spreadsheet_id)
     except Exception as e:
         logging.warning("스프레드시트 열기 실패: %s", e)
         return None
 
 @st.cache_data(ttl=30)
-def load_sheet(sheet_name: str) -> pd.DataFrame:
+def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
     try:
-        spreadsheet = get_spreadsheet()
+        spreadsheet = get_spreadsheet(spreadsheet_id)
         if spreadsheet is None:
             return pd.DataFrame()
         ws = spreadsheet.worksheet(sheet_name)
@@ -120,6 +122,102 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
     except Exception as e:
         logging.warning("시트 로드 실패 [%s]: %s", sheet_name, e)
         return pd.DataFrame()
+
+# ============================================================
+# 계정 인증 (로그인)
+# ============================================================
+@st.cache_resource(ttl=60)
+def get_accounts_spreadsheet():
+    """모든 사용자 계정 정보가 담긴 '관리자용 계정 시트'를 연다.
+    이 시트의 ID는 secrets의 [accounts] spreadsheet_id 값으로 고정되어 있으며,
+    사용자 개인 자산 시트와는 별개의 시트임."""
+    client = get_gspread_client()
+    if client is None:
+        return None
+    try:
+        sheet_id = st.secrets["accounts"]["spreadsheet_id"]
+        return client.open_by_key(sheet_id)
+    except Exception as e:
+        logging.warning("계정 시트 열기 실패: %s", e)
+        return None
+
+def load_accounts_df() -> pd.DataFrame:
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return pd.DataFrame()
+        ws = spreadsheet.worksheet("사용자계정")
+        return pd.DataFrame(ws.get_all_records())
+    except Exception as e:
+        logging.warning("계정 목록 로드 실패: %s", e)
+        return pd.DataFrame()
+
+def authenticate(user_id: str, password: str):
+    """아이디/비밀번호를 '사용자계정' 시트와 대조.
+    성공 시 {'이름':..., 'spreadsheet_id':...} 딕셔너리 반환, 실패 시 None."""
+    df = load_accounts_df()
+    if df.empty:
+        return None
+    row = df[(df["아이디"] == user_id) & (df["상태"] == "활성")]
+    if row.empty:
+        return None
+    row = row.iloc[0]
+    stored_hash = str(row["비밀번호_해시"]).encode("utf-8")
+    try:
+        if bcrypt.checkpw(password.encode("utf-8"), stored_hash):
+            return {"이름": row["이름"], "spreadsheet_id": row["spreadsheet_id"]}
+    except Exception as e:
+        logging.warning("비밀번호 검증 실패: %s", e)
+    return None
+
+def add_account(user_id: str, password: str, name: str, spreadsheet_id: str) -> bool:
+    """관리자가 신규 계정을 '사용자계정' 시트에 추가. bcrypt로 비밀번호를 해싱해서 저장."""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        ws.append_row([user_id, hashed, name, spreadsheet_id, str(date.today()), "활성"])
+        return True
+    except Exception as e:
+        logging.warning("계정 추가 실패: %s", e)
+        return False
+
+def show_login():
+    """로그인 화면. 성공 시 session_state에 사용자 정보를 저장하고 재실행."""
+    st.markdown("## 📊 통합자산관리 시스템")
+    st.markdown("#### 로그인")
+    with st.form("login_form"):
+        user_id = st.text_input("아이디")
+        password = st.text_input("비밀번호", type="password")
+        submitted = st.form_submit_button("로그인")
+    if submitted:
+        result = authenticate(user_id, password)
+        if result:
+            st.session_state["logged_in"] = True
+            st.session_state["user_name"] = result["이름"]
+            st.session_state["spreadsheet_id"] = result["spreadsheet_id"]
+            st.rerun()
+        else:
+            st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+
+    # 관리자 전용 계정 추가 패널 (지인들에게는 노출되지 않도록 접혀 있음)
+    with st.expander("🔐 관리자"):
+        admin_pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw")
+        if admin_pw and admin_pw == st.secrets.get("admin", {}).get("password"):
+            st.success("관리자 인증됨")
+            with st.form("add_account_form"):
+                new_id = st.text_input("신규 아이디")
+                new_pw = st.text_input("신규 비밀번호", type="password")
+                new_name = st.text_input("이름")
+                new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
+                add_submitted = st.form_submit_button("계정 추가")
+            if add_submitted:
+                if add_account(new_id, new_pw, new_name, new_sheet_id):
+                    st.success(f"'{new_id}' 계정이 추가되었습니다.")
+                else:
+                    st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
 
 # ============================================================
 # 실시간 시세 조회
@@ -889,28 +987,34 @@ st.markdown("""
 # 데이터 로드
 # ============================================================
 @st.cache_data(ttl=30)
-def load_all_data():
-    trade_df     = load_sheet("거래이력")
-    nonstock_df  = load_sheet("비주식자산")
-    cash_df      = load_sheet("현금성자산")
-    monthly_df   = load_sheet("월별자산스냅샷")
+def load_all_data(spreadsheet_id: str):
+    trade_df     = load_sheet("거래이력", spreadsheet_id)
+    nonstock_df  = load_sheet("비주식자산", spreadsheet_id)
+    cash_df      = load_sheet("현금성자산", spreadsheet_id)
+    monthly_df   = load_sheet("월별자산스냅샷", spreadsheet_id)
     return trade_df, nonstock_df, cash_df, monthly_df
 
 # ============================================================
 # 메인 앱
 # ============================================================
-def main():
+def main(spreadsheet_id: str):
     # 헤더
     col_title, col_time = st.columns([4, 1])
     with col_title:
-        st.markdown("## 📊 통합자산관리 시스템")
+        user_name = st.session_state.get("user_name", "")
+        st.markdown(f"## 📊 통합자산관리 시스템 <span style='font-size:0.9rem;color:gray'>({user_name})</span>",
+                    unsafe_allow_html=True)
     with col_time:
         st.markdown(f"<div style='text-align:right;color:gray;font-size:0.8rem;padding-top:1rem'>{now_kst()} 기준</div>",
                     unsafe_allow_html=True)
+        if st.button("로그아웃", key="logout_btn"):
+            for k in ("logged_in", "user_name", "spreadsheet_id"):
+                st.session_state.pop(k, None)
+            st.rerun()
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
-        trade_df, nonstock_df, cash_df, monthly_df = load_all_data()
+        trade_df, nonstock_df, cash_df, monthly_df = load_all_data(spreadsheet_id)
 
     # 거래이력 사전 점검 (빈 셀, 거래구분 오타, 초과매도 등 흔한 입력 오류 안내)
     for _msg in validate_trade_df(trade_df):
@@ -1963,7 +2067,11 @@ def render_data_mgmt(nonstock_df, cash_df):
 
 
 # ============================================================
-# 실행
+# 실행 (로그인 게이트)
 # ============================================================
 if __name__ == "__main__" or True:
-    main()
+    if not st.session_state.get("logged_in"):
+        show_login()
+        st.stop()
+    else:
+        main(st.session_state["spreadsheet_id"])
