@@ -1021,6 +1021,20 @@ st.markdown("""
 }
 .mgmt-warn-text { font-size: 0.88rem; color: var(--text-dim); max-width: 480px; }
 .mgmt-warn-text b { color: rgba(255,255,255,0.85); }
+
+/* ── 관리자 메뉴: 일반 화면과 구분되도록 골드 톤 강조 ── */
+div[class*="st-key-admin_panel_wrap"] div[data-testid="stExpander"] {
+    border: 1px solid rgba(240,180,41,0.35);
+    border-radius: 14px;
+    background: rgba(240,180,41,0.045);
+}
+div[class*="st-key-admin_panel_wrap"] div[data-testid="stExpander"] summary {
+    font-weight: 600;
+    color: #f0b429;
+}
+div[class*="st-key-admin_panel_wrap"] div[data-testid="stExpander"] summary:hover {
+    color: #ffce54;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1042,71 +1056,75 @@ def load_all_data(spreadsheet_id: str):
 # 관리자 메뉴 (본인 계정으로 로그인 후에만 노출)
 # ============================================================
 def render_admin_panel():
-    with st.expander("🔧 관리자 메뉴", expanded=False):
-        tab_a, tab_b, tab_c = st.tabs(["계정 관리", "사용자 현황", "시스템"])
+    col_admin, _ = st.columns([2, 1])  # 화면 전체 폭을 다 쓰지 않도록 2:1로 제한
+    with col_admin:
+        with st.container(key="admin_panel_wrap"):
+            with st.expander("🔧 관리자 메뉴", expanded=False):
+                st.caption("🔒 관리자 전용 · 지인 계정을 관리합니다")
+                tab_a, tab_b, tab_c = st.tabs(["계정 관리", "사용자 현황", "시스템"])
 
-        # ---------- 계정 관리 ----------
-        with tab_a:
-            st.caption("새 계정 추가")
-            with st.form("admin_add_account_form"):
-                new_id = st.text_input("신규 아이디")
-                new_pw = st.text_input("신규 비밀번호", type="password")
-                new_name = st.text_input("이름")
-                new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
-                add_submitted = st.form_submit_button("계정 추가")
-            if add_submitted:
-                if new_id and new_pw and new_name and new_sheet_id:
-                    if add_account(new_id, new_pw, new_name, new_sheet_id):
-                        st.success(f"'{new_id}' 계정이 추가되었습니다.")
-                    else:
-                        st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
-                else:
-                    st.warning("모든 항목을 입력해주세요.")
-
-            st.markdown("---")
-            st.caption("기존 계정 상태 변경 / 비밀번호 초기화")
-            df_acc = load_accounts_df()
-            if not df_acc.empty:
-                target_id = st.selectbox("대상 계정", df_acc["아이디"].tolist(), key="admin_target_id")
-                col1, col2 = st.columns(2)
-                with col1:
-                    new_status = st.selectbox("상태 변경", ["활성", "비활성"], key="admin_new_status")
-                    if st.button("상태 적용", key="admin_status_btn"):
-                        if update_account_status(target_id, new_status):
-                            st.success(f"'{target_id}' 계정 상태가 '{new_status}'로 변경되었습니다.")
-                        else:
-                            st.error("상태 변경에 실패했습니다.")
-                with col2:
-                    reset_pw = st.text_input("새 비밀번호", type="password", key="admin_reset_pw")
-                    if st.button("비밀번호 초기화", key="admin_reset_btn"):
-                        if reset_pw:
-                            if reset_account_password(target_id, reset_pw):
-                                st.success(f"'{target_id}' 비밀번호가 초기화되었습니다.")
+                # ---------- 계정 관리 ----------
+                with tab_a:
+                    st.caption("새 계정 추가")
+                    with st.form("admin_add_account_form"):
+                        new_id = st.text_input("신규 아이디")
+                        new_pw = st.text_input("신규 비밀번호", type="password")
+                        new_name = st.text_input("이름")
+                        new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
+                        add_submitted = st.form_submit_button("계정 추가", type="primary", width="stretch")
+                    if add_submitted:
+                        if new_id and new_pw and new_name and new_sheet_id:
+                            if add_account(new_id, new_pw, new_name, new_sheet_id):
+                                st.success(f"'{new_id}' 계정이 추가되었습니다.")
                             else:
-                                st.error("비밀번호 초기화에 실패했습니다.")
+                                st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
                         else:
-                            st.warning("새 비밀번호를 입력해주세요.")
-            else:
-                st.info("등록된 계정이 없습니다.")
+                            st.warning("모든 항목을 입력해주세요.")
 
-        # ---------- 사용자 현황 ----------
-        with tab_b:
-            df_acc = load_accounts_df()
-            if not df_acc.empty:
-                display_cols = [c for c in ["아이디", "이름", "상태", "등록일"] if c in df_acc.columns]
-                st.dataframe(df_acc[display_cols], width="stretch", hide_index=True)
-                st.caption(f"총 {len(df_acc)}개 계정 · 활성 {sum(df_acc['상태'] == '활성')}개")
-            else:
-                st.info("등록된 계정이 없습니다.")
+                    st.markdown("---")
+                    st.caption("기존 계정 상태 변경 / 비밀번호 초기화")
+                    df_acc = load_accounts_df()
+                    if not df_acc.empty:
+                        target_id = st.selectbox("대상 계정", df_acc["아이디"].tolist(), key="admin_target_id")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            new_status = st.selectbox("상태 변경", ["활성", "비활성"], key="admin_new_status")
+                            if st.button("상태 적용", key="admin_status_btn", width="stretch"):
+                                if update_account_status(target_id, new_status):
+                                    st.success(f"'{target_id}' 계정 상태가 '{new_status}'로 변경되었습니다.")
+                                else:
+                                    st.error("상태 변경에 실패했습니다.")
+                        with col2:
+                            reset_pw = st.text_input("새 비밀번호", type="password", key="admin_reset_pw")
+                            if st.button("비밀번호 초기화", key="admin_reset_btn", width="stretch"):
+                                if reset_pw:
+                                    if reset_account_password(target_id, reset_pw):
+                                        st.success(f"'{target_id}' 비밀번호가 초기화되었습니다.")
+                                    else:
+                                        st.error("비밀번호 초기화에 실패했습니다.")
+                                else:
+                                    st.warning("새 비밀번호를 입력해주세요.")
+                    else:
+                        st.info("등록된 계정이 없습니다.")
 
-        # ---------- 시스템 ----------
-        with tab_c:
-            st.caption("캐시된 데이터를 지우고 구글시트/시세를 다시 불러옵니다.")
-            if st.button("🔄 전체 캐시 새로고침", key="admin_cache_clear"):
-                st.cache_data.clear()
-                st.cache_resource.clear()
-                st.success("캐시가 초기화되었습니다. 페이지를 새로고침 해주세요.")
-                st.rerun()
+                # ---------- 사용자 현황 ----------
+                with tab_b:
+                    df_acc = load_accounts_df()
+                    if not df_acc.empty:
+                        display_cols = [c for c in ["아이디", "이름", "상태", "등록일"] if c in df_acc.columns]
+                        st.dataframe(df_acc[display_cols], width="stretch", hide_index=True)
+                        st.caption(f"총 {len(df_acc)}개 계정 · 활성 {sum(df_acc['상태'] == '활성')}개")
+                    else:
+                        st.info("등록된 계정이 없습니다.")
+
+                # ---------- 시스템 ----------
+                with tab_c:
+                    st.caption("캐시된 데이터를 지우고 구글시트/시세를 다시 불러옵니다.")
+                    if st.button("🔄 전체 캐시 새로고침", key="admin_cache_clear", width="stretch"):
+                        st.cache_data.clear()
+                        st.cache_resource.clear()
+                        st.success("캐시가 초기화되었습니다. 페이지를 새로고침 해주세요.")
+                        st.rerun()
 
 
 # ============================================================
