@@ -106,6 +106,7 @@ def get_spreadsheet(spreadsheet_id: str):
         return client.open_by_key(spreadsheet_id)
     except Exception as e:
         logging.warning("스프레드시트 열기 실패: %s", e)
+        st.error(f"⚠️ 구글시트 열기 실패 (spreadsheet_id: {spreadsheet_id[:8]}...): {type(e).__name__} - {e}")
         return None
 
 @st.cache_data(ttl=30)
@@ -113,6 +114,7 @@ def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
     try:
         spreadsheet = get_spreadsheet(spreadsheet_id)
         if spreadsheet is None:
+            st.error(f"⚠️ '{sheet_name}' 시트 로드 실패: 스프레드시트 자체를 열지 못했습니다 (spreadsheet_id 또는 공유 권한을 확인하세요).")
             return pd.DataFrame()
         ws = spreadsheet.worksheet(sheet_name)
         records = ws.get_all_records()
@@ -125,6 +127,7 @@ def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
         return df
     except Exception as e:
         logging.warning("시트 로드 실패 [%s]: %s", sheet_name, e)
+        st.error(f"⚠️ '{sheet_name}' 시트 로드 중 오류: {type(e).__name__} - {e}")
         return pd.DataFrame()
 
 # ============================================================
