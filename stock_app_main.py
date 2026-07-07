@@ -287,6 +287,24 @@ def delete_account_by_row(sheet_row_number: int) -> bool:
         logging.warning("계정 삭제 실패: %s", e)
         return False
 
+def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str) -> bool:
+    """'사용자계정' 시트에서 특정 행의 이름/spreadsheet_id를 그대로 덮어씀.
+    spreadsheet_id를 잘못 등록한 경우, 계정을 삭제·재생성하지 않고 바로 고칠 수 있도록 함."""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        header = ws.row_values(1)
+        name_col = header.index("이름") + 1
+        sheet_id_col = header.index("spreadsheet_id") + 1
+        ws.update_cell(sheet_row_number, name_col, name)
+        ws.update_cell(sheet_row_number, sheet_id_col, spreadsheet_id.strip())
+        return True
+    except Exception as e:
+        logging.warning("계정 정보 수정 실패: %s", e)
+        return False
+
 def show_login():
     """로그인 화면. 성공 시 session_state에 사용자 정보를 저장하고 재실행."""
     st.markdown("## 📊 통합자산관리 시스템")
@@ -1179,24 +1197,54 @@ def render_admin_panel():
                         st.info("등록된 계정이 없습니다.")
 
                     st.markdown("---")
-                    st.caption("🗑 계정 삭제 (되돌릴 수 없음)")
+                    st.caption("✏️ 계정 정보 확인 / 수정 (이름 · 연결된 구글시트 ID)")
                     if not df_acc.empty:
-                        row_options = {}
+                        edit_row_options = {}
                         for i, row in df_acc.iterrows():
-                            sheet_row = i + 2  # 헤더가 1행이므로 실제 시트 행 번호는 +2
-                            label = f"행{sheet_row}: {row.get('아이디','')} / {row.get('이름','')} / {row.get('상태','')} / {row.get('등록일','')}"
-                            row_options[label] = sheet_row
-                        target_label = st.selectbox("삭제할 계정(행) 선택", list(row_options.keys()), key="admin_delete_target")
-                        st.caption("⚠️ 동일한 아이디가 여러 행에 있어도 선택한 '그 행'만 정확히 삭제됩니다.")
-                        confirm_text = st.text_input("삭제하려면 아래에 '삭제'를 입력하세요", key="admin_delete_confirm")
-                        if st.button("🗑 완전 삭제", key="admin_delete_btn", width="stretch",
-                                     disabled=(confirm_text != "삭제")):
-                            target_row = row_options[target_label]
-                            if delete_account_by_row(target_row):
-                                st.success(f"{target_label} 계정이 삭제되었습니다.")
+                            sheet_row = i + 2
+                            label = f"행{sheet_row}: {row.get('아이디','')} / {row.get('이름','')}"
+                            edit_row_options[label] = (sheet_row, row)
+                        edit_label = st.selectbox("확인·수정할 계정", list(edit_row_options.keys()), key="admin_edit_target")
+                        edit_row_num, edit_row_data = edit_row_options[edit_label]
+                        edit_name = st.text_input("이름", value=str(edit_row_data.get("이름", "")), key="admin_edit_name")
+                        edit_sheet_id = st.text_input(
+                            "연결된 구글시트 spreadsheet_id",
+                            value=str(edit_row_data.get("spreadsheet_id", "")),
+                            key="admin_edit_sheet_id",
+                        )
+                        if st.button("💾 정보 저장", key="admin_edit_save_btn", width="stretch"):
+                            if update_account_fields(edit_row_num, edit_name, edit_sheet_id):
+                                st.success(f"'{edit_row_data.get('아이디','')}' 계정 정보가 수정되었습니다.")
                                 st.rerun()
                             else:
-                                st.error("계정 삭제에 실패했습니다.")
+                                st.error("정보 수정에 실패했습니다.")
+                    else:
+                        st.info("수정할 계정이 없습니다.")
+                    st.caption("🗑 계정 삭제 (되돌릴 수 없음)")
+                    if not df_acc.empty:
+                        display_df = df_acc.copy()
+                        display_df.insert(0, "선택", False)
+                        display_df.insert(1, "행번호", [i + 2 for i in range(len(df_acc))])  # 헤더가 1행이므로 +2
+                        show_cols = [c for c in ["선택", "행번호", "아이디", "이름", "상태", "등록일"] if c in display_df.columns]
+                        edited_df = st.data_editor(
+                            display_df[show_cols],
+                            hide_index=True,
+                            width="stretch",
+                            disabled=[c for c in show_cols if c != "선택"],
+                            key="admin_delete_editor",
+                        )
+                        selected_rows = edited_df.loc[edited_df["선택"] == True, "행번호"].tolist()
+                        if selected_rows:
+                            st.warning(f"체크된 {len(selected_rows)}개 계정이 삭제 대상입니다.")
+                        if st.button("🗑 체크된 계정 삭제", key="admin_delete_btn", width="stretch",
+                                     disabled=(len(selected_rows) == 0)):
+                            # 행 번호가 큰 것부터 삭제해야 삭제 도중 나머지 행 번호가 밀리지 않음
+                            ok_count = sum(delete_account_by_row(r) for r in sorted(selected_rows, reverse=True))
+                            if ok_count == len(selected_rows):
+                                st.success(f"{ok_count}개 계정이 삭제되었습니다.")
+                            else:
+                                st.warning(f"{ok_count}/{len(selected_rows)}개만 삭제되었습니다. 목록을 다시 확인해주세요.")
+                            st.rerun()
                     else:
                         st.info("삭제할 계정이 없습니다.")
 
