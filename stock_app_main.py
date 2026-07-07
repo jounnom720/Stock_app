@@ -1206,11 +1206,16 @@ def render_admin_panel():
                             edit_row_options[label] = (sheet_row, row)
                         edit_label = st.selectbox("확인·수정할 계정", list(edit_row_options.keys()), key="admin_edit_target")
                         edit_row_num, edit_row_data = edit_row_options[edit_label]
-                        edit_name = st.text_input("이름", value=str(edit_row_data.get("이름", "")), key="admin_edit_name")
+                        # key에 행번호를 포함시켜, 계정을 바꿔 선택하면 입력창도 그 계정의 값으로 새로 그려지도록 함
+                        # (key가 그대로면 Streamlit이 이전 입력값을 계속 기억해 다른 계정으로 착각하게 됨)
+                        edit_name = st.text_input(
+                            "이름", value=str(edit_row_data.get("이름", "")),
+                            key=f"admin_edit_name_{edit_row_num}",
+                        )
                         edit_sheet_id = st.text_input(
                             "연결된 구글시트 spreadsheet_id",
                             value=str(edit_row_data.get("spreadsheet_id", "")),
-                            key="admin_edit_sheet_id",
+                            key=f"admin_edit_sheet_id_{edit_row_num}",
                         )
                         if st.button("💾 정보 저장", key="admin_edit_save_btn", width="stretch"):
                             if update_account_fields(edit_row_num, edit_name, edit_sheet_id):
