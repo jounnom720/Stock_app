@@ -272,6 +272,21 @@ def reset_account_password(user_id: str, new_password: str) -> bool:
         logging.warning("비밀번호 초기화 실패: %s", e)
         return False
 
+def delete_account_by_row(sheet_row_number: int) -> bool:
+    """'사용자계정' 시트에서 특정 행(구글시트 실제 행 번호, 헤더=1행)을 통째로 삭제.
+    아이디가 아닌 '행 번호'로 지정하는 이유: 등록 실수 등으로 동일 아이디가
+    중복 등록된 경우에도 원하는 한 행만 정확히 삭제하기 위함."""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        ws.delete_rows(sheet_row_number)
+        return True
+    except Exception as e:
+        logging.warning("계정 삭제 실패: %s", e)
+        return False
+
 def show_login():
     """로그인 화면. 성공 시 session_state에 사용자 정보를 저장하고 재실행."""
     st.markdown("## 📊 통합자산관리 시스템")
@@ -1162,6 +1177,28 @@ def render_admin_panel():
                                     st.warning("새 비밀번호를 입력해주세요.")
                     else:
                         st.info("등록된 계정이 없습니다.")
+
+                    st.markdown("---")
+                    st.caption("🗑 계정 삭제 (되돌릴 수 없음)")
+                    if not df_acc.empty:
+                        row_options = {}
+                        for i, row in df_acc.iterrows():
+                            sheet_row = i + 2  # 헤더가 1행이므로 실제 시트 행 번호는 +2
+                            label = f"행{sheet_row}: {row.get('아이디','')} / {row.get('이름','')} / {row.get('상태','')} / {row.get('등록일','')}"
+                            row_options[label] = sheet_row
+                        target_label = st.selectbox("삭제할 계정(행) 선택", list(row_options.keys()), key="admin_delete_target")
+                        st.caption("⚠️ 동일한 아이디가 여러 행에 있어도 선택한 '그 행'만 정확히 삭제됩니다.")
+                        confirm_text = st.text_input("삭제하려면 아래에 '삭제'를 입력하세요", key="admin_delete_confirm")
+                        if st.button("🗑 완전 삭제", key="admin_delete_btn", width="stretch",
+                                     disabled=(confirm_text != "삭제")):
+                            target_row = row_options[target_label]
+                            if delete_account_by_row(target_row):
+                                st.success(f"{target_label} 계정이 삭제되었습니다.")
+                                st.rerun()
+                            else:
+                                st.error("계정 삭제에 실패했습니다.")
+                    else:
+                        st.info("삭제할 계정이 없습니다.")
 
                 # ---------- 사용자 현황 ----------
                 with tab_b:
