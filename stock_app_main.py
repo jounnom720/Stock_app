@@ -17,6 +17,10 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import logging
 import bcrypt
+import hmac
+import hashlib
+import base64
+import time
 
 # ============================================================
 # 기본 설정
@@ -170,6 +174,53 @@ def authenticate(user_id: str, password: str):
         logging.warning("비밀번호 검증 실패: %s", e)
     return None
 
+def get_active_account(user_id: str):
+    """아이디로 '활성' 상태 계정 정보 조회 (비밀번호 검증 없이). 자동 재로그인 토큰 검증용."""
+    df = load_accounts_df()
+    if df.empty:
+        return None
+    row = df[(df["아이디"] == user_id) & (df["상태"] == "활성")]
+    if row.empty:
+        return None
+    row = row.iloc[0]
+    return {"이름": row["이름"], "spreadsheet_id": row["spreadsheet_id"]}
+
+# ============================================================
+# 세션 유지 토큰 (탭 클릭 등으로 연결이 끊겼다 재연결돼도 로그인 유지)
+# ============================================================
+def _session_secret() -> bytes:
+    """Secrets에 [auth] secret_key가 없으면 세션 유지 기능은 조용히 비활성화됨(로그인 자체는 정상 동작)."""
+    key = st.secrets.get("auth", {}).get("secret_key", "")
+    return key.encode("utf-8") if key else b""
+
+def make_session_token(user_id: str, ttl_hours: int = 24) -> str | None:
+    secret = _session_secret()
+    if not secret:
+        return None
+    expires = int(time.time()) + ttl_hours * 3600
+    payload = f"{user_id}:{expires}"
+    sig = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()[:20]
+    raw = f"{payload}:{sig}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8")
+
+def verify_session_token(token: str) -> str | None:
+    """토큰이 유효하면 user_id를, 아니면 None을 반환."""
+    secret = _session_secret()
+    if not secret or not token:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
+        user_id, expires_str, sig = raw.rsplit(":", 2)
+        expected_sig = hmac.new(secret, f"{user_id}:{expires_str}".encode("utf-8"), hashlib.sha256).hexdigest()[:20]
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        if int(expires_str) < int(time.time()):
+            return None
+        return user_id
+    except Exception as e:
+        logging.warning("세션 토큰 검증 실패: %s", e)
+        return None
+
 def add_account(user_id: str, password: str, name: str, spreadsheet_id: str) -> bool:
     """관리자가 신규 계정을 '사용자계정' 시트에 추가. bcrypt로 비밀번호를 해싱해서 저장."""
     try:
@@ -239,6 +290,10 @@ def show_login():
             # secrets에 [admin] user_id = "본인 로그인 아이디" 를 등록해두면,
             # 그 아이디로 로그인했을 때만 관리자 메뉴가 보이도록 함
             st.session_state["is_admin"] = (user_id == st.secrets.get("admin", {}).get("user_id"))
+            # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
+            token = make_session_token(user_id)
+            if token:
+                st.query_params["t"] = token
             st.rerun()
         else:
             st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
@@ -1047,7 +1102,8 @@ def load_all_data(spreadsheet_id: str):
     nonstock_df  = load_sheet("비주식자산", spreadsheet_id)
     cash_df      = load_sheet("현금성자산", spreadsheet_id)
     monthly_df   = load_sheet("월별자산스냅샷", spreadsheet_id)
-    return trade_df, nonstock_df, cash_df, monthly_df
+    transfer_df  = load_sheet("계좌간이체", spreadsheet_id)  # TDF 환매 등 계좌간 자금 이동 이력 (실현손익 포함)
+    return trade_df, nonstock_df, cash_df, monthly_df, transfer_df
 
 # ============================================================
 # 메인 앱
@@ -1151,6 +1207,7 @@ def main(spreadsheet_id: str):
         if st.button("로그아웃", key="logout_btn"):
             for k in ("logged_in", "user_name", "spreadsheet_id", "user_id", "is_admin"):
                 st.session_state.pop(k, None)
+            st.query_params.clear()
             st.rerun()
 
     # 관리자 메뉴 (본인 계정으로 로그인했을 때만 노출)
@@ -1159,7 +1216,7 @@ def main(spreadsheet_id: str):
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
-        trade_df, nonstock_df, cash_df, monthly_df = load_all_data(spreadsheet_id)
+        trade_df, nonstock_df, cash_df, monthly_df, transfer_df = load_all_data(spreadsheet_id)
 
     # 거래이력 사전 점검 (빈 셀, 거래구분 오타, 초과매도 등 흔한 입력 오류 안내)
     for _msg in validate_trade_df(trade_df):
@@ -1197,7 +1254,7 @@ def main(spreadsheet_id: str):
     # 탭1: 통합 대시보드
     # ══════════════════════════════════════════════
     with tab1:
-        render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices)
+        render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=trade_df, transfer_df=transfer_df)
 
     # ══════════════════════════════════════════════
     # 탭2: 보유 종목 상세
@@ -1268,9 +1325,10 @@ def render_market_indices():
     st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
-def calc_asset_summary(holdings_df, nonstock_df):
+def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None):
     """전체 자산(주식/ETF + TDF/펀드 + 현금성자산) 합산 요약을 계산.
-    render_dashboard, render_holdings 등 여러 탭에서 공통으로 사용."""
+    render_dashboard, render_holdings 등 여러 탭에서 공통으로 사용.
+    trade_df/transfer_df를 주면 실현손익(이미 매도·이체로 확정된 손익)까지 함께 계산."""
     # 1) 주식/ETF 평가금액
     stock_eval  = int(holdings_df["평가금액"].sum()) if not holdings_df.empty else 0
     stock_cost  = int(holdings_df["매입금액"].sum()) if not holdings_df.empty else 0
@@ -1302,7 +1360,7 @@ def calc_asset_summary(holdings_df, nonstock_df):
     # 비주식 전체 (TDF + 현금)
     nonstock_eval = tdf_eval + cash_eval
 
-    # 통합 합산
+    # 통합 합산 (미실현 손익 — 현재 보유 중인 자산 기준)
     total_eval = stock_eval + nonstock_eval
     total_cost = stock_cost + tdf_cost + cash_eval  # 현금은 원금=평가
 
@@ -1315,24 +1373,41 @@ def calc_asset_summary(holdings_df, nonstock_df):
     tdf_pct = tdf_pnl / tdf_cost * 100 if tdf_cost else 0
     cash_pct_of_total = cash_eval / total_eval * 100 if total_eval else 0
 
+    # 4) 실현손익 (이미 매도·이체로 확정된 손익 — 대시보드 총 손익에서 빠져있던 부분)
+    realized_stock = 0
+    if trade_df is not None and not trade_df.empty:
+        _realized_df = calc_realized_pnl(trade_df)
+        if not _realized_df.empty:
+            realized_stock = int(_realized_df["실현손익"].sum())
+
+    realized_transfer = 0
+    if transfer_df is not None and not transfer_df.empty and "실현손익" in transfer_df.columns:
+        realized_transfer = int(transfer_df["실현손익"].apply(_safe_num).sum())
+
+    realized_total = realized_stock + realized_transfer
+    grand_total_pnl = total_pnl + realized_total  # 미실현 + 실현 = 누적 총손익
+
     return {
         "stock_eval": stock_eval, "stock_cost": stock_cost, "stock_pnl": stock_pnl, "stock_pct": stock_pct,
         "tdf_eval": tdf_eval, "tdf_cost": tdf_cost, "tdf_pnl": tdf_pnl, "tdf_pct": tdf_pct,
         "cash_eval": cash_eval, "cash_pct_of_total": cash_pct_of_total,
         "nonstock_eval": nonstock_eval,
         "total_eval": total_eval, "total_cost": total_cost, "total_pnl": total_pnl, "total_pct": total_pct,
+        "realized_stock": realized_stock, "realized_transfer": realized_transfer,
+        "realized_total": realized_total, "grand_total_pnl": grand_total_pnl,
     }
 
 
-def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices):
+def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
     render_market_indices()
 
-    s = calc_asset_summary(holdings_df, nonstock_df)
+    s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
     stock_eval, stock_cost, stock_pnl, stock_pct = s["stock_eval"], s["stock_cost"], s["stock_pnl"], s["stock_pct"]
     tdf_eval, tdf_cost, tdf_pnl, tdf_pct = s["tdf_eval"], s["tdf_cost"], s["tdf_pnl"], s["tdf_pct"]
     cash_eval, cash_pct_of_total = s["cash_eval"], s["cash_pct_of_total"]
     total_eval, total_cost, total_pnl, total_pct = s["total_eval"], s["total_cost"], s["total_pnl"], s["total_pct"]
+    realized_total, grand_total_pnl = s["realized_total"], s["grand_total_pnl"]
 
     # ── 히어로 카드: 원금 → 평가금액 → 손익 한눈에 + 비중 바 ──
     st.markdown('<div class="section-title">통합 자산 현황</div>', unsafe_allow_html=True)
@@ -1381,6 +1456,13 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices):
         f'</div>'
     )
     st.markdown(hero_html, unsafe_allow_html=True)
+
+    # 미실현 + 실현(매도·이체로 이미 확정된) 손익을 함께 보여줘서 "체감 수익"과 화면 숫자 차이를 없앰
+    if realized_total != 0:
+        st.caption(
+            f"미실현 {fmt_money_full(total_pnl)} + 실현손익(매도·이체) {fmt_money_full(realized_total)} "
+            f"= 누적 총손익 {fmt_money_full(grand_total_pnl)}"
+        )
 
     # ── 계좌별 현황 ──
     st.markdown('<div class="section-title">계좌별 현황</div>', unsafe_allow_html=True)
@@ -2224,6 +2306,21 @@ def render_data_mgmt(nonstock_df, cash_df):
 # 실행 (로그인 게이트)
 # ============================================================
 if __name__ == "__main__" or True:
+    # 세션 연결이 끊겼다 재연결된 경우, 주소창의 서명된 토큰으로 자동 재로그인 시도
+    # (탭 클릭 등으로 웹소켓이 재연결되면서 session_state가 초기화되는 경우에 대한 방어 코드)
+    if not st.session_state.get("logged_in"):
+        token = st.query_params.get("t")
+        if token:
+            restored_user_id = verify_session_token(token)
+            if restored_user_id:
+                account = get_active_account(restored_user_id)
+                if account:
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_name"] = account["이름"]
+                    st.session_state["spreadsheet_id"] = account["spreadsheet_id"]
+                    st.session_state["user_id"] = restored_user_id
+                    st.session_state["is_admin"] = (restored_user_id == st.secrets.get("admin", {}).get("user_id"))
+
     if not st.session_state.get("logged_in"):
         show_login()
         st.stop()
