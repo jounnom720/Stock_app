@@ -262,21 +262,29 @@ def add_signup_request(user_id: str, password: str, name: str, email: str) -> tu
 
 def approve_signup(sheet_row_number: int, user_email: str, user_name: str) -> tuple[bool, str]:
     """대기 중인 가입 신청을 승인.
-    1) secrets의 [template] spreadsheet_id를 복사해 신청자 전용 구글시트를 새로 만들고,
-    2) 그 시트를 신청자의 구글 이메일에 '편집자'로 공유(구글이 초대 메일을 자동 발송),
-    3) '사용자계정' 시트의 spreadsheet_id/상태를 갱신한다."""
+    [주의] 서비스 계정으로 새 구글시트를 '복사 생성'하면 서비스 계정 자체의 드라이브 저장공간이 0이라
+    'storage quota exceeded' 오류가 남. 그래서 파일을 새로 만들지 않고, Jone이 미리 본인 드라이브에
+    만들어 서비스 계정에 편집자로 공유해둔 '템플릿 풀' 중 아직 아무에게도 배정 안 된 것을 하나 골라
+    1) 제목만 신청자 이름으로 바꾸고, 2) 신청자 이메일에 편집자로 공유(구글이 초대 메일 자동 발송)한다."""
     try:
         client = get_gspread_client()
         if client is None:
             return False, "구글 인증에 실패했습니다."
-        template_id = st.secrets.get("template", {}).get("spreadsheet_id")
-        if not template_id:
-            return False, "secrets에 [template] spreadsheet_id가 설정되어 있지 않습니다. 먼저 등록해주세요."
-        if not user_email:
-            return False, "신청자 이메일이 비어 있어 공유할 수 없습니다. 계정 정보를 먼저 수정해주세요."
 
-        new_sheet = client.copy(template_id, title=f"{user_name}_자산관리", copy_permissions=False)
-        new_sheet.share(
+        pool = list(st.secrets.get("template", {}).get("pool", []))
+        if not pool:
+            return False, "secrets에 [template] pool(템플릿 spreadsheet_id 목록)이 설정되어 있지 않습니다."
+
+        df = load_accounts_df()
+        assigned_ids = set(df["spreadsheet_id"].astype(str).str.strip()) if not df.empty else set()
+        available = [sid for sid in pool if sid not in assigned_ids]
+        if not available:
+            return False, "배정 가능한 여분 템플릿이 없습니다. 템플릿을 몇 개 더 만들어 secrets에 추가해주세요."
+
+        new_id = available[0]
+        sheet = client.open_by_key(new_id)
+        sheet.update_title(f"{user_name}_자산관리")
+        sheet.share(
             user_email, perm_type="user", role="writer", notify=True,
             email_message="자산관리 앱 계정이 승인되었습니다. 아래 링크의 구글시트에 본인 거래 데이터를 입력해주세요.",
         )
@@ -286,9 +294,9 @@ def approve_signup(sheet_row_number: int, user_email: str, user_name: str) -> tu
         header = ws.row_values(1)
         sheet_id_col = header.index("spreadsheet_id") + 1
         status_col = header.index("상태") + 1
-        ws.update_cell(sheet_row_number, sheet_id_col, new_sheet.id)
+        ws.update_cell(sheet_row_number, sheet_id_col, new_id)
         ws.update_cell(sheet_row_number, status_col, "활성")
-        return True, f"승인 완료: 신규 시트가 생성되고 {user_email}로 편집 권한 공유 메일이 발송되었습니다."
+        return True, f"승인 완료: 준비된 템플릿을 배정하고 {user_email}로 편집 권한 공유 메일이 발송되었습니다. (남은 여분 템플릿 {len(available) - 1}개)"
     except Exception as e:
         logging.warning("가입 승인 실패: %s", e)
         return False, f"승인 처리 중 오류가 발생했습니다: {type(e).__name__} - {e}"
@@ -511,20 +519,19 @@ def get_current_price(code: str, prices: dict) -> float | None:
     ticker = meta["ticker"]
     return prices.get(ticker)
 
-@st.cache_data(ttl=300)
-def get_market_index_data() -> dict[str, dict]:
-    """시장 지표(코스피·환율·VIX 등)의 현재가와 전일 대비 등락률을 조회."""
+def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
+    """여러 티커의 (현재가, 전일종가) 기준 등락률을 일괄 조회하고, 실패한 티커만 개별 재시도.
+    get_market_index_data()와 get_day_change()가 공통으로 사용하는 핵심 로직."""
     result = {}
-    tickers = [m["ticker"] for m in MARKET_INDICES]
     try:
-        ticker_str = " ".join(tickers)
+        ticker_str = " ".join(ticker_list)
         data = yf.download(ticker_str, period="5d", progress=False, auto_adjust=True, threads=True)
         if "Close" in data.columns:
             close = data["Close"].dropna(how="all")
             if len(close) >= 2:
                 latest_row = close.iloc[-1]
                 prev_row = close.iloc[-2]
-                for t in tickers:
+                for t in ticker_list:
                     try:
                         cur = float(latest_row[t]) if hasattr(latest_row, "__getitem__") else float(latest_row)
                         prev = float(prev_row[t]) if hasattr(prev_row, "__getitem__") else float(prev_row)
@@ -533,10 +540,9 @@ def get_market_index_data() -> dict[str, dict]:
                     except Exception:
                         continue
     except Exception as e:
-        logging.warning("시장지표 일괄 조회 실패: %s", e)
+        logging.warning("일괄 등락률 조회 실패: %s", e)
 
-    # 누락된 지표 개별 재시도
-    missing = [t for t in tickers if t not in result]
+    missing = [t for t in ticker_list if t not in result]
     for t in missing:
         try:
             hist = yf.Ticker(t).history(period="5d")
@@ -546,9 +552,24 @@ def get_market_index_data() -> dict[str, dict]:
                 if prev != 0:
                     result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100}
         except Exception as e:
-            logging.warning("시장지표 개별 조회 실패 [%s]: %s", t, e)
-
+            logging.warning("개별 등락률 조회 실패 [%s]: %s", t, e)
     return result
+
+
+@st.cache_data(ttl=300)
+def get_market_index_data() -> dict[str, dict]:
+    """시장 지표(코스피·환율·VIX 등)의 현재가와 전일 대비 등락률을 조회."""
+    tickers = [m["ticker"] for m in MARKET_INDICES]
+    return _fetch_current_and_prev_close(tickers)
+
+
+@st.cache_data(ttl=300)
+def get_day_change(tickers: tuple) -> dict[str, dict]:
+    """보유종목 트리맵용 — 임의의 티커 목록에 대해 당일(전일 종가 대비) 등락률을 조회.
+    st.cache_data는 list를 해시할 수 없으므로 tuple로 받음."""
+    if not tickers:
+        return {}
+    return _fetch_current_and_prev_close(list(tickers))
 
 # ============================================================
 # 숫자 안전 변환 (빈 셀·하이픈·쉼표 등으로 인한 크래시 방지)
@@ -1572,6 +1593,64 @@ def render_market_indices():
     st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
+def render_holdings_treemap(holdings_df: pd.DataFrame):
+    """보유종목 트리맵 — 사각형 크기=평가금액 비중, 색상=당일(전일 종가 대비) 등락률.
+    같은 종목이 여러 계좌에 나뉘어 있으면 종목코드 기준으로 평가금액을 합산해서 하나로 표시."""
+    st.markdown('<div class="section-title">보유종목 현황판 (당일 등락률)</div>', unsafe_allow_html=True)
+
+    if holdings_df.empty:
+        st.info("보유 중인 종목이 없습니다.")
+        return
+
+    grouped = holdings_df.groupby(["종목코드", "종목명"], as_index=False)["평가금액"].sum()
+    grouped = grouped[grouped["평가금액"] > 0].reset_index(drop=True)
+    if grouped.empty:
+        st.info("표시할 보유종목이 없습니다.")
+        return
+
+    tickers = tuple(sorted({
+        ASSET_MASTER[c]["ticker"] for c in grouped["종목코드"] if c in ASSET_MASTER
+    }))
+    day_change = get_day_change(tickers)
+
+    def _change_pct(code):
+        meta = ASSET_MASTER.get(code)
+        if meta is None:
+            return None
+        info = day_change.get(meta["ticker"])
+        return info["change_pct"] if info else None
+
+    grouped["당일등락률"] = grouped["종목코드"].apply(_change_pct)
+    grouped["등락표시"] = grouped["당일등락률"].apply(
+        lambda v: f"{v:+.2f}%" if v is not None else "조회 실패"
+    )
+    color_values = grouped["당일등락률"].fillna(0).tolist()
+
+    fig = go.Figure(go.Treemap(
+        labels=grouped["종목명"],
+        parents=[""] * len(grouped),
+        values=grouped["평가금액"],
+        customdata=grouped["등락표시"],
+        texttemplate="%{label}<br>%{customdata}",
+        textfont=dict(size=14),
+        marker=dict(
+            colors=color_values,
+            colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],  # 하락=파랑, 상승=빨강 (국내 관례)
+            cmid=0,
+            line=dict(width=1, color="#1a1d24"),
+        ),
+        hovertemplate="<b>%{label}</b><br>평가금액: %{value:,.0f}원<br>당일등락률: %{customdata}<extra></extra>",
+    ))
+    fig.update_layout(
+        margin=dict(t=10, l=4, r=4, b=4),
+        height=360,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("사각형 크기 = 보유종목 평가금액 비중 · 색상 = 당일(전일 종가 대비) 등락률")
+
+
 def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None):
     """전체 자산(주식/ETF + TDF/펀드 + 현금성자산) 합산 요약을 계산.
     render_dashboard, render_holdings 등 여러 탭에서 공통으로 사용.
@@ -1648,6 +1727,7 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
 def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
     render_market_indices()
+    render_holdings_treemap(holdings_df)
 
     s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
     stock_eval, stock_cost, stock_pnl, stock_pct = s["stock_eval"], s["stock_cost"], s["stock_pnl"], s["stock_pct"]
