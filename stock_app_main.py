@@ -224,18 +224,89 @@ def verify_session_token(token: str) -> str | None:
         logging.warning("세션 토큰 검증 실패: %s", e)
         return None
 
-def add_account(user_id: str, password: str, name: str, spreadsheet_id: str) -> bool:
-    """관리자가 신규 계정을 '사용자계정' 시트에 추가. bcrypt로 비밀번호를 해싱해서 저장."""
+def add_account(user_id: str, password: str, name: str, spreadsheet_id: str, email: str = "") -> bool:
+    """관리자가 신규 계정을 '사용자계정' 시트에 추가. bcrypt로 비밀번호를 해싱해서 저장.
+    컬럼 순서: 아이디 / 비밀번호_해시 / 이름 / 이메일 / spreadsheet_id / 등록일 / 상태"""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
             return False
         ws = spreadsheet.worksheet("사용자계정")
         hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        ws.append_row([user_id, hashed, name, spreadsheet_id, str(date.today()), "활성"])
+        ws.append_row([user_id, hashed, name, email, spreadsheet_id, str(date.today()), "활성"])
         return True
     except Exception as e:
         logging.warning("계정 추가 실패: %s", e)
+        return False
+
+
+def add_signup_request(user_id: str, password: str, name: str, email: str) -> tuple[bool, str]:
+    """지인이 회원가입을 신청하면 '사용자계정' 시트에 상태='승인대기'로 추가.
+    승인 전에는 authenticate()가 '활성' 상태만 통과시키므로 자동으로 로그인이 차단된다."""
+    try:
+        df = load_accounts_df()
+        if not df.empty and user_id in df["아이디"].values:
+            return False, "이미 사용 중인 아이디입니다."
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False, "계정 시트 연결에 실패했습니다."
+        ws = spreadsheet.worksheet("사용자계정")
+        hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        # spreadsheet_id는 승인 시 템플릿을 복사해 자동으로 채워지므로 신청 단계에서는 빈 값
+        ws.append_row([user_id, hashed, name, email, "", str(date.today()), "승인대기"])
+        return True, "가입 신청이 접수되었습니다. 관리자 승인이 완료되면 입력하신 이메일로 자산관리 시트 공유 안내가 발송됩니다."
+    except Exception as e:
+        logging.warning("가입 신청 실패: %s", e)
+        return False, f"가입 신청 중 오류가 발생했습니다: {e}"
+
+
+def approve_signup(sheet_row_number: int, user_email: str, user_name: str) -> tuple[bool, str]:
+    """대기 중인 가입 신청을 승인.
+    1) secrets의 [template] spreadsheet_id를 복사해 신청자 전용 구글시트를 새로 만들고,
+    2) 그 시트를 신청자의 구글 이메일에 '편집자'로 공유(구글이 초대 메일을 자동 발송),
+    3) '사용자계정' 시트의 spreadsheet_id/상태를 갱신한다."""
+    try:
+        client = get_gspread_client()
+        if client is None:
+            return False, "구글 인증에 실패했습니다."
+        template_id = st.secrets.get("template", {}).get("spreadsheet_id")
+        if not template_id:
+            return False, "secrets에 [template] spreadsheet_id가 설정되어 있지 않습니다. 먼저 등록해주세요."
+        if not user_email:
+            return False, "신청자 이메일이 비어 있어 공유할 수 없습니다. 계정 정보를 먼저 수정해주세요."
+
+        new_sheet = client.copy(template_id, title=f"{user_name}_자산관리", copy_permissions=False)
+        new_sheet.share(
+            user_email, perm_type="user", role="writer", notify=True,
+            email_message="자산관리 앱 계정이 승인되었습니다. 아래 링크의 구글시트에 본인 거래 데이터를 입력해주세요.",
+        )
+
+        spreadsheet = get_accounts_spreadsheet()
+        ws = spreadsheet.worksheet("사용자계정")
+        header = ws.row_values(1)
+        sheet_id_col = header.index("spreadsheet_id") + 1
+        status_col = header.index("상태") + 1
+        ws.update_cell(sheet_row_number, sheet_id_col, new_sheet.id)
+        ws.update_cell(sheet_row_number, status_col, "활성")
+        return True, f"승인 완료: 신규 시트가 생성되고 {user_email}로 편집 권한 공유 메일이 발송되었습니다."
+    except Exception as e:
+        logging.warning("가입 승인 실패: %s", e)
+        return False, f"승인 처리 중 오류가 발생했습니다: {type(e).__name__} - {e}"
+
+
+def reject_signup(sheet_row_number: int) -> bool:
+    """대기 중인 가입 신청을 '거부' 상태로 변경 (바로 삭제하지 않아 이력이 남음)."""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        header = ws.row_values(1)
+        status_col = header.index("상태") + 1
+        ws.update_cell(sheet_row_number, status_col, "거부")
+        return True
+    except Exception as e:
+        logging.warning("가입 거부 처리 실패: %s", e)
         return False
 
 def update_account_status(user_id: str, new_status: str) -> bool:
@@ -290,9 +361,10 @@ def delete_account_by_row(sheet_row_number: int) -> bool:
         logging.warning("계정 삭제 실패: %s", e)
         return False
 
-def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str) -> bool:
-    """'사용자계정' 시트에서 특정 행의 이름/spreadsheet_id를 그대로 덮어씀.
-    spreadsheet_id를 잘못 등록한 경우, 계정을 삭제·재생성하지 않고 바로 고칠 수 있도록 함."""
+def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str, email: str = None) -> bool:
+    """'사용자계정' 시트에서 특정 행의 이름/spreadsheet_id(/이메일)를 그대로 덮어씀.
+    spreadsheet_id나 이메일을 잘못 등록한 경우, 계정을 삭제·재생성하지 않고 바로 고칠 수 있도록 함.
+    email이 None이면 이메일 컬럼은 건드리지 않는다(하위 호환)."""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
@@ -303,6 +375,9 @@ def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str)
         sheet_id_col = header.index("spreadsheet_id") + 1
         ws.update_cell(sheet_row_number, name_col, name)
         ws.update_cell(sheet_row_number, sheet_id_col, spreadsheet_id.strip())
+        if email is not None and "이메일" in header:
+            email_col = header.index("이메일") + 1
+            ws.update_cell(sheet_row_number, email_col, email.strip())
         return True
     except Exception as e:
         logging.warning("계정 정보 수정 실패: %s", e)
@@ -311,45 +386,82 @@ def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str)
 def show_login():
     """로그인 화면. 성공 시 session_state에 사용자 정보를 저장하고 재실행."""
     st.markdown("## 📊 통합자산관리 시스템")
-    st.markdown("#### 로그인")
-    with st.form("login_form"):
-        user_id = st.text_input("아이디")
-        password = st.text_input("비밀번호", type="password")
-        submitted = st.form_submit_button("로그인")
-    if submitted:
-        result = authenticate(user_id, password)
-        if result:
-            st.session_state["logged_in"] = True
-            st.session_state["user_name"] = result["이름"]
-            st.session_state["spreadsheet_id"] = result["spreadsheet_id"]
-            st.session_state["user_id"] = user_id
-            # secrets에 [admin] user_id = "본인 로그인 아이디" 를 등록해두면,
-            # 그 아이디로 로그인했을 때만 관리자 메뉴가 보이도록 함
-            st.session_state["is_admin"] = (user_id == st.secrets.get("admin", {}).get("user_id"))
-            # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
-            token = make_session_token(user_id)
-            if token:
-                st.query_params["t"] = token
-            st.rerun()
-        else:
-            st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
 
-    # 관리자 전용 계정 추가 패널 (지인들에게는 노출되지 않도록 접혀 있음)
-    with st.expander("🔐 관리자"):
-        admin_pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw")
-        if admin_pw and admin_pw == st.secrets.get("admin", {}).get("password"):
-            st.success("관리자 인증됨")
-            with st.form("add_account_form"):
-                new_id = st.text_input("신규 아이디")
-                new_pw = st.text_input("신규 비밀번호", type="password")
-                new_name = st.text_input("이름")
-                new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
-                add_submitted = st.form_submit_button("계정 추가")
-            if add_submitted:
-                if add_account(new_id, new_pw, new_name, new_sheet_id):
-                    st.success(f"'{new_id}' 계정이 추가되었습니다.")
+    tab_login, tab_signup = st.tabs(["로그인", "📝 회원가입 신청"])
+
+    # ---------- 로그인 ----------
+    with tab_login:
+        with st.form("login_form"):
+            user_id = st.text_input("아이디")
+            password = st.text_input("비밀번호", type="password")
+            submitted = st.form_submit_button("로그인")
+        if submitted:
+            result = authenticate(user_id, password)
+            if result:
+                st.session_state["logged_in"] = True
+                st.session_state["user_name"] = result["이름"]
+                st.session_state["spreadsheet_id"] = result["spreadsheet_id"]
+                st.session_state["user_id"] = user_id
+                # secrets에 [admin] user_id = "본인 로그인 아이디" 를 등록해두면,
+                # 그 아이디로 로그인했을 때만 관리자 메뉴가 보이도록 함
+                st.session_state["is_admin"] = (user_id == st.secrets.get("admin", {}).get("user_id"))
+                # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
+                token = make_session_token(user_id)
+                if token:
+                    st.query_params["t"] = token
+                st.rerun()
+            else:
+                # 아이디는 있지만 아직 '활성'이 아닌 경우, 원인을 구체적으로 안내
+                df = load_accounts_df()
+                row = df[df["아이디"] == user_id] if (not df.empty and user_id) else pd.DataFrame()
+                if not row.empty and row.iloc[0].get("상태") == "승인대기":
+                    st.warning("관리자 승인 대기 중인 계정입니다. 승인이 완료되면 이메일로 안내드립니다.")
+                elif not row.empty and row.iloc[0].get("상태") == "거부":
+                    st.error("가입이 거부된 계정입니다. 관리자에게 문의해주세요.")
                 else:
-                    st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
+                    st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+
+        # 관리자 전용 계정 직접 추가 패널 (긴급/소수 계정용. 평소엔 '회원가입 신청' 탭 사용을 권장)
+        with st.expander("🔐 관리자 (계정 직접 추가)"):
+            admin_pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw")
+            if admin_pw and admin_pw == st.secrets.get("admin", {}).get("password"):
+                st.success("관리자 인증됨")
+                with st.form("add_account_form"):
+                    new_id = st.text_input("신규 아이디")
+                    new_pw = st.text_input("신규 비밀번호", type="password")
+                    new_name = st.text_input("이름")
+                    new_email = st.text_input("이메일 (구글 계정)")
+                    new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
+                    add_submitted = st.form_submit_button("계정 추가")
+                if add_submitted:
+                    if add_account(new_id, new_pw, new_name, new_sheet_id, new_email):
+                        st.success(f"'{new_id}' 계정이 추가되었습니다.")
+                    else:
+                        st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
+
+    # ---------- 회원가입 신청 (지인 누구나 접근 가능) ----------
+    with tab_signup:
+        st.caption(
+            "아이디/비밀번호/이름/이메일을 입력해 신청하면, 관리자 승인 후 "
+            "자산관리용 구글시트가 자동으로 만들어지고 입력하신 이메일로 편집 권한 공유 메일이 발송됩니다."
+        )
+        with st.form("signup_form"):
+            su_id = st.text_input("사용할 아이디")
+            su_pw = st.text_input("사용할 비밀번호", type="password")
+            su_pw2 = st.text_input("비밀번호 확인", type="password")
+            su_name = st.text_input("이름")
+            su_email = st.text_input("이메일 (구글 계정 · 시트 공유용이므로 정확히 입력)")
+            su_submitted = st.form_submit_button("가입 신청", type="primary")
+        if su_submitted:
+            if not (su_id and su_pw and su_name and su_email):
+                st.warning("모든 항목을 입력해주세요.")
+            elif su_pw != su_pw2:
+                st.warning("비밀번호가 서로 일치하지 않습니다.")
+            elif "@" not in su_email:
+                st.warning("이메일 형식을 확인해주세요.")
+            else:
+                ok, msg = add_signup_request(su_id, su_pw, su_name, su_email)
+                (st.success if ok else st.error)(msg)
 
 # ============================================================
 # 실시간 시세 조회
@@ -1153,7 +1265,7 @@ def render_admin_panel():
         with st.container(key="admin_panel_wrap"):
             with st.expander("🔧 관리자 메뉴", expanded=False):
                 st.caption("🔒 관리자 전용 · 지인 계정을 관리합니다")
-                tab_a, tab_b, tab_c = st.tabs(["계정 관리", "사용자 현황", "시스템"])
+                tab_a, tab_pending, tab_b, tab_c = st.tabs(["계정 관리", "🆕 가입 승인", "사용자 현황", "시스템"])
 
                 # ---------- 계정 관리 ----------
                 with tab_a:
@@ -1220,8 +1332,13 @@ def render_admin_panel():
                             value=str(edit_row_data.get("spreadsheet_id", "")),
                             key=f"admin_edit_sheet_id_{edit_row_num}",
                         )
+                        edit_email = st.text_input(
+                            "이메일 (구글 계정 · 시트 공유용)",
+                            value=str(edit_row_data.get("이메일", "")),
+                            key=f"admin_edit_email_{edit_row_num}",
+                        )
                         if st.button("💾 정보 저장", key="admin_edit_save_btn", width="stretch"):
-                            if update_account_fields(edit_row_num, edit_name, edit_sheet_id):
+                            if update_account_fields(edit_row_num, edit_name, edit_sheet_id, edit_email):
                                 st.success(f"'{edit_row_data.get('아이디','')}' 계정 정보가 수정되었습니다.")
                                 st.rerun()
                             else:
@@ -1233,7 +1350,7 @@ def render_admin_panel():
                         display_df = df_acc.copy()
                         display_df.insert(0, "선택", False)
                         display_df.insert(1, "행번호", [i + 2 for i in range(len(df_acc))])  # 헤더가 1행이므로 +2
-                        show_cols = [c for c in ["선택", "행번호", "아이디", "이름", "상태", "등록일"] if c in display_df.columns]
+                        show_cols = [c for c in ["선택", "행번호", "아이디", "이름", "이메일", "상태", "등록일"] if c in display_df.columns]
                         edited_df = st.data_editor(
                             display_df[show_cols],
                             hide_index=True,
@@ -1256,13 +1373,50 @@ def render_admin_panel():
                     else:
                         st.info("삭제할 계정이 없습니다.")
 
+                # ---------- 가입 승인 ----------
+                with tab_pending:
+                    st.caption("지인이 '회원가입 신청' 탭으로 접수한 요청을 확인하고 승인/거부합니다.")
+                    df_acc_pending = load_accounts_df()
+                    pending_df = (
+                        df_acc_pending[df_acc_pending["상태"] == "승인대기"]
+                        if not df_acc_pending.empty else pd.DataFrame()
+                    )
+                    if pending_df.empty:
+                        st.info("승인 대기 중인 신청이 없습니다.")
+                    else:
+                        st.caption(f"승인 대기 {len(pending_df)}건")
+                        for i, prow in pending_df.iterrows():
+                            sheet_row = i + 2  # 헤더가 1행이므로 +2
+                            with st.container(border=True):
+                                st.markdown(f"**{prow.get('이름','')}**  (아이디: {prow.get('아이디','')})")
+                                st.caption(f"이메일: {prow.get('이메일','')} · 신청일: {prow.get('등록일','')}")
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    if st.button("✅ 승인 (템플릿 자동 공유)", key=f"approve_{sheet_row}",
+                                                 width="stretch", type="primary"):
+                                        with st.spinner("템플릿 시트 복사 및 공유 처리 중..."):
+                                            ok, msg = approve_signup(
+                                                sheet_row, prow.get("이메일", ""), prow.get("이름", "")
+                                            )
+                                        (st.success if ok else st.error)(msg)
+                                        if ok:
+                                            st.rerun()
+                                with c2:
+                                    if st.button("❌ 거부", key=f"reject_{sheet_row}", width="stretch"):
+                                        if reject_signup(sheet_row):
+                                            st.warning("거부 처리되었습니다.")
+                                            st.rerun()
+                                        else:
+                                            st.error("거부 처리에 실패했습니다.")
+
                 # ---------- 사용자 현황 ----------
                 with tab_b:
                     df_acc = load_accounts_df()
                     if not df_acc.empty:
-                        display_cols = [c for c in ["아이디", "이름", "상태", "등록일"] if c in df_acc.columns]
+                        display_cols = [c for c in ["아이디", "이름", "이메일", "상태", "등록일"] if c in df_acc.columns]
                         st.dataframe(df_acc[display_cols], width="stretch", hide_index=True)
-                        st.caption(f"총 {len(df_acc)}개 계정 · 활성 {sum(df_acc['상태'] == '활성')}개")
+                        st.caption(f"총 {len(df_acc)}개 계정 · 활성 {sum(df_acc['상태'] == '활성')}개 · "
+                                   f"승인대기 {sum(df_acc['상태'] == '승인대기')}개")
                     else:
                         st.info("등록된 계정이 없습니다.")
 
