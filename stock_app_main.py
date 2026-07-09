@@ -36,6 +36,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# 사용자마다 브라우저 메뉴에서 라이트/다크를 각자 다르게 선택할 수 있으므로(로컬 저장이라
+# 서버에서 강제로 통일할 수 없음), 접속한 사용자 본인의 현재 테마를 실시간으로 확인해
+# 카드·배지·글씨 색상을 그에 맞게 자동으로 전환한다.
+try:
+    IS_LIGHT_THEME = (st.context.theme.type == "light")
+except Exception:
+    IS_LIGHT_THEME = False
+
 # ============================================================
 # 종목 마스터 데이터
 # ============================================================
@@ -879,19 +887,33 @@ def build_number_column_config(df: pd.DataFrame, money_cols: list[str] = None, p
 # ============================================================
 # CSS
 # ============================================================
-st.markdown("""
+# 라이트/다크 테마별 색상 변수는 별도의 작은 CSS 블록으로 주입 (아래 큰 CSS 블록은
+# 일반 문자열이라 중괄호를 이스케이프할 필요 없이 그대로 유지 가능)
+st.markdown(f"""
 <style>
-
-/* 한국 주식앱 색상 기준: 상승=빨강, 하락=파랑 */
-:root {
+:root {{
     --color-up:    #e0635e;
     --color-down:  #5b9bd8;
     --color-flat:  #9e9e9e;
-    --card-bg:     rgba(255,255,255,0.035);
-    --card-border: rgba(255,255,255,0.08);
-    --text-dim:    rgba(255,255,255,0.55);
-    --text-dim2:   rgba(255,255,255,0.4);
-}
+    --card-bg:     {"rgba(0,0,0,0.035)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.035)"};
+    --card-border: {"rgba(0,0,0,0.12)"   if IS_LIGHT_THEME else "rgba(255,255,255,0.08)"};
+    --text-dim:    {"rgba(0,0,0,0.62)"   if IS_LIGHT_THEME else "rgba(255,255,255,0.55)"};
+    --text-dim2:   {"rgba(0,0,0,0.48)"   if IS_LIGHT_THEME else "rgba(255,255,255,0.4)"};
+    --text-strong:  {"rgba(0,0,0,0.88)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.88)"};
+    --text-strong2: {"rgba(0,0,0,0.85)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.85)"};
+    --text-strong3: {"rgba(0,0,0,0.75)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.75)"};
+    --overlay-02: {"rgba(0,0,0,0.035)" if IS_LIGHT_THEME else "rgba(255,255,255,0.02)"};
+    --overlay-03: {"rgba(0,0,0,0.05)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.03)"};
+    --overlay-05: {"rgba(0,0,0,0.08)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.05)"};
+    --overlay-06: {"rgba(0,0,0,0.1)"   if IS_LIGHT_THEME else "rgba(255,255,255,0.06)"};
+    --overlay-08: {"rgba(0,0,0,0.12)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.08)"};
+    --overlay-10: {"rgba(0,0,0,0.15)"  if IS_LIGHT_THEME else "rgba(255,255,255,0.1)"};
+}}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
 
 /* ── 히어로 카드: 총 원금→평가금액 한눈에 ── */
 .hero-card {
@@ -925,7 +947,7 @@ st.markdown("""
     margin-top: 0.9rem;
     height: 9px;
     border-radius: 5px;
-    background: rgba(255,255,255,0.06);
+    background: var(--overlay-06);
     overflow: hidden;
     display: flex;
 }
@@ -957,7 +979,7 @@ st.markdown("""
 }
 .asset-breakdown-item {
     position: relative;
-    background: linear-gradient(160deg, var(--tint) 0%, rgba(255,255,255,0.03) 55%);
+    background: linear-gradient(160deg, var(--tint) 0%, var(--overlay-03) 55%);
     border: 1px solid var(--card-border);
     border-radius: 14px;
     padding: 1rem 1.1rem 1rem 1.25rem;
@@ -982,7 +1004,7 @@ st.markdown("""
     gap: 0.5rem;
     font-size: 0.92rem;
     font-weight: 700;
-    color: rgba(255,255,255,0.88);
+    color: var(--text-strong);
 }
 .asset-breakdown-icon {
     width: 26px;
@@ -1001,7 +1023,7 @@ st.markdown("""
     padding: 0.12rem 0.5rem;
     border-radius: 6px;
     background: var(--tint-strong);
-    color: rgba(255,255,255,0.75);
+    color: var(--text-strong3);
 }
 .asset-breakdown-value {
     font-size: 1.55rem;
@@ -1029,7 +1051,7 @@ st.markdown("""
     margin-top: 0.7rem;
     height: 4px;
     border-radius: 3px;
-    background: rgba(255,255,255,0.08);
+    background: var(--overlay-08);
     overflow: hidden;
 }
 .asset-breakdown-bar > div {
@@ -1074,7 +1096,7 @@ st.markdown("""
 }
 .acct-divider-light {
     margin: 0.3rem 0;
-    border-top: 1px dashed rgba(255,255,255,0.06);
+    border-top: 1px dashed var(--overlay-06);
 }
 
 /* ── 계좌 카드: 항목 행 (라벨 + 값 좌우 정렬) ── */
@@ -1132,7 +1154,7 @@ st.markdown("""
     font-weight: 700;
     margin: 1.4rem 0 0.7rem 0;
     padding-bottom: 0.35rem;
-    border-bottom: 2px solid rgba(255,255,255,0.1);
+    border-bottom: 2px solid var(--overlay-10);
 }
 
 /* ── 통계/지표 메트릭 카드 (거래이력·자금흐름 탭) ── */
@@ -1178,7 +1200,7 @@ st.markdown("""
     font-weight: 600;
     padding: 0.12rem 0.5rem;
     border-radius: 6px;
-    background: rgba(255,255,255,0.08);
+    background: var(--overlay-08);
     color: var(--text-dim);
 }
 .holding-acct-badge {
@@ -1240,7 +1262,7 @@ st.markdown("""
     .mgmt-summary-grid { grid-template-columns: 1fr; }
 }
 .mgmt-summary-item {
-    background: rgba(255,255,255,0.03);
+    background: var(--overlay-03);
     border: 1px solid var(--card-border);
     border-radius: 12px;
     padding: 0.85rem 1.05rem;
@@ -1282,7 +1304,7 @@ st.markdown("""
     overflow: hidden;
 }
 .mgmt-warn-card {
-    background: rgba(255,255,255,0.03);
+    background: var(--overlay-03);
     border: 1px solid var(--card-border);
     border-radius: 14px;
     padding: 1.1rem 1.3rem;
@@ -1294,7 +1316,7 @@ st.markdown("""
     flex-wrap: wrap;
 }
 .mgmt-warn-text { font-size: 0.88rem; color: var(--text-dim); max-width: 480px; }
-.mgmt-warn-text b { color: rgba(255,255,255,0.85); }
+.mgmt-warn-text b { color: var(--text-strong2); }
 
 /* ── 관리자 메뉴: 일반 화면과 구분되도록 골드 톤 강조 ── */
 div[class*="st-key-admin_panel_wrap"] div[data-testid="stExpander"] {
@@ -2550,7 +2572,7 @@ def render_data_mgmt(nonstock_df, cash_df):
         f'<div class="mgmt-summary-value">{fmt_money_full(tdf_total)}</div></div>'
         '</div>'
         '<div class="mgmt-summary-item">'
-        '<div class="mgmt-summary-icon" style="background:#6B6F7A33;color:#c9cbd1">💰</div>'
+        '<div class="mgmt-summary-icon" style="background:#6B6F7A33;color:#6B6F7A">💰</div>'
         '<div><div class="mgmt-summary-label">현금성자산 총액</div>'
         f'<div class="mgmt-summary-value">{fmt_money_full(cash_total)}</div></div>'
         '</div>'
@@ -2562,9 +2584,9 @@ def render_data_mgmt(nonstock_df, cash_df):
         """비주식자산 행을 카드로 감싼 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가, 하단에 합계행 표시."""
         p = "padding:0.65rem 1.1rem;"
         p_r = "padding:0.65rem 1.1rem;text-align:right;"
-        th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:rgba(255,255,255,0.02);"
-        th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:rgba(255,255,255,0.02);"
-        row_sep = "border-bottom:1px solid rgba(255,255,255,0.05);"
+        th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
+        th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
+        row_sep = "border-bottom:1px solid var(--overlay-05);"
 
         pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
         _acct_order_ns = sorted(rows["계좌"].astype(str).str.strip().unique().tolist()) if not rows.empty else []
@@ -2623,7 +2645,7 @@ def render_data_mgmt(nonstock_df, cash_df):
         # 합계행 (계좌+상품명+투자원금=3열 라벨, 평가금액 합계 1열, 나머지는 빈칸)
         trail_colspan = 3 if show_pnl else 2
         html += (
-            "<tr style='background:rgba(255,255,255,0.03);'>"
+            "<tr style='background:var(--overlay-03);'>"
             f"<td colspan='3' style='{p};font-weight:700;color:var(--text-dim);'>합계</td>"
             f"<td style='{p_r};font-weight:700;'>{fmt_money_full(total_eval)}</td>"
             f"<td colspan='{trail_colspan}' style='{p};'></td>"
