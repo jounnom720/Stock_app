@@ -2096,7 +2096,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 <div class="hero-pnl" style="color:{color_pnl(s['stock_pnl'])}">{fmt_money_full(s['stock_pnl'])} ({fmt_pct(s['stock_pct'])})</div>
             </div>
             <div class="hero-legend">
-                <span>TDF/펀드·현금성자산을 더한 전체 자산 {fmt_money_full(s['total_eval'])}원 중 {stock_pct_w:.0f}%를 차지합니다</span>
+                <span>TDF/펀드·현금성자산을 더한 전체 자산 {fmt_money_full(s['total_eval'])} 중 {stock_pct_w:.0f}%를 차지합니다</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
