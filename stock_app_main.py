@@ -2048,8 +2048,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     col_dev, col_btn = st.columns([5, 1])
     with col_dev:
         st.markdown(
-            f'<span title="hwcho@me.com" style="cursor:help;color:var(--text-dim);font-size:0.82rem;">'
-            f'개발자: H.W Jone · {APP_VERSION}</span>',
+            f'<a href="mailto:hwcho@me.com" title="hwcho@me.com" '
+            f'style="cursor:pointer;color:var(--text-dim);font-size:0.82rem;text-decoration:none;">'
+            f'개발자: H.W Jone · {APP_VERSION}</a>',
             unsafe_allow_html=True,
         )
     with col_btn:
