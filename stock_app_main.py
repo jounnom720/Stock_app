@@ -2084,19 +2084,19 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         st.info("보유 종목이 없습니다.")
         return
 
-    # ── 전체 자산총액 요약 (주식/ETF + TDF/펀드 + 현금성자산) ──
+    # ── 보유 주식/ETF 평가금액 요약 (이 탭은 주식/ETF만 다루므로, 카드 주인공도 주식/ETF로 통일) ──
     if nonstock_df is not None:
         s = calc_asset_summary(holdings_df, nonstock_df)
         stock_pct_w = s["stock_eval"] / s["total_eval"] * 100 if s["total_eval"] else 0
         st.markdown(f"""
         <div class="hero-card">
-            <div class="hero-label">나의 전체 자산총액 (주식/ETF + TDF/펀드 + 현금성자산)</div>
+            <div class="hero-label">투자원금 {fmt_money_full(s['stock_cost'])} → 보유 주식/ETF 평가금액</div>
             <div class="hero-row">
-                <div class="hero-value">{fmt_money_full(s['total_eval'])}</div>
-                <div class="hero-pnl" style="color:{color_pnl(s['total_pnl'])}">{fmt_money_full(s['total_pnl'])} ({fmt_pct(s['total_pct'])})</div>
+                <div class="hero-value">{fmt_money_full(s['stock_eval'])}</div>
+                <div class="hero-pnl" style="color:{color_pnl(s['stock_pnl'])}">{fmt_money_full(s['stock_pnl'])} ({fmt_pct(s['stock_pct'])})</div>
             </div>
             <div class="hero-legend">
-                <span><span class="hero-dot" style="background:#534AB7"></span>이 화면의 주식/ETF 평가금액 {fmt_money_full(s['stock_eval'])} (전체 자산의 {stock_pct_w:.0f}%) · {fmt_pct(s['stock_pct'])}</span>
+                <span>TDF/펀드·현금성자산을 더한 전체 자산 {fmt_money_full(s['total_eval'])}원 중 {stock_pct_w:.0f}%를 차지합니다</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
