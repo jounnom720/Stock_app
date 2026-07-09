@@ -54,7 +54,58 @@ ASSET_MASTER = {
     "005380": {"name": "현대차",             "ticker": "005380.KS", "type": "주식", "market": "KS"},
     "042660": {"name": "한화오션",            "ticker": "042660.KS", "type": "주식", "market": "KS"},
     "071970": {"name": "HD현대마린엔진",       "ticker": "071970.KS", "type": "주식", "market": "KS"},
+    "034020": {"name": "두산에너빌리티",       "ticker": "034020.KS", "type": "주식", "market": "KS"},
 }
+
+# 국내 상장 ETF는 대부분 이 브랜드명으로 시작 — ASSET_MASTER에 등록되지 않은 새 종목이 들어와도
+# 종목명만으로 ETF/주식을 자동 구분하기 위한 보조 목록 (신규 사용자의 미등록 종목 대응)
+ETF_BRAND_PREFIXES = (
+    "KODEX", "TIGER", "KBSTAR", "ARIRANG", "SOL", "ACE", "HANARO",
+    "KOSEF", "PLUS", "RISE", "WOORI", "마이다스", "히어로즈", "TIMEFOLIO",
+)
+
+def get_asset_ticker(code: str) -> str:
+    """ASSET_MASTER에 등록된 종목은 등록된 티커를, 미등록 종목코드는 KRX 6자리 코드 규칙에 따라
+    자동으로 야후파이낸스 티커(코드.KS)를 생성해 반환. 신규 사용자가 보유한 임의의 종목코드도
+    별도 등록 없이 실시간 시세 조회가 되도록 하기 위함."""
+    code = str(code).strip()
+    if not code:
+        return ""
+    meta = ASSET_MASTER.get(code)
+    if meta:
+        return meta["ticker"]
+    return f"{code}.KS"
+
+def get_asset_type(code: str, name: str = "") -> str:
+    """ASSET_MASTER에 등록된 종목은 등록된 유형을, 미등록 종목은 종목명 앞부분(ETF 브랜드명)으로
+    ETF 여부를 추정해 반환. 등록되지 않은 종목이라도 '구분' 표시가 항상 채워지도록 한다."""
+    code = str(code).strip()
+    meta = ASSET_MASTER.get(code)
+    if meta:
+        return meta["type"]
+    name_str = str(name).strip().upper()
+    if any(name_str.startswith(p.upper()) for p in ETF_BRAND_PREFIXES):
+        return "ETF"
+    return "주식"
+
+# 계좌별 카드 배지 색상 팔레트 — 계좌 수가 몇 개든(신한/미래에셋뿐 아니라 향후 추가 계좌도)
+# 순서대로 돌려가며 배정하기 위함. (bg, fg) 튜플.
+ACCOUNT_COLOR_PALETTE = [
+    ("rgba(59,130,246,0.16)",  "#7fb2f5"),   # 파랑
+    ("rgba(29,158,117,0.16)",  "#4ecb9a"),   # 초록
+    ("rgba(234,179,8,0.18)",   "#f5cf6b"),   # 호박색
+    ("rgba(168,85,247,0.16)",  "#c79bf0"),   # 보라
+    ("rgba(236,72,153,0.16)",  "#f2a0c6"),   # 핑크
+    ("rgba(20,184,166,0.16)",  "#7fe3d4"),   # 청록
+]
+
+def get_account_color(acct_name: str, acct_order: list) -> tuple:
+    """계좌 이름을 acct_order 내 순번에 따라 팔레트 색상에 매핑 (bg, fg) 반환."""
+    try:
+        idx = acct_order.index(acct_name)
+    except ValueError:
+        idx = 0
+    return ACCOUNT_COLOR_PALETTE[idx % len(ACCOUNT_COLOR_PALETTE)]
 
 # ============================================================
 # 시장 지표 마스터 (대시보드 상단 카드용, 성격별 4그룹)
@@ -513,10 +564,9 @@ def get_prices(tickers: tuple) -> dict[str, float]:
     return prices
 
 def get_current_price(code: str, prices: dict) -> float | None:
-    meta = ASSET_MASTER.get(code)
-    if meta is None:
+    ticker = get_asset_ticker(code)
+    if not ticker:
         return None
-    ticker = meta["ticker"]
     return prices.get(ticker)
 
 def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
@@ -1493,12 +1543,12 @@ def main(spreadsheet_id: str):
     # 보유 종목 계산
     holdings_df = calc_holdings(trade_df)
 
-    # 시세 조회
+    # 시세 조회 (ASSET_MASTER 미등록 종목도 종목코드 기반으로 티커를 자동 생성해 조회)
     tickers = []
     for code in holdings_df["종목코드"].tolist() if not holdings_df.empty else []:
-        meta = ASSET_MASTER.get(code)
-        if meta:
-            tickers.append(meta["ticker"])
+        ticker = get_asset_ticker(code)
+        if ticker:
+            tickers.append(ticker)
 
     col_refresh, _ = st.columns([1, 5])
     with col_refresh:
@@ -1609,15 +1659,15 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
         return
 
     tickers = tuple(sorted({
-        ASSET_MASTER[c]["ticker"] for c in grouped["종목코드"] if c in ASSET_MASTER
+        get_asset_ticker(c) for c in grouped["종목코드"] if get_asset_ticker(c)
     }))
     day_change = get_day_change(tickers)
 
     def _change_pct(code):
-        meta = ASSET_MASTER.get(code)
-        if meta is None:
+        ticker = get_asset_ticker(code)
+        if not ticker:
             return None
-        info = day_change.get(meta["ticker"])
+        info = day_change.get(ticker)
         return info["change_pct"] if info else None
 
     grouped["당일등락률"] = grouped["종목코드"].apply(_change_pct)
@@ -1794,115 +1844,113 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     # ── 계좌별 현황 ──
     st.markdown('<div class="section-title">계좌별 현황</div>', unsafe_allow_html=True)
 
-    irp_stocks = holdings_df[holdings_df["계좌"].str.contains("신한", na=False)] if not holdings_df.empty else pd.DataFrame()
-    mira_stocks = holdings_df[holdings_df["계좌"].str.contains("미래에셋", na=False)] if not holdings_df.empty else pd.DataFrame()
+    # 신한/미래에셋으로 고정하지 않고, 거래이력·비주식자산 시트에 실제 등장하는 계좌명만 동적으로 집계.
+    # 사용자마다 보유 계좌 구성이 다르므로, 데이터가 없는 계좌는 카드 자체가 생성되지 않는다.
+    def _num(x):
+        try:
+            v = str(x).strip().replace(",", "")
+            return float(v) if v and v not in ("-", "") else 0.0
+        except (ValueError, TypeError):
+            return 0.0
 
-    # IRP 계좌: ETF + TDF + 현금
-    irp_stock_eval = int(irp_stocks["평가금액"].sum()) if not irp_stocks.empty else 0
-    irp_stock_cost = int(irp_stocks["매입금액"].sum()) if not irp_stocks.empty else 0
-    irp_tdf_eval   = tdf_eval  # 비주식자산 IRP 귀속
-    irp_cash_eval  = 0
-    if not nonstock_df.empty:
-        irp_cash_rows = nonstock_df[
-            (nonstock_df["자산군"] == "현금성자산") &
-            (nonstock_df["계좌"].str.contains("신한", na=False))
-        ]
-        irp_cash_eval = int(irp_cash_rows["평가금액"].apply(lambda x: float(str(x).strip().replace(',','')) if str(x).strip() not in ('', '-') else 0.0).sum())
-    irp_total = irp_stock_eval + irp_tdf_eval + irp_cash_eval
-    irp_cost  = irp_stock_cost + tdf_cost + irp_cash_eval
-    irp_pnl   = irp_total - irp_cost
-    irp_pct   = irp_pnl / irp_cost * 100 if irp_cost else 0
+    stock_accounts = set(holdings_df["계좌"].unique()) if not holdings_df.empty else set()
+    nonstock_accounts = set(nonstock_df["계좌"].unique()) if not nonstock_df.empty else set()
+    all_accounts = sorted(stock_accounts | nonstock_accounts)
 
-    # 미래에셋: 주식 + 예수금
-    mira_eval = int(mira_stocks["평가금액"].sum()) if not mira_stocks.empty else 0
-    mira_cost = int(mira_stocks["매입금액"].sum()) if not mira_stocks.empty else 0
-    mira_cash = 0
-    if not nonstock_df.empty:
-        mira_cash_rows = nonstock_df[
-            (nonstock_df["자산군"] == "현금성자산") &
-            (nonstock_df["계좌"].str.contains("미래에셋", na=False))
-        ]
-        mira_cash = int(mira_cash_rows["평가금액"].apply(lambda x: float(str(x).strip().replace(',','')) if str(x).strip() not in ('', '-') else 0.0).sum())
-    mira_total = mira_eval + mira_cash
-    mira_cost_total = mira_cost + mira_cash
-    mira_pnl  = mira_total - mira_cost_total
-    mira_pct  = mira_pnl / mira_cost_total * 100 if mira_cost_total else 0
+    account_cards = []
+    for acct in all_accounts:
+        acct_holdings = holdings_df[holdings_df["계좌"] == acct] if not holdings_df.empty else pd.DataFrame()
+        stock_eval_a = int(acct_holdings["평가금액"].sum()) if not acct_holdings.empty else 0
+        stock_cost_a = int(acct_holdings["매입금액"].sum()) if not acct_holdings.empty else 0
 
-    irp_card_html = f"""
+        acct_nonstock = nonstock_df[nonstock_df["계좌"] == acct] if not nonstock_df.empty else pd.DataFrame()
+        tdf_eval_a, tdf_cost_a, cash_eval_a = 0.0, 0.0, 0.0
+        if not acct_nonstock.empty:
+            for _, row in acct_nonstock.iterrows():
+                유형 = str(row.get("자산군", ""))
+                eva = _num(row.get("평가금액", 0))
+                pri = _num(row.get("원금", 0))
+                if 유형 in ("TDF", "펀드", "채권"):
+                    tdf_eval_a += eva
+                    tdf_cost_a += pri
+                elif 유형 == "현금성자산":
+                    cash_eval_a += eva
+        tdf_eval_a, tdf_cost_a, cash_eval_a = int(tdf_eval_a), int(tdf_cost_a), int(cash_eval_a)
+
+        total_a = stock_eval_a + tdf_eval_a + cash_eval_a
+        cost_a  = stock_cost_a + tdf_cost_a + cash_eval_a  # 현금은 원금=평가
+        pnl_a   = total_a - cost_a
+        pct_a   = pnl_a / cost_a * 100 if cost_a else 0
+
+        bg, fg = get_account_color(acct, all_accounts)
+        card_html = f"""
         <div class="acct-card">
-            <span class="acct-badge badge-irp">신한은행 IRP · ETF·TDF</span>
+            <span class="acct-badge" style="background:{bg};color:{fg}">{acct}</span>
             <div class="acct-main-row">
-                <div class="acct-value">{fmt_money_full(irp_total)}</div>
-                <div class="acct-pnl" style="color:{color_pnl(irp_pnl)}">{fmt_money_full(irp_pnl)} ({fmt_pct(irp_pct)})</div>
+                <div class="acct-value">{fmt_money_full(total_a)}</div>
+                <div class="acct-pnl" style="color:{color_pnl(pnl_a)}">{fmt_money_full(pnl_a)} ({fmt_pct(pct_a)})</div>
             </div>
             <div class="acct-divider"></div>
             <div class="acct-row">
                 <span class="acct-row-label">투자원금</span>
-                <span class="acct-row-val">{fmt_money_full(irp_cost)}</span>
+                <span class="acct-row-val">{fmt_money_full(cost_a)}</span>
             </div>
             <div class="acct-divider-light"></div>
             <div class="acct-row">
-                <span class="acct-row-label acct-row-sub">├ ETF 평가</span>
-                <span class="acct-row-val">{fmt_money_full(irp_stock_eval)}</span>
+                <span class="acct-row-label acct-row-sub">├ 보유종목 평가</span>
+                <span class="acct-row-val">{fmt_money_full(stock_eval_a)}</span>
             </div>
             <div class="acct-row">
-                <span class="acct-row-label acct-row-sub">├ TDF 평가</span>
-                <span class="acct-row-val">{fmt_money_full(irp_tdf_eval)}</span>
+                <span class="acct-row-label acct-row-sub">├ TDF/펀드 평가</span>
+                <span class="acct-row-val">{fmt_money_full(tdf_eval_a)}</span>
             </div>
             <div class="acct-row">
                 <span class="acct-row-label acct-row-sub">└ 현금</span>
-                <span class="acct-row-val">{fmt_money_full(irp_cash_eval)}</span>
+                <span class="acct-row-val">{fmt_money_full(cash_eval_a)}</span>
             </div>
         </div>"""
-
-    mira_card_html = f"""
-        <div class="acct-card">
-            <span class="acct-badge badge-mira">미래에셋증권 · 주식</span>
-            <div class="acct-main-row">
-                <div class="acct-value">{fmt_money_full(mira_total)}</div>
-                <div class="acct-pnl" style="color:{color_pnl(mira_pnl)}">{fmt_money_full(mira_pnl)} ({fmt_pct(mira_pct)})</div>
-            </div>
-            <div class="acct-divider"></div>
-            <div class="acct-row">
-                <span class="acct-row-label">투자원금</span>
-                <span class="acct-row-val">{fmt_money_full(mira_cost_total)}</span>
-            </div>
-            <div class="acct-divider-light"></div>
-            <div class="acct-row">
-                <span class="acct-row-label acct-row-sub">├ 주식 평가</span>
-                <span class="acct-row-val">{fmt_money_full(mira_eval)}</span>
-            </div>
-            <div class="acct-row">
-                <span class="acct-row-label acct-row-sub">└ 예수금</span>
-                <span class="acct-row-val">{fmt_money_full(mira_cash)}</span>
-            </div>
-        </div>"""
-
-    # 평가금액이 큰 계좌를 왼쪽에 배치
-    cards_in_order = [mira_card_html, irp_card_html] if mira_total >= irp_total else [irp_card_html, mira_card_html]
-
-    ca, cb = st.columns(2)
-    with ca:
-        st.markdown(cards_in_order[0], unsafe_allow_html=True)
-    with cb:
-        st.markdown(cards_in_order[1], unsafe_allow_html=True)
-
-    # TDF 환매 후 원금 중 일부만 재투자되어 신한은행 IRP 계좌의 손익이 큰 폭의 마이너스로 보이는 경우,
-    # 실제 손실로 오해하지 않도록 안내 문구 표시 (TDF 원금-평가금액 차이가 IRP 계좌 손실의 절반 이상을 차지할 때)
-    tdf_gap = tdf_cost - tdf_eval
-    if tdf_gap > 0 and irp_pnl < 0 and tdf_gap >= abs(irp_pnl) * 0.5:
-        st.caption(
-            "💡 신한은행 IRP 계좌의 평가손익이 큰 폭의 마이너스로 보이는 건 실제 손실이 아닐 수 있습니다. "
-            "TDF 환매 후 원금 중 일부만 재투자되고 나머지는 다른 계좌(예수금)로 이동한 경우 이렇게 표시됩니다. "
-            "자세한 내역은 '데이터 관리' 탭을 확인해주세요."
+        account_cards.append(
+            {"acct": acct, "total": total_a, "pnl": pnl_a, "tdf_cost": tdf_cost_a, "tdf_eval": tdf_eval_a, "html": card_html}
         )
+
+    # 평가금액이 큰 계좌부터 좌 → 우 순서로 2열 배치
+    account_cards.sort(key=lambda c: c["total"], reverse=True)
+
+    if not account_cards:
+        st.info("등록된 계좌 데이터가 없습니다.")
+    else:
+        cols = st.columns(2)
+        for i, c in enumerate(account_cards):
+            with cols[i % 2]:
+                st.markdown(c["html"], unsafe_allow_html=True)
+
+        # TDF 환매 후 원금 중 일부만 재투자되어 특정 계좌 손익이 큰 폭의 마이너스로 보이는 경우,
+        # 실제 손실로 오해하지 않도록 계좌별로 안내 문구 표시
+        for c in account_cards:
+            _tdf_gap = c["tdf_cost"] - c["tdf_eval"]
+            if _tdf_gap > 0 and c["pnl"] < 0 and _tdf_gap >= abs(c["pnl"]) * 0.5:
+                st.caption(
+                    f"💡 **{c['acct']}** 계좌의 평가손익이 큰 폭의 마이너스로 보이는 건 실제 손실이 아닐 수 있습니다. "
+                    "TDF 환매 후 원금 중 일부만 재투자되고 나머지는 다른 계좌(예수금)로 이동한 경우 이렇게 표시됩니다. "
+                    "자세한 내역은 '데이터 관리' 탭을 확인해주세요."
+                )
 
     # ── 자산 구성 (도넛 + 표 병행) ──
     st.markdown('<div class="section-title">자산 구성</div>', unsafe_allow_html=True)
 
-    _colors = ["#7b1fa2", "#0288d1", "#f57c00", "#78909c"]
-    _labels = ["ETF (IRP)", "TDF", "국내주식", "현금성자산"]
-    _values = [max(0, v) for v in [irp_stock_eval, tdf_eval, mira_eval, cash_eval]]
+    # 계좌가 아닌 실제 자산 유형(ETF/주식/TDF/현금) 기준으로 집계 — 한 계좌 안에 ETF와 주식이
+    # 함께 있어도(예: 미래에셋 계좌에 ETF+주식 혼재) 정확히 분리되도록 get_asset_type()으로 분류
+    if not holdings_df.empty:
+        _type_series = holdings_df.apply(lambda r: get_asset_type(r["종목코드"], r["종목명"]), axis=1)
+        etf_eval = int(holdings_df.loc[_type_series == "ETF", "평가금액"].sum())
+        stock_only_eval = int(holdings_df.loc[_type_series == "주식", "평가금액"].sum())
+    else:
+        etf_eval = 0
+        stock_only_eval = 0
+
+    _colors = ["#7b1fa2", "#5c6bc0", "#0288d1", "#78909c"]
+    _labels = ["ETF", "국내주식", "TDF/펀드", "현금성자산"]
+    _values = [max(0, v) for v in [etf_eval, stock_only_eval, tdf_eval, cash_eval]]
     _total_for_pct = sum(_values) or 1
 
     col_donut, col_table = st.columns([1, 1])
@@ -2044,13 +2092,11 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         display_df = holdings_df
 
     # ── 동일 종목명이 여러 계좌에 걸쳐 있을 때 구분용 표시명 생성 (차트 라벨 겹침 방지) ──
-    def _acct_short(acct):
-        return "IRP" if "신한" in str(acct) else "미래에셋" if "미래에셋" in str(acct) else str(acct)
-
+    # 계좌명을 신한/미래에셋으로 한정 짓지 않고, 사용자가 입력한 실제 계좌명을 그대로 사용
     display_df = display_df.copy()
     _name_counts = display_df["종목명"].value_counts()
     display_df["표시명"] = display_df.apply(
-        lambda r: f"{r['종목명']}({_acct_short(r['계좌'])})" if _name_counts[r["종목명"]] > 1 else r["종목명"],
+        lambda r: f"{r['종목명']}({r['계좌']})" if _name_counts[r["종목명"]] > 1 else r["종목명"],
         axis=1,
     )
 
@@ -2080,12 +2126,11 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         </div>""", unsafe_allow_html=True)
 
     # ETF 먼저, 그 다음 주식 — 각 그룹 내에서는 투자원금(매입금액) 큰 순서
-    def _type_rank(code):
-        asset_info = ASSET_MASTER.get(code, {})
-        return 0 if asset_info.get("type") == "ETF" else 1
+    def _type_rank(row):
+        return 0 if get_asset_type(row["종목코드"], row["종목명"]) == "ETF" else 1
 
     display_df = display_df.copy()
-    display_df["_type_rank"] = display_df["종목코드"].apply(_type_rank)
+    display_df["_type_rank"] = display_df.apply(_type_rank, axis=1)
     display_df = display_df.sort_values(
         ["_type_rank", "매입금액"], ascending=[True, False]
     )
@@ -2097,15 +2142,13 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         계좌 = row["계좌"]
         has_price = row.get("시세반영", False)
         current_price = row.get("현재가", None)
-        acct_short = "IRP" if "신한" in 계좌 else "미래에셋"
-        asset_info = ASSET_MASTER.get(code, {})
-        type_label = asset_info.get("type", "")
+        type_label = get_asset_type(code, row["종목명"])
         cur_val = current_price if has_price else row["평균단가"]
 
         table_rows.append({
             "구분": type_label,
             "종목명": row["종목명"],
-            "계좌": acct_short,
+            "계좌": 계좌,
             "수량": int(row["보유수량"]),
             "평단": int(row["평균단가"]),
             "현재가": int(cur_val) if pd.notna(cur_val) else None,
@@ -2128,9 +2171,11 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
     보기방식 = st.radio("보기 방식", ["카드형", "표"], horizontal=True, key="holding_view_mode")
 
+    _acct_order = sorted(holdings_df["계좌"].unique().tolist()) if not holdings_df.empty else []
+
     if 보기방식 == "카드형":
         for _, r in table_df.iterrows():
-            acct_class = "holding-acct-irp" if r["계좌"] == "IRP" else "holding-acct-mira"
+            _bg, _fg = get_account_color(r["계좌"], _acct_order)
             현재가_str = f"{r['현재가']:,}" if r["현재가"] is not None else "-"
             시세표시 = "" if r["시세반영"] else ' <span style="color:#c9a227">(매입가 기준)</span>'
             st.markdown(f"""
@@ -2138,7 +2183,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 <div class="holding-top-row">
                     <div class="holding-name-block">
                         <span class="holding-type-badge">{r['구분']}</span>
-                        <span class="holding-acct-badge {acct_class}">{r['계좌']}</span>
+                        <span class="holding-acct-badge" style="background:{_bg};color:{_fg}">{r['계좌']}</span>
                         <span class="holding-name">{r['종목명']}</span>
                     </div>
                     <div class="holding-pct-badge" style="color:{color_pnl(r['수익률'])}">{fmt_pct(r['수익률'])}</div>
@@ -2445,13 +2490,14 @@ def render_cashflow(trade_df):
                 )
             buy_html = "".join(items)
 
-        badge_class = "badge-irp" if "신한" in ev_account else "badge-mira"
+        _acct_order_ev = sorted(trade_sorted["운용사"].unique().tolist())
+        _badge_bg, _badge_fg = get_account_color(ev_account, _acct_order_ev)
         pnl_html = f'<span class="sell-event-pnl" style="color:{color_pnl(pnl)}">실현손익 {fmt_money(pnl)}</span>'
 
         st.markdown(
             '<div class="acct-card sell-event-card">'
             '<div class="sell-event-header">'
-            f'<span class="acct-badge {badge_class}">{ev_account}</span>'
+            f'<span class="acct-badge" style="background:{_badge_bg};color:{_badge_fg}">{ev_account}</span>'
             f'<span class="sell-event-name">{ev["제목"]}</span>'
             f'<span class="sell-event-date">{ev_date.strftime("%Y-%m-%d")}</span>'
             '<span class="sell-event-spacer"></span>'
@@ -2521,6 +2567,7 @@ def render_data_mgmt(nonstock_df, cash_df):
         row_sep = "border-bottom:1px solid rgba(255,255,255,0.05);"
 
         pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
+        _acct_order_ns = sorted(rows["계좌"].astype(str).str.strip().unique().tolist()) if not rows.empty else []
         html = (
             '<div class="mgmt-table-card">'
             "<table style='width:100%;border-collapse:collapse;font-size:0.92rem;'>"
@@ -2544,8 +2591,7 @@ def render_data_mgmt(nonstock_df, cash_df):
             date = str(row.get("반영일자", "")).strip()
             note = str(row.get("비고", "")).strip()
 
-            badge_bg = "#1e3a5f" if "신한" in acct else "#1a3d2b"
-            badge_color = "#90caf9" if "신한" in acct else "#80cfa9"
+            badge_bg, badge_color = get_account_color(acct, _acct_order_ns)
             badge_html = (
                 f'<span style="background:{badge_bg};color:{badge_color};'
                 f'font-size:0.75rem;padding:2px 8px;border-radius:4px;'
