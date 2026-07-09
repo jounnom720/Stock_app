@@ -2043,16 +2043,10 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             st.caption(f"추이 차트 오류: {e}")
 
     # ── 개발자 정보 (통합 대시보드 맨 아래에만 표시) ──
-    # title 속성을 사용해 별도 클릭 없이 마우스를 올리면 이메일이 보이는 브라우저 기본 툴팁으로 표시
     st.markdown("---")
     col_dev, col_btn = st.columns([5, 1])
     with col_dev:
-        st.markdown(
-            f'<a href="mailto:hwcho@me.com" title="hwcho@me.com" '
-            f'style="cursor:pointer;color:var(--text-dim);font-size:0.82rem;text-decoration:none;">'
-            f'개발자: H.W Jone · {APP_VERSION}</a>',
-            unsafe_allow_html=True,
-        )
+        st.caption(f"개발자: H.W Jone · {APP_VERSION}")
     with col_btn:
         if st.button("ℹ️ 앱 정보", key="dev_info_btn"):
             show_developer_info()
