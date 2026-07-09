@@ -1506,7 +1506,7 @@ def render_admin_panel():
 # ============================================================
 @st.dialog("앱 정보")
 def show_developer_info():
-    st.markdown("**개발: 조현웅**")
+    st.markdown("**개발: H.W Jone**")
     st.markdown(f"**버전: {APP_VERSION}**")
     st.markdown("**문의: hwcho@me.com**")
     st.caption("버그 제보나 기능 제안은 위 이메일로 보내주세요.")
@@ -1597,15 +1597,6 @@ def main(spreadsheet_id: str):
     # ══════════════════════════════════════════════
     with tab5:
         render_data_mgmt(nonstock_df, cash_df)
-
-    # 개발자 정보 (하단 푸터 + 모달 팝업)
-    st.markdown("---")
-    col_dev, col_btn = st.columns([5, 1])
-    with col_dev:
-        st.caption(f"제작: 조현웅 · {APP_VERSION}")
-    with col_btn:
-        if st.button("ℹ️ 앱 정보", key="dev_info_btn"):
-            show_developer_info()
 
 
 # ============================================================
@@ -2050,6 +2041,20 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             st.plotly_chart(fig_trend, width="stretch")
         except Exception as e:
             st.caption(f"추이 차트 오류: {e}")
+
+    # ── 개발자 정보 (통합 대시보드 맨 아래에만 표시) ──
+    # title 속성을 사용해 별도 클릭 없이 마우스를 올리면 이메일이 보이는 브라우저 기본 툴팁으로 표시
+    st.markdown("---")
+    col_dev, col_btn = st.columns([5, 1])
+    with col_dev:
+        st.markdown(
+            f'<span title="hwcho@me.com" style="cursor:help;color:var(--text-dim);font-size:0.82rem;">'
+            f'개발자: H.W Jone · {APP_VERSION}</span>',
+            unsafe_allow_html=True,
+        )
+    with col_btn:
+        if st.button("ℹ️ 앱 정보", key="dev_info_btn"):
+            show_developer_info()
 
 
 # ============================================================
