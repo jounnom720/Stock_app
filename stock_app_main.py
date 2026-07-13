@@ -992,18 +992,11 @@ st.markdown("""
 }
 .asset-breakdown-item {
     position: relative;
-    background: linear-gradient(160deg, var(--tint) 0%, var(--overlay-03) 55%);
-    border: 1px solid var(--card-border);
+    background: var(--tint);
+    border: 1px solid var(--stripe-border, var(--card-border));
     border-radius: 14px;
     padding: 1rem 1.1rem 1rem 1.25rem;
     overflow: hidden;
-}
-.asset-breakdown-item::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 0; bottom: 0;
-    width: 4px;
-    background: var(--stripe);
 }
 .asset-breakdown-head {
     display: flex;
@@ -1666,7 +1659,9 @@ def render_market_indices():
 
 def render_holdings_treemap(holdings_df: pd.DataFrame):
     """보유종목 트리맵 — 사각형 크기=평가금액 비중, 색상=당일(전일 종가 대비) 등락률.
-    같은 종목이 여러 계좌에 나뉘어 있으면 종목코드 기준으로 평가금액을 합산해서 하나로 표시."""
+    같은 종목이 여러 계좌에 나뉘어 있으면 종목코드 기준으로 평가금액을 합산해서 하나로 표시.
+    '트리맵' / '순위' 두 가지 보기 방식을 토글로 전환할 수 있고, 하단에는 항상
+    상승·보합·하락 종목 수 요약 바를 표시한다 (네이버페이 증권 업종 트리맵 UI 참고)."""
     st.markdown('<div class="section-title">보유종목 현황판 (당일 등락률)</div>', unsafe_allow_html=True)
 
     if holdings_df.empty:
@@ -1691,34 +1686,92 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
         info = day_change.get(ticker)
         return info["change_pct"] if info else None
 
+    def _current_price(code):
+        ticker = get_asset_ticker(code)
+        if not ticker:
+            return None
+        info = day_change.get(ticker)
+        return info["current"] if info else None
+
     grouped["당일등락률"] = grouped["종목코드"].apply(_change_pct)
+    grouped["현재가"] = grouped["종목코드"].apply(_current_price)
     grouped["등락표시"] = grouped["당일등락률"].apply(
         lambda v: f"{v:+.2f}%" if v is not None else "조회 실패"
     )
     color_values = grouped["당일등락률"].fillna(0).tolist()
 
-    fig = go.Figure(go.Treemap(
-        labels=grouped["종목명"],
-        parents=[""] * len(grouped),
-        values=grouped["평가금액"],
-        customdata=grouped["등락표시"],
-        texttemplate="%{label}<br>%{customdata}",
-        textfont=dict(size=14),
-        marker=dict(
-            colors=color_values,
-            colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],  # 하락=파랑, 상승=빨강 (국내 관례)
-            cmid=0,
-            line=dict(width=1, color="#1a1d24"),
-        ),
-        hovertemplate="<b>%{label}</b><br>평가금액: %{value:,.0f}원<br>당일등락률: %{customdata}<extra></extra>",
-    ))
-    fig.update_layout(
-        margin=dict(t=10, l=4, r=4, b=4),
-        height=360,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+    view_mode = st.radio(
+        "보기 방식", ["트리맵", "순위"], horizontal=True,
+        key="holdings_view_mode", label_visibility="collapsed",
     )
-    st.plotly_chart(fig, use_container_width=True)
+
+    if view_mode == "트리맵":
+        fig = go.Figure(go.Treemap(
+            labels=grouped["종목명"],
+            parents=[""] * len(grouped),
+            values=grouped["평가금액"],
+            customdata=grouped["등락표시"],
+            texttemplate="%{label}<br>%{customdata}",
+            textfont=dict(size=14),
+            marker=dict(
+                colors=color_values,
+                colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],  # 하락=파랑, 상승=빨강 (국내 관례)
+                cmid=0,
+                line=dict(width=1, color="#1a1d24"),
+            ),
+            hovertemplate="<b>%{label}</b><br>평가금액: %{value:,.0f}원<br>당일등락률: %{customdata}<extra></extra>",
+        ))
+        fig.update_layout(
+            margin=dict(t=10, l=4, r=4, b=4),
+            height=360,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        # 순위 리스트: 당일등락률 내림차순 정렬 (네이버페이 증권 '외국인 매매 상위' 랭킹 UI 참고)
+        ranked = grouped.dropna(subset=["당일등락률"]).sort_values("당일등락률", ascending=False).reset_index(drop=True)
+        no_data = grouped[grouped["당일등락률"].isna()]
+
+        rows_html = ""
+        for i, row in ranked.iterrows():
+            pct = row["당일등락률"]
+            price = row["현재가"]
+            price_html = f"{int(price):,}" if price is not None else "-"
+            rows_html += (
+                '<div style="display:flex;align-items:center;padding:9px 10px;'
+                'border-top:1px solid var(--card-border)">'
+                f'<span style="width:22px;font-size:0.78rem;color:var(--text-dim2)">{i + 1}</span>'
+                f'<span style="flex:1;font-size:0.86rem;color:var(--text-strong)">{row["종목명"]}</span>'
+                f'<span style="font-size:0.86rem;font-weight:600;margin-right:10px;'
+                f'font-variant-numeric:tabular-nums">{price_html}</span>'
+                f'<span style="font-size:0.82rem;font-weight:700;min-width:62px;text-align:right;'
+                f'color:{color_pnl(pct)};font-variant-numeric:tabular-nums">{pct:+.2f}%</span>'
+                '</div>'
+            )
+        if no_data.empty:
+            no_data_html = ""
+        else:
+            names = ", ".join(no_data["종목명"].tolist())
+            no_data_html = (
+                '<div style="padding:9px 10px;border-top:1px solid var(--card-border);'
+                f'font-size:0.8rem;color:var(--text-dim2)">조회 실패: {names}</div>'
+            )
+        st.markdown(
+            f'<div style="background:var(--card-bg);border:1px solid var(--card-border);'
+            f'border-radius:12px;padding:4px 4px 4px">{rows_html}{no_data_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # 상승/보합/하락 종목 수 요약 바 — 트리맵/순위 두 보기 모두에서 하단에 공통 표시
+    up = int((grouped["당일등락률"] > 0).sum())
+    flat = int((grouped["당일등락률"] == 0).sum())
+    down = int((grouped["당일등락률"] < 0).sum())
+    failed = int(grouped["당일등락률"].isna().sum())
+    summary = f"🔴 상승 {up} · ⚪ 보합 {flat} · 🔵 하락 {down}"
+    if failed:
+        summary += f" · 조회실패 {failed}"
+    st.caption(summary)
     st.caption("사각형 크기 = 보유종목 평가금액 비중 · 색상 = 당일(전일 종가 대비) 등락률")
 
 
@@ -1822,7 +1875,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             arrow = "▲" if pct_val > 0 else "▼" if pct_val < 0 else "―"
             pct_html = f'<span class="asset-breakdown-pct" style="color:{color_pnl(pct_val)}">{arrow} {fmt_pct(pct_val)}</span>'
         return (
-            f'<div class="asset-breakdown-item" style="--stripe:{stripe};--tint:{stripe}22;--tint-strong:{stripe}33">'
+            f'<div class="asset-breakdown-item" style="--stripe:{stripe};--tint:{stripe}1a;--tint-strong:{stripe}33;--stripe-border:{stripe}40">'
             f'<div class="asset-breakdown-head">'
             f'<span class="asset-breakdown-name"><span class="asset-breakdown-icon">{icon}</span>{name}</span>'
             f'<span class="asset-breakdown-badge">{pct_w:.0f}%</span>'
