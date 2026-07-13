@@ -1857,33 +1857,34 @@ def render_investor_trend():
 
     period_label = {"일간": window[-1]["date"], "주간": f"{window[-1]['date']} ~ {window[0]['date']} 합산",
                      "월간": f"{window[-1]['date']} ~ {window[0]['date']} 합산"}[period]
+
+    # 거래량·거래대금 (해당 시장 전체 기준, 당일) — 투자자 동향과 한 카드로 묶어 시인성 강화
+    vol_data = get_market_trading_volume("KOSPI" if market == "코스피" else "KOSDAQ")
+    vol_html = ""
+    if vol_data.get("ok"):
+        value_amt_eok = vol_data["거래대금"] / 100  # 네이버 원본 단위 백만원 → 억원
+        vol_html = f"""
+        <div style="display:flex;border-top:1px solid var(--card-border);margin-top:14px;padding-top:12px">
+            <div style="flex:1;text-align:center;border-right:1px solid var(--card-border)">
+                <div style="font-size:0.78rem;color:var(--text-dim2);margin-bottom:0.3rem">{market} 거래량 (당일)</div>
+                <div style="font-size:1.05rem;font-weight:700">{vol_data['거래량']:,.0f}
+                    <span style="font-size:0.68rem;color:var(--text-dim2);font-weight:500">천주</span></div>
+            </div>
+            <div style="flex:1;text-align:center">
+                <div style="font-size:0.78rem;color:var(--text-dim2);margin-bottom:0.3rem">{market} 거래대금 (당일)</div>
+                <div style="font-size:1.05rem;font-weight:700">{value_amt_eok:,.0f}
+                    <span style="font-size:0.68rem;color:var(--text-dim2);font-weight:500">억원</span></div>
+            </div>
+        </div>"""
+
     st.markdown(
         f'<div style="background:var(--card-bg);border:1px solid var(--card-border);'
-        f'border-radius:12px;padding:18px 16px 12px;display:flex">{cards_html}</div>',
+        f'border-radius:12px;padding:18px 16px 14px">'
+        f'<div style="display:flex">{cards_html}</div>{vol_html}</div>',
         unsafe_allow_html=True,
     )
     st.caption(f"기준: {period_label} · 출처: 네이버페이 증권 (실시간 아님, 당일 잠정/확정 집계 기준)")
-
-    # 거래량·거래대금 (해당 시장 전체 기준, 당일) — 시장 지표 카드와 통일된 스타일
-    vol_data = get_market_trading_volume("KOSPI" if market == "코스피" else "KOSDAQ")
-    if vol_data.get("ok"):
-        value_amt_eok = vol_data["거래대금"] / 100  # 네이버 원본 단위 백만원 → 억원
-        st.markdown(
-            f'<div class="mkt-row" style="margin-top:0.6rem">'
-            f'<div class="mkt-card" style="--mkt-bar:#6B6F7A">'
-            f'<div class="mkt-group-tag">{market} 거래량 (당일)</div>'
-            f'<div class="mkt-value">{vol_data["거래량"]:,.0f}<span style="font-size:0.68rem;'
-            f'color:var(--text-dim2);font-weight:500"> 천주</span></div>'
-            f'</div>'
-            f'<div class="mkt-card" style="--mkt-bar:#6B6F7A">'
-            f'<div class="mkt-group-tag">{market} 거래대금 (당일)</div>'
-            f'<div class="mkt-value">{value_amt_eok:,.0f}<span style="font-size:0.68rem;'
-            f'color:var(--text-dim2);font-weight:500"> 억원</span></div>'
-            f'</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-    else:
+    if not vol_data.get("ok"):
         st.caption(f"⚠️ 거래량·거래대금 조회 실패: {vol_data.get('debug', '알 수 없음')}")
 
 
