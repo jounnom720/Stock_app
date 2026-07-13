@@ -1754,6 +1754,53 @@ def render_market_indices():
     st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
+@st.cache_data(ttl=300)
+def get_market_trading_volume(code: str) -> dict:
+    """코스피/코스닥 전체 시장의 당일 거래량·거래대금 조회 (code: 'KOSPI' 또는 'KOSDAQ').
+    네이버 금융 일별시세 페이지를 파싱하며, 실패 시 debug 필드에 사유를 담아 반환."""
+    try:
+        url = f"https://finance.naver.com/sise/sise_index_day.naver?code={code}&page=1"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://finance.naver.com/sise/",
+        }
+        resp = requests.get(url, headers=headers, timeout=6)
+        resp.encoding = "euc-kr"
+        if resp.status_code != 200:
+            return {"ok": False, "debug": f"HTTP {resp.status_code}"}
+        tables = pd.read_html(resp.text)
+        target = None
+        for t in tables:
+            col_text = " ".join(str(c) for c in t.columns)
+            if "거래량" in col_text and "거래대금" in col_text:
+                target = t
+                break
+        if target is None:
+            return {"ok": False, "debug": f"거래량/거래대금 포함 테이블 없음 (테이블 {len(tables)}개)"}
+        target.columns = [str(c) for c in target.columns]
+        first_col = target.iloc[:, 0].astype(str)
+        data_rows = target[first_col.str.match(r"^\d{2,4}\.\d{2}\.\d{2}$")]
+        if data_rows.empty:
+            return {"ok": False, "debug": f"날짜 행 없음. 첫 열 샘플: {first_col.tolist()[:5]}"}
+        latest = data_rows.iloc[0]
+        cols = list(target.columns)
+
+        def _find(keyword):
+            for c in cols:
+                if keyword in str(c):
+                    return _safe_num(latest[c])
+            return 0.0
+
+        return {
+            "ok": True,
+            "date": str(latest.iloc[0]),
+            "거래량": _find("거래량"),
+            "거래대금": _find("거래대금"),
+        }
+    except Exception as e:
+        return {"ok": False, "debug": f"예외 발생: {type(e).__name__}: {e}"}
+
+
 def render_investor_trend():
     """코스피/코스닥 전체 시장의 개인·외국인·기관계 순매수 동향 (네이버페이 증권 '투자자 동향' UI 참고).
     Jone의 보유종목과 무관하게, 국내 증시 전체의 수급 흐름을 보여주는 섹션."""
@@ -1797,6 +1844,16 @@ def render_investor_trend():
     )
     st.caption(f"기준일 {trend['date']} · 출처: 네이버페이 증권 (실시간 아님, 당일 잠정/확정 집계 기준)")
 
+    # 거래량·거래대금 (해당 시장 전체 기준)
+    vol_data = get_market_trading_volume("KOSPI" if market == "코스피" else "KOSDAQ")
+    if vol_data.get("ok"):
+        col_v, col_a = st.columns(2)
+        col_v.metric(f"{market} 거래량", f"{vol_data['거래량']:,.0f}")
+        col_a.metric(f"{market} 거래대금", f"{vol_data['거래대금']:,.0f}")
+        st.caption("단위는 네이버 원본 표시 기준(보통 거래량=천주, 거래대금=백만원)")
+    else:
+        st.caption(f"⚠️ 거래량·거래대금 조회 실패: {vol_data.get('debug', '알 수 없음')}")
+
 
 def render_sector_heatmap():
     """테마별(업종별) 현황판 — 국내 업종 지수 자체는 무료로 제공되지 않아, 업종 대표 ETF
@@ -1828,7 +1885,10 @@ def render_sector_heatmap():
         pathbar=dict(visible=False),
         marker=dict(
             colors=color_values,
-            colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],
+            colorscale=[
+                [0, "#1a4d8f"], [0.25, "#5b9bd8"], [0.5, "#2b2f3a"],
+                [0.75, "#e0635e"], [1, "#8f1f1a"],
+            ],  # 하락일수록 진한 파랑, 상승일수록 진한 빨강 (국내 관례)
             cmid=0,
             line=dict(width=1, color="#1a1d24"),
         ),
@@ -1907,7 +1967,10 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
             pathbar=dict(visible=False),
             marker=dict(
                 colors=color_values,
-                colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],  # 하락=파랑, 상승=빨강 (국내 관례)
+                colorscale=[
+                    [0, "#1a4d8f"], [0.25, "#5b9bd8"], [0.5, "#2b2f3a"],
+                    [0.75, "#e0635e"], [1, "#8f1f1a"],
+                ],  # 하락일수록 진한 파랑, 상승일수록 진한 빨강 (국내 관례)
                 cmid=0,
                 line=dict(width=1, color="#1a1d24"),
             ),
