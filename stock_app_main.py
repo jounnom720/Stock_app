@@ -1939,12 +1939,12 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
         weighted_pct = (valid["당일등락률"] * valid["평가금액"]).sum() / valid["평가금액"].sum()
         weighted_color = color_pnl(weighted_pct)
         st.markdown(
-            f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
-            f'margin-bottom:0.6rem">'
+            f'<div style="display:flex;gap:0.6rem;align-items:baseline;'
+            f'margin-bottom:0.5rem">'
             f'<span style="font-size:0.85rem;color:var(--text-dim)">보유종목 평가금액 합계</span>'
             f'<span style="font-size:1.05rem;font-weight:700">{total_value:,.0f}원</span>'
             f'</div>'
-            f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
+            f'<div style="display:flex;gap:0.6rem;align-items:baseline;'
             f'margin-bottom:0.8rem">'
             f'<span style="font-size:0.85rem;color:var(--text-dim)">평가금액 가중 당일 등락률</span>'
             f'<span style="font-size:1.05rem;font-weight:700;color:{weighted_color}">{weighted_pct:+.2f}%</span>'
