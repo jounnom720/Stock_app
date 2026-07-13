@@ -667,19 +667,29 @@ def get_sector_day_change() -> dict[str, dict]:
 
 
 @st.cache_data(ttl=300)
-def get_investor_trend(sosok: str) -> dict | None:
+def get_investor_trend(sosok: str) -> dict:
     """네이버 금융 '투자자별 매매동향 일별' 페이지를 조회해 코스피/코스닥 전체 시장의
     당일(가장 최근 거래일) 개인·외국인·기관계 순매수 금액(단위: 백만원)을 반환.
     sosok: '01'=코스피, '02'=코스닥.
     yfinance에는 없는 데이터라 네이버 페이지를 직접 파싱하며, 페이지 구조가 바뀌면
-    실패할 수 있어 폭넓게 예외처리하고 실패 시 None을 반환 (호출부에서 '조회 실패' 안내)."""
+    실패할 수 있어 실패 사유를 debug 필드에 담아 반환 (화면에서 원인 확인 가능)."""
     try:
         bizdate = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        url = f"https://finance.naver.com/sise/investorDealTrendDay.naver?bizdate={bizdate}&sosok={sosok}&page=1"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        url = f"https://finance.naver.com/sise/investorDealTrendDay.nhn?bizdate={bizdate}&sosok={sosok}&page=1"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://finance.naver.com/sise/",
+        }
         resp = requests.get(url, headers=headers, timeout=6)
         resp.encoding = "euc-kr"
-        tables = pd.read_html(resp.text)
+        if resp.status_code != 200:
+            return {"ok": False, "debug": f"HTTP {resp.status_code}"}
+
+        try:
+            tables = pd.read_html(resp.text)
+        except Exception as e:
+            return {"ok": False, "debug": f"테이블 파싱 실패: {e} (응답 길이 {len(resp.text)}자)"}
+
         target = None
         for t in tables:
             flat = t.astype(str).apply(lambda col: col.str.cat(sep=" "), axis=0).str.cat(sep=" ")
@@ -687,13 +697,15 @@ def get_investor_trend(sosok: str) -> dict | None:
                 target = t
                 break
         if target is None:
-            return None
-        # 헤더/합계 등 숫자가 아닌 행을 제거하고, 날짜 형식(YY.MM.DD)인 행만 남김
+            table_shapes = [t.shape for t in tables]
+            return {"ok": False, "debug": f"'외국인/개인/기관' 포함 테이블 없음 (테이블 {len(tables)}개, 크기: {table_shapes})"}
+
         target.columns = [str(c) for c in target.columns]
         first_col = target.iloc[:, 0].astype(str)
         data_rows = target[first_col.str.match(r"^\d{2}\.\d{2}\.\d{2}$")]
         if data_rows.empty:
-            return None
+            return {"ok": False, "debug": f"날짜 형식(YY.MM.DD) 행 없음. 첫 열 샘플: {first_col.tolist()[:5]}"}
+
         latest = data_rows.iloc[0]
         cols = list(target.columns)
 
@@ -704,6 +716,7 @@ def get_investor_trend(sosok: str) -> dict | None:
             return 0.0
 
         return {
+            "ok": True,
             "date": str(latest.iloc[0]),
             "개인": _find("개인"),
             "외국인": _find("외국인"),
@@ -711,7 +724,7 @@ def get_investor_trend(sosok: str) -> dict | None:
         }
     except Exception as e:
         logging.warning("투자자별 매매동향 조회 실패 (sosok=%s): %s", sosok, e)
-        return None
+        return {"ok": False, "debug": f"예외 발생: {type(e).__name__}: {e}"}
 
 # ============================================================
 # 숫자 안전 변환 (빈 셀·하이픈·쉼표 등으로 인한 크래시 방지)
@@ -1751,8 +1764,9 @@ def render_investor_trend():
     sosok = "01" if market == "코스피" else "02"
     trend = get_investor_trend(sosok)
 
-    if trend is None:
+    if not trend.get("ok"):
         st.info("투자자별 매매동향 조회에 실패했습니다. 잠시 후 다시 시도해주세요.")
+        st.caption(f"⚠️ 실패 원인: {trend.get('debug', '알 수 없음')}")
         return
 
     items = [("외국인", trend["외국인"]), ("기관계", trend["기관계"]), ("개인", trend["개인"])]
@@ -1809,6 +1823,7 @@ def render_sector_heatmap():
         text=labels_disp,
         texttemplate="%{text}",
         textfont=dict(size=13),
+        pathbar=dict(visible=False),
         marker=dict(
             colors=color_values,
             colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],
@@ -1887,6 +1902,7 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
             customdata=grouped["등락표시"],
             texttemplate="%{label}<br>%{customdata}",
             textfont=dict(size=14),
+            pathbar=dict(visible=False),
             marker=dict(
                 colors=color_values,
                 colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],  # 하락=파랑, 상승=빨강 (국내 관례)
