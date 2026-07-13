@@ -207,7 +207,12 @@ def get_accounts_spreadsheet():
         logging.warning("계정 시트 열기 실패: %s", e)
         return None
 
+@st.cache_data(ttl=30)
 def load_accounts_df() -> pd.DataFrame:
+    """'사용자계정' 시트를 불러온다. 로그인·세션복구·관리자 메뉴 등 여러 곳에서 호출되므로
+    캐시가 없으면 매 상호작용(재실행)마다 API를 새로 때려 429(할당량 초과) 위험이 커진다.
+    계정 추가/수정/삭제/승인 등 쓰기 작업 직후에는 load_accounts_df.clear()로 즉시 무효화하여
+    캐시 때문에 방금 한 변경이 화면에 안 보이는 일이 없도록 한다."""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
@@ -293,6 +298,7 @@ def add_account(user_id: str, password: str, name: str, spreadsheet_id: str, ema
         ws = spreadsheet.worksheet("사용자계정")
         hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         ws.append_row([user_id, hashed, name, email, spreadsheet_id, str(date.today()), "활성"])
+        load_accounts_df.clear()
         return True
     except Exception as e:
         logging.warning("계정 추가 실패: %s", e)
@@ -313,6 +319,7 @@ def add_signup_request(user_id: str, password: str, name: str, email: str) -> tu
         hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         # spreadsheet_id는 승인 시 템플릿을 복사해 자동으로 채워지므로 신청 단계에서는 빈 값
         ws.append_row([user_id, hashed, name, email, "", str(date.today()), "승인대기"])
+        load_accounts_df.clear()
         return True, "가입 신청이 접수되었습니다. 관리자 승인이 완료되면 입력하신 이메일로 자산관리 시트 공유 안내가 발송됩니다."
     except Exception as e:
         logging.warning("가입 신청 실패: %s", e)
@@ -355,6 +362,7 @@ def approve_signup(sheet_row_number: int, user_email: str, user_name: str) -> tu
         status_col = header.index("상태") + 1
         ws.update_cell(sheet_row_number, sheet_id_col, new_id)
         ws.update_cell(sheet_row_number, status_col, "활성")
+        load_accounts_df.clear()
         return True, f"승인 완료: 준비된 템플릿을 배정하고 {user_email}로 편집 권한 공유 메일이 발송되었습니다. (남은 여분 템플릿 {len(available) - 1}개)"
     except Exception as e:
         logging.warning("가입 승인 실패: %s", e)
@@ -371,6 +379,7 @@ def reject_signup(sheet_row_number: int) -> bool:
         header = ws.row_values(1)
         status_col = header.index("상태") + 1
         ws.update_cell(sheet_row_number, status_col, "거부")
+        load_accounts_df.clear()
         return True
     except Exception as e:
         logging.warning("가입 거부 처리 실패: %s", e)
@@ -389,6 +398,7 @@ def update_account_status(user_id: str, new_status: str) -> bool:
         row_idx = df.index[df["아이디"] == user_id][0] + 2  # 헤더 행 고려
         status_col = df.columns.get_loc("상태") + 1
         ws.update_cell(row_idx, status_col, new_status)
+        load_accounts_df.clear()
         return True
     except Exception as e:
         logging.warning("계정 상태 변경 실패: %s", e)
@@ -408,6 +418,7 @@ def reset_account_password(user_id: str, new_password: str) -> bool:
         pw_col = df.columns.get_loc("비밀번호_해시") + 1
         new_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         ws.update_cell(row_idx, pw_col, new_hash)
+        load_accounts_df.clear()
         return True
     except Exception as e:
         logging.warning("비밀번호 초기화 실패: %s", e)
@@ -423,6 +434,7 @@ def delete_account_by_row(sheet_row_number: int) -> bool:
             return False
         ws = spreadsheet.worksheet("사용자계정")
         ws.delete_rows(sheet_row_number)
+        load_accounts_df.clear()
         return True
     except Exception as e:
         logging.warning("계정 삭제 실패: %s", e)
@@ -445,6 +457,7 @@ def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str,
         if email is not None and "이메일" in header:
             email_col = header.index("이메일") + 1
             ws.update_cell(sheet_row_number, email_col, email.strip())
+        load_accounts_df.clear()
         return True
     except Exception as e:
         logging.warning("계정 정보 수정 실패: %s", e)
