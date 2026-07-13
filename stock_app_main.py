@@ -21,6 +21,7 @@ import hmac
 import hashlib
 import base64
 import time
+import requests
 
 # ============================================================
 # 기본 설정
@@ -131,6 +132,18 @@ MARKET_INDICES = [
     {"group": "위험심리·금리",  "name": "달러인덱스", "ticker": "DX-Y.NYB"},
     {"group": "위험심리·금리",  "name": "美 10년물",  "ticker": "^TNX"},
     {"group": "위험심리·금리",  "name": "비트코인",   "ticker": "BTC-USD"},
+]
+
+# 테마별(업종별) 현황판용 — 국내에 업종 지수 자체를 제공하는 무료 API가 없어,
+# KODEX 업종 대표 ETF의 당일 등락률로 업종 흐름을 근사한다 (정확한 업종지수와는 오차 있을 수 있음).
+SECTOR_PROXY_ETFS = [
+    {"name": "반도체",   "code": "091160"},   # KODEX 반도체
+    {"name": "자동차",   "code": "091180"},   # KODEX 자동차
+    {"name": "은행",     "code": "091170"},   # KODEX 은행
+    {"name": "2차전지",  "code": "305720"},   # KODEX 2차전지산업
+    {"name": "헬스케어", "code": "266420"},   # KODEX 헬스케어
+    {"name": "증권",     "code": "102970"},   # KODEX 증권
+    {"name": "IT",       "code": "266370"},   # KODEX IT
 ]
 
 # ============================================================
@@ -644,6 +657,61 @@ def get_day_change(tickers: tuple) -> dict[str, dict]:
     if not tickers:
         return {}
     return _fetch_current_and_prev_close(list(tickers))
+
+
+@st.cache_data(ttl=300)
+def get_sector_day_change() -> dict[str, dict]:
+    """테마별 현황판용 — SECTOR_PROXY_ETFS(업종 대표 ETF)의 당일 등락률을 조회."""
+    tickers = [f"{s['code']}.KS" for s in SECTOR_PROXY_ETFS]
+    return _fetch_current_and_prev_close(tickers)
+
+
+@st.cache_data(ttl=300)
+def get_investor_trend(sosok: str) -> dict | None:
+    """네이버 금융 '투자자별 매매동향 일별' 페이지를 조회해 코스피/코스닥 전체 시장의
+    당일(가장 최근 거래일) 개인·외국인·기관계 순매수 금액(단위: 백만원)을 반환.
+    sosok: '01'=코스피, '02'=코스닥.
+    yfinance에는 없는 데이터라 네이버 페이지를 직접 파싱하며, 페이지 구조가 바뀌면
+    실패할 수 있어 폭넓게 예외처리하고 실패 시 None을 반환 (호출부에서 '조회 실패' 안내)."""
+    try:
+        bizdate = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        url = f"https://finance.naver.com/sise/investorDealTrendDay.naver?bizdate={bizdate}&sosok={sosok}&page=1"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(url, headers=headers, timeout=6)
+        resp.encoding = "euc-kr"
+        tables = pd.read_html(resp.text)
+        target = None
+        for t in tables:
+            flat = t.astype(str).apply(lambda col: col.str.cat(sep=" "), axis=0).str.cat(sep=" ")
+            if "외국인" in flat and "개인" in flat and "기관" in flat:
+                target = t
+                break
+        if target is None:
+            return None
+        # 헤더/합계 등 숫자가 아닌 행을 제거하고, 날짜 형식(YY.MM.DD)인 행만 남김
+        target.columns = [str(c) for c in target.columns]
+        first_col = target.iloc[:, 0].astype(str)
+        data_rows = target[first_col.str.match(r"^\d{2}\.\d{2}\.\d{2}$")]
+        if data_rows.empty:
+            return None
+        latest = data_rows.iloc[0]
+        cols = list(target.columns)
+
+        def _find(keyword):
+            for c in cols:
+                if keyword in str(c):
+                    return _safe_num(latest[c])
+            return 0.0
+
+        return {
+            "date": str(latest.iloc[0]),
+            "개인": _find("개인"),
+            "외국인": _find("외국인"),
+            "기관계": _find("기관"),
+        }
+    except Exception as e:
+        logging.warning("투자자별 매매동향 조회 실패 (sosok=%s): %s", sosok, e)
+        return None
 
 # ============================================================
 # 숫자 안전 변환 (빈 셀·하이픈·쉼표 등으로 인한 크래시 방지)
@@ -1671,6 +1739,98 @@ def render_market_indices():
     st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
+def render_investor_trend():
+    """코스피/코스닥 전체 시장의 개인·외국인·기관계 순매수 동향 (네이버페이 증권 '투자자 동향' UI 참고).
+    Jone의 보유종목과 무관하게, 국내 증시 전체의 수급 흐름을 보여주는 섹션."""
+    st.markdown('<div class="section-title">투자자별 매매 동향 (당일)</div>', unsafe_allow_html=True)
+
+    market = st.radio(
+        "시장 선택", ["코스피", "코스닥"], horizontal=True,
+        key="investor_trend_market", label_visibility="collapsed",
+    )
+    sosok = "01" if market == "코스피" else "02"
+    trend = get_investor_trend(sosok)
+
+    if trend is None:
+        st.info("투자자별 매매동향 조회에 실패했습니다. 잠시 후 다시 시도해주세요.")
+        return
+
+    items = [("외국인", trend["외국인"]), ("기관계", trend["기관계"]), ("개인", trend["개인"])]
+    max_abs = max(abs(v) for _, v in items) or 1
+
+    rows_html = ""
+    for name, val in items:
+        pct_width = min(abs(val) / max_abs * 100, 100)
+        color = color_pnl(val)
+        side = "flex-end" if val >= 0 else "flex-start"
+        rows_html += (
+            '<div style="margin-bottom:0.6rem">'
+            f'<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:0.25rem">'
+            f'<span style="color:var(--text-dim)">{name}</span>'
+            f'<span style="font-weight:700;color:{color}">{val:+,.0f}백만원</span>'
+            '</div>'
+            f'<div style="height:8px;border-radius:4px;background:var(--card-border);'
+            f'display:flex;justify-content:{side}">'
+            f'<div style="width:{pct_width:.1f}%;height:100%;border-radius:4px;background:{color}"></div>'
+            '</div></div>'
+        )
+    st.markdown(
+        f'<div style="background:var(--card-bg);border:1px solid var(--card-border);'
+        f'border-radius:12px;padding:14px 16px">{rows_html}</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(f"기준일 {trend['date']} · 출처: 네이버페이 증권 (실시간 아님, 당일 잠정/확정 집계 기준)")
+
+
+def render_sector_heatmap():
+    """테마별(업종별) 현황판 — 국내 업종 지수 자체는 무료로 제공되지 않아, 업종 대표 ETF
+    (KODEX 반도체·은행·자동차 등)의 당일 등락률로 근사한 트리맵. 실제 업종지수와는 오차가 있을 수 있음."""
+    st.markdown('<div class="section-title">테마별 현황판 (업종 대표 ETF 기준)</div>', unsafe_allow_html=True)
+
+    data = get_sector_day_change()
+    names, values, changes = [], [], []
+    for s in SECTOR_PROXY_ETFS:
+        info = data.get(f"{s['code']}.KS")
+        names.append(s["name"])
+        values.append(1)  # 트리맵 칸 크기는 균등 분할 (업종별 시가총액 가중치 데이터가 없음)
+        changes.append(info["change_pct"] if info else None)
+
+    if all(c is None for c in changes):
+        st.info("테마별 현황판 조회에 실패했습니다. 잠시 후 다시 시도해주세요.")
+        return
+
+    labels_disp = [f"{n}<br>{c:+.2f}%" if c is not None else f"{n}<br>조회 실패" for n, c in zip(names, changes)]
+    color_values = [c if c is not None else 0 for c in changes]
+
+    fig = go.Figure(go.Treemap(
+        labels=names,
+        parents=[""] * len(names),
+        values=values,
+        text=labels_disp,
+        texttemplate="%{text}",
+        textfont=dict(size=13),
+        marker=dict(
+            colors=color_values,
+            colorscale=[[0, "#5b9bd8"], [0.5, "#2b2f3a"], [1, "#e0635e"]],
+            cmid=0,
+            line=dict(width=1, color="#1a1d24"),
+        ),
+        hovertemplate="<b>%{label}</b><extra></extra>",
+    ))
+    fig.update_layout(
+        margin=dict(t=10, l=4, r=4, b=4),
+        height=280,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    up = sum(1 for c in changes if c is not None and c > 0)
+    down = sum(1 for c in changes if c is not None and c < 0)
+    flat = sum(1 for c in changes if c is not None and c == 0)
+    st.caption(f"🔴 상승 {up} · ⚪ 보합 {flat} · 🔵 하락 {down}  ·  업종 대표 ETF 당일 등락률 기준 (실제 업종지수와 오차 있을 수 있음)")
+
+
 def render_holdings_treemap(holdings_df: pd.DataFrame):
     """보유종목 트리맵 — 사각형 크기=평가금액 비중, 색상=당일(전일 종가 대비) 등락률.
     같은 종목이 여러 계좌에 나뉘어 있으면 종목코드 기준으로 평가금액을 합산해서 하나로 표시.
@@ -1865,6 +2025,8 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
 def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
     render_market_indices()
+    render_investor_trend()
+    render_sector_heatmap()
     render_holdings_treemap(holdings_df)
 
     s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
