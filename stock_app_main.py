@@ -142,6 +142,7 @@ SHEET_NAMES = {
     "비주식자산":      "비주식자산",
     "현금성자산":      "현금성자산",
     "월별자산스냅샷":  "월별자산스냅샷",
+    "현금출납내역":    "현금출납내역",
 }
 
 @st.cache_resource(ttl=60)
@@ -191,6 +192,23 @@ def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
     except Exception as e:
         logging.warning("시트 로드 실패 [%s]: %s", sheet_name, e)
         st.error(f"⚠️ '{sheet_name}' 시트 로드 중 오류: {type(e).__name__} - {e}")
+        return pd.DataFrame()
+
+
+def load_sheet_optional(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
+    """load_sheet과 동일하지만, 시트 자체가 아직 없어도 화면에 에러 배너를 띄우지 않고
+    조용히 빈 DataFrame을 반환한다. '현금출납내역'처럼 기존 사용자는 아직 안 만들었을 수 있는
+    선택적 보조 시트에 사용 (없다고 해서 다른 기능까지 막히면 안 되므로)."""
+    try:
+        spreadsheet = get_spreadsheet(spreadsheet_id)
+        if spreadsheet is None:
+            return pd.DataFrame()
+        ws = spreadsheet.worksheet(sheet_name)
+        return pd.DataFrame(ws.get_all_records())
+    except gspread.exceptions.WorksheetNotFound:
+        return pd.DataFrame()
+    except Exception as e:
+        logging.warning("선택적 시트 로드 실패 [%s]: %s", sheet_name, e)
         return pd.DataFrame()
 
 # ============================================================
@@ -1430,7 +1448,8 @@ def load_all_data(spreadsheet_id: str):
     cash_df      = load_sheet("현금성자산", spreadsheet_id)
     monthly_df   = load_sheet("월별자산스냅샷", spreadsheet_id)
     transfer_df  = load_sheet("계좌간이체", spreadsheet_id)  # TDF 환매 등 계좌간 자금 이동 이력 (실현손익 포함)
-    return trade_df, nonstock_df, cash_df, monthly_df, transfer_df
+    cashlog_df   = load_sheet_optional("현금출납내역", spreadsheet_id)  # 생활비 인출 등 현금 입출금 이력 (아직 없는 사용자도 있어 선택적 로더 사용)
+    return trade_df, nonstock_df, cash_df, monthly_df, transfer_df, cashlog_df
 
 # ============================================================
 # 메인 앱
@@ -1637,7 +1656,7 @@ def main(spreadsheet_id: str):
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
-        trade_df, nonstock_df, cash_df, monthly_df, transfer_df = load_all_data(spreadsheet_id)
+        trade_df, nonstock_df, cash_df, monthly_df, transfer_df, cashlog_df = load_all_data(spreadsheet_id)
 
     # 거래이력 사전 점검 (빈 셀, 거래구분 오타, 초과매도 등 흔한 입력 오류 안내)
     for _msg in validate_trade_df(trade_df):
@@ -1693,7 +1712,7 @@ def main(spreadsheet_id: str):
     # 탭4: 현금흐름 (거래이력 기반 자동 계산)
     # ══════════════════════════════════════════════
     with tab4:
-        render_cashflow(trade_df)
+        render_cashflow(trade_df, cashlog_df)
 
     # ══════════════════════════════════════════════
     # 탭5: 데이터 관리
@@ -1845,13 +1864,25 @@ def render_investor_trend():
     )
     st.caption(f"기준: {period_label} · 출처: 네이버페이 증권 (실시간 아님, 당일 잠정/확정 집계 기준)")
 
-    # 거래량·거래대금 (해당 시장 전체 기준, 당일)
+    # 거래량·거래대금 (해당 시장 전체 기준, 당일) — 시장 지표 카드와 통일된 스타일
     vol_data = get_market_trading_volume("KOSPI" if market == "코스피" else "KOSDAQ")
     if vol_data.get("ok"):
-        col_v, col_a = st.columns(2)
-        col_v.metric(f"{market} 거래량 (당일)", f"{vol_data['거래량']:,.0f}")
-        col_a.metric(f"{market} 거래대금 (당일)", f"{vol_data['거래대금']:,.0f}")
-        st.caption("단위는 네이버 원본 표시 기준(보통 거래량=천주, 거래대금=백만원)")
+        value_amt_eok = vol_data["거래대금"] / 100  # 네이버 원본 단위 백만원 → 억원
+        st.markdown(
+            f'<div class="mkt-row" style="margin-top:0.6rem">'
+            f'<div class="mkt-card" style="--mkt-bar:#6B6F7A">'
+            f'<div class="mkt-group-tag">{market} 거래량 (당일)</div>'
+            f'<div class="mkt-value">{vol_data["거래량"]:,.0f}<span style="font-size:0.68rem;'
+            f'color:var(--text-dim2);font-weight:500"> 천주</span></div>'
+            f'</div>'
+            f'<div class="mkt-card" style="--mkt-bar:#6B6F7A">'
+            f'<div class="mkt-group-tag">{market} 거래대금 (당일)</div>'
+            f'<div class="mkt-value">{value_amt_eok:,.0f}<span style="font-size:0.68rem;'
+            f'color:var(--text-dim2);font-weight:500"> 억원</span></div>'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
     else:
         st.caption(f"⚠️ 거래량·거래대금 조회 실패: {vol_data.get('debug', '알 수 없음')}")
 
@@ -2681,13 +2712,14 @@ def render_trades(trade_df):
 # ============================================================
 # 탭4: 현금흐름 (거래이력 기반 자동 계산 — 별도 시트 없음)
 # ============================================================
-def render_cashflow(trade_df):
+def render_cashflow(trade_df, cashlog_df=None):
     st.markdown('<div class="section-title">자금흐름 추적</div>', unsafe_allow_html=True)
     st.caption("💡 거래이력 시트만으로 자동 계산됩니다. 매도 한 건이 발생하면 그 이후 같은 계좌에서 일어난 매수 내역을 시간순으로 보여줍니다.")
     st.caption("⚠ 참고용입니다. 매도금이 정확히 어느 매수에 쓰였는지는 계좌 잔액이 섞이기 때문에 100% 단정할 수 없고, 시간 순서로 정황만 보여줍니다.")
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
+        _render_cashlog_section(cashlog_df)
         return
 
     realized_df = calc_realized_pnl(trade_df)
@@ -2698,6 +2730,7 @@ def render_cashflow(trade_df):
 
     if realized_df.empty:
         st.info("매도 거래가 없어 실현손익이 없습니다.")
+        _render_cashlog_section(cashlog_df)
         return
 
     total_realized = int(realized_df["실현손익"].sum())
@@ -2828,6 +2861,54 @@ def render_cashflow(trade_df):
             with st.expander(f"이전 매도 건 {len(events) - 최근표시건수}건 더 보기", expanded=False):
                 for i in range(최근표시건수, len(events)):
                     _render_event_block(events[i])
+
+    _render_cashlog_section(cashlog_df)
+
+
+def _render_cashlog_section(cashlog_df):
+    """현금출납내역 (생활비 인출 등, 거래이력과 별개로 직접 기록하는 시트).
+    거래이력 유무와 무관하게 항상 표시되어야 하므로 render_cashflow 상단에서 별도로 호출."""
+    st.markdown('<div class="section-title">현금출납내역</div>', unsafe_allow_html=True)
+    st.caption("💡 생활비 인출처럼 매매가 아닌 현금 입출금은 이 섹션에서 이력으로 관리합니다. "
+               "비주식자산 시트의 예수금 평가금액은 '지금 잔액'만, 이 시트는 '왜 그렇게 바뀌었는지'의 흐름을 남깁니다.")
+
+    if cashlog_df is None or cashlog_df.empty:
+        st.info(
+            "아직 '현금출납내역' 시트가 없거나 비어 있습니다. 구글시트에 아래 열로 새 탭을 만들어 기록해보세요:\n\n"
+            "날짜 | 계좌 | 구분(입금/출금) | 금액 | 사유"
+        )
+        return
+
+    show_cols = [c for c in ["날짜", "계좌", "구분", "금액", "사유"] if c in cashlog_df.columns]
+    if not show_cols:
+        st.warning("'현금출납내역' 시트의 열 이름이 예상과 달라 표시할 수 없습니다. "
+                   "날짜 · 계좌 · 구분 · 금액 · 사유 열이 있는지 확인해주세요.")
+        return
+
+    log_df = cashlog_df[show_cols].copy()
+    log_df["금액"] = pd.to_numeric(
+        log_df["금액"].astype(str).str.replace(",", "").str.replace("원", ""), errors="coerce"
+    ).fillna(0)
+
+    # 이번 달 입금/출금 합계
+    if "날짜" in log_df.columns:
+        log_df["_dt"] = pd.to_datetime(log_df["날짜"], errors="coerce")
+        this_month = log_df[log_df["_dt"].dt.strftime("%Y-%m") == datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m")]
+    else:
+        this_month = log_df
+
+    deposit = this_month.loc[this_month["구분"] == "입금", "금액"].sum() if "구분" in this_month.columns else 0
+    withdraw = this_month.loc[this_month["구분"] == "출금", "금액"].sum() if "구분" in this_month.columns else 0
+
+    c1, c2 = st.columns(2)
+    c1.metric("이번 달 입금 합계", fmt_money_full(deposit))
+    c2.metric("이번 달 출금 합계", fmt_money_full(withdraw))
+
+    display_log = log_df.drop(columns=["_dt"], errors="ignore").sort_values(
+        "날짜", ascending=False
+    ) if "날짜" in log_df.columns else log_df
+    col_config = build_number_column_config(display_log, money_cols=["금액"])
+    st.dataframe(display_log, width="stretch", hide_index=True, column_config=col_config)
 
 
 # ============================================================
