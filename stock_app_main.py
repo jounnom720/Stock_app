@@ -692,7 +692,9 @@ def get_investor_trend(sosok: str) -> dict:
 
         target = None
         for t in tables:
-            flat = t.astype(str).apply(lambda col: col.str.cat(sep=" "), axis=0).str.cat(sep=" ")
+            col_text = " ".join(str(c) for c in t.columns)
+            cell_text = t.astype(str).apply(lambda col: col.str.cat(sep=" "), axis=0).str.cat(sep=" ")
+            flat = col_text + " " + cell_text
             if "외국인" in flat and "개인" in flat and "기관" in flat:
                 target = t
                 break
