@@ -134,18 +134,6 @@ MARKET_INDICES = [
     {"group": "위험심리·금리",  "name": "비트코인",   "ticker": "BTC-USD"},
 ]
 
-# 테마별(업종별) 현황판용 — 국내에 업종 지수 자체를 제공하는 무료 API가 없어,
-# KODEX 업종 대표 ETF의 당일 등락률로 업종 흐름을 근사한다 (정확한 업종지수와는 오차 있을 수 있음).
-SECTOR_PROXY_ETFS = [
-    {"name": "반도체",   "code": "091160"},   # KODEX 반도체
-    {"name": "자동차",   "code": "091180"},   # KODEX 자동차
-    {"name": "은행",     "code": "091170"},   # KODEX 은행
-    {"name": "2차전지",  "code": "305720"},   # KODEX 2차전지산업
-    {"name": "헬스케어", "code": "266420"},   # KODEX 헬스케어
-    {"name": "증권",     "code": "102970"},   # KODEX 증권
-    {"name": "IT",       "code": "266370"},   # KODEX IT
-]
-
 # ============================================================
 # Google Sheets 연결
 # ============================================================
@@ -660,16 +648,9 @@ def get_day_change(tickers: tuple) -> dict[str, dict]:
 
 
 @st.cache_data(ttl=300)
-def get_sector_day_change() -> dict[str, dict]:
-    """테마별 현황판용 — SECTOR_PROXY_ETFS(업종 대표 ETF)의 당일 등락률을 조회."""
-    tickers = [f"{s['code']}.KS" for s in SECTOR_PROXY_ETFS]
-    return _fetch_current_and_prev_close(tickers)
-
-
-@st.cache_data(ttl=300)
 def get_investor_trend(sosok: str) -> dict:
     """네이버 금융 '투자자별 매매동향 일별' 페이지를 조회해 코스피/코스닥 전체 시장의
-    당일(가장 최근 거래일) 개인·외국인·기관계 순매수 금액(단위: 백만원)을 반환.
+    최근 20거래일치 개인·외국인·기관계 순매수 금액(단위: 억원)을 반환.
     sosok: '01'=코스피, '02'=코스닥.
     yfinance에는 없는 데이터라 네이버 페이지를 직접 파싱하며, 페이지 구조가 바뀌면
     실패할 수 있어 실패 사유를 debug 필드에 담아 반환 (화면에서 원인 확인 가능)."""
@@ -708,22 +689,26 @@ def get_investor_trend(sosok: str) -> dict:
         if data_rows.empty:
             return {"ok": False, "debug": f"날짜 형식(YY.MM.DD) 행 없음. 첫 열 샘플: {first_col.tolist()[:5]}"}
 
-        latest = data_rows.iloc[0]
         cols = list(target.columns)
 
-        def _find(keyword):
+        def _find(row, keyword):
             for c in cols:
                 if keyword in str(c):
-                    return _safe_num(latest[c])
+                    return _safe_num(row[c])
             return 0.0
 
-        return {
-            "ok": True,
-            "date": str(latest.iloc[0]),
-            "개인": _find("개인"),
-            "외국인": _find("외국인"),
-            "기관계": _find("기관"),
-        }
+        # 최근 20거래일치를 전부 담아 반환 — 일간(1일)/주간(5일)/월간(20일) 합산에 재사용
+        # (네이버 '투자자 동향' 위젯의 주간=직전 5거래일, 월간=직전 20거래일 정의와 동일하게 맞춤)
+        rows = []
+        for _, row in data_rows.head(20).iterrows():
+            rows.append({
+                "date": str(row.iloc[0]),
+                "개인": _find(row, "개인"),
+                "외국인": _find(row, "외국인"),
+                "기관계": _find(row, "기관"),
+            })
+
+        return {"ok": True, "date": rows[0]["date"], "rows": rows}
     except Exception as e:
         logging.warning("투자자별 매매동향 조회 실패 (sosok=%s): %s", sosok, e)
         return {"ok": False, "debug": f"예외 발생: {type(e).__name__}: {e}"}
@@ -1803,13 +1788,22 @@ def get_market_trading_volume(code: str) -> dict:
 
 def render_investor_trend():
     """코스피/코스닥 전체 시장의 개인·외국인·기관계 순매수 동향 (네이버페이 증권 '투자자 동향' UI 참고).
-    Jone의 보유종목과 무관하게, 국내 증시 전체의 수급 흐름을 보여주는 섹션."""
-    st.markdown('<div class="section-title">투자자별 매매 동향 (당일)</div>', unsafe_allow_html=True)
+    Jone의 보유종목과 무관하게, 국내 증시 전체의 수급 흐름을 보여주는 섹션.
+    일간/주간(직전 5거래일)/월간(직전 20거래일) 토글 제공 — 네이버 위젯의 기간 정의와 동일하게 맞춤."""
+    st.markdown('<div class="section-title">투자자 동향</div>', unsafe_allow_html=True)
 
-    market = st.radio(
-        "시장 선택", ["코스피", "코스닥"], horizontal=True,
-        key="investor_trend_market", label_visibility="collapsed",
-    )
+    col_market, col_period = st.columns([1, 1])
+    with col_market:
+        market = st.radio(
+            "시장 선택", ["코스피", "코스닥"], horizontal=True,
+            key="investor_trend_market", label_visibility="collapsed",
+        )
+    with col_period:
+        period = st.radio(
+            "기간 선택", ["일간", "주간", "월간"], horizontal=True,
+            key="investor_trend_period", label_visibility="collapsed",
+        )
+
     sosok = "01" if market == "코스피" else "02"
     trend = get_investor_trend(sosok)
 
@@ -1818,94 +1812,48 @@ def render_investor_trend():
         st.caption(f"⚠️ 실패 원인: {trend.get('debug', '알 수 없음')}")
         return
 
-    items = [("외국인", trend["외국인"]), ("기관계", trend["기관계"]), ("개인", trend["개인"])]
-    max_abs = max(abs(v) for _, v in items) or 1
+    rows = trend["rows"]
+    n = {"일간": 1, "주간": 5, "월간": 20}[period]
+    window = rows[:n]
+    sums = {
+        "외국인": sum(r["외국인"] for r in window),
+        "기관": sum(r["기관계"] for r in window),
+        "개인": sum(r["개인"] for r in window),
+    }
+    max_abs = max(abs(v) for v in sums.values()) or 1
 
-    rows_html = ""
-    for name, val in items:
-        pct_width = min(abs(val) / max_abs * 100, 100)
+    cards_html = ""
+    for name, val in sums.items():
         color = color_pnl(val)
-        side = "flex-end" if val >= 0 else "flex-start"
-        rows_html += (
-            '<div style="margin-bottom:0.6rem">'
-            f'<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:0.25rem">'
-            f'<span style="color:var(--text-dim)">{name}</span>'
-            f'<span style="font-weight:700;color:{color}">{val:+,.0f}백만원</span>'
-            '</div>'
-            f'<div style="height:8px;border-radius:4px;background:var(--card-border);'
-            f'display:flex;justify-content:{side}">'
-            f'<div style="width:{pct_width:.1f}%;height:100%;border-radius:4px;background:{color}"></div>'
-            '</div></div>'
-        )
+        bar_h = max(int(abs(val) / max_abs * 64), 6)
+        cards_html += f"""
+        <div style="flex:1;text-align:center">
+            <div style="font-size:0.9rem;color:var(--text-dim);margin-bottom:0.35rem">{name}</div>
+            <div style="font-size:1.15rem;font-weight:700;color:{color};margin-bottom:0.5rem;
+                        font-variant-numeric:tabular-nums">{val:+,.0f}억원</div>
+            <div style="height:64px;display:flex;align-items:flex-end;justify-content:center">
+                <div style="width:34px;height:{bar_h}px;border-radius:4px 4px 0 0;background:{color}"></div>
+            </div>
+        </div>"""
+
+    period_label = {"일간": window[-1]["date"], "주간": f"{window[-1]['date']} ~ {window[0]['date']} 합산",
+                     "월간": f"{window[-1]['date']} ~ {window[0]['date']} 합산"}[period]
     st.markdown(
         f'<div style="background:var(--card-bg);border:1px solid var(--card-border);'
-        f'border-radius:12px;padding:14px 16px">{rows_html}</div>',
+        f'border-radius:12px;padding:18px 16px 12px;display:flex">{cards_html}</div>',
         unsafe_allow_html=True,
     )
-    st.caption(f"기준일 {trend['date']} · 출처: 네이버페이 증권 (실시간 아님, 당일 잠정/확정 집계 기준)")
+    st.caption(f"기준: {period_label} · 출처: 네이버페이 증권 (실시간 아님, 당일 잠정/확정 집계 기준)")
 
-    # 거래량·거래대금 (해당 시장 전체 기준)
+    # 거래량·거래대금 (해당 시장 전체 기준, 당일)
     vol_data = get_market_trading_volume("KOSPI" if market == "코스피" else "KOSDAQ")
     if vol_data.get("ok"):
         col_v, col_a = st.columns(2)
-        col_v.metric(f"{market} 거래량", f"{vol_data['거래량']:,.0f}")
-        col_a.metric(f"{market} 거래대금", f"{vol_data['거래대금']:,.0f}")
+        col_v.metric(f"{market} 거래량 (당일)", f"{vol_data['거래량']:,.0f}")
+        col_a.metric(f"{market} 거래대금 (당일)", f"{vol_data['거래대금']:,.0f}")
         st.caption("단위는 네이버 원본 표시 기준(보통 거래량=천주, 거래대금=백만원)")
     else:
         st.caption(f"⚠️ 거래량·거래대금 조회 실패: {vol_data.get('debug', '알 수 없음')}")
-
-
-def render_sector_heatmap():
-    """테마별(업종별) 현황판 — 국내 업종 지수 자체는 무료로 제공되지 않아, 업종 대표 ETF
-    (KODEX 반도체·은행·자동차 등)의 당일 등락률로 근사한 트리맵. 실제 업종지수와는 오차가 있을 수 있음."""
-    st.markdown('<div class="section-title">테마별 현황판 (업종 대표 ETF 기준)</div>', unsafe_allow_html=True)
-
-    data = get_sector_day_change()
-    names, values, changes = [], [], []
-    for s in SECTOR_PROXY_ETFS:
-        info = data.get(f"{s['code']}.KS")
-        names.append(s["name"])
-        values.append(1)  # 트리맵 칸 크기는 균등 분할 (업종별 시가총액 가중치 데이터가 없음)
-        changes.append(info["change_pct"] if info else None)
-
-    if all(c is None for c in changes):
-        st.info("테마별 현황판 조회에 실패했습니다. 잠시 후 다시 시도해주세요.")
-        return
-
-    labels_disp = [f"{n}<br>{c:+.2f}%" if c is not None else f"{n}<br>조회 실패" for n, c in zip(names, changes)]
-    color_values = [c if c is not None else 0 for c in changes]
-
-    fig = go.Figure(go.Treemap(
-        labels=names,
-        parents=[""] * len(names),
-        values=values,
-        text=labels_disp,
-        texttemplate="%{text}",
-        textfont=dict(size=13),
-        pathbar=dict(visible=False),
-        marker=dict(
-            colors=color_values,
-            colorscale=[
-                [0, "#1a4d8f"], [0.25, "#5b9bd8"], [0.5, "#2b2f3a"],
-                [0.75, "#e0635e"], [1, "#8f1f1a"],
-            ],  # 하락일수록 진한 파랑, 상승일수록 진한 빨강 (국내 관례)
-            cmid=0,
-            line=dict(width=1, color="#1a1d24"),
-        ),
-        hovertemplate="<b>%{label}</b><extra></extra>",
-    ))
-    fig.update_layout(
-        margin=dict(t=10, l=4, r=4, b=4),
-        height=280,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    up = sum(1 for c in changes if c is not None and c > 0)
-    down = sum(1 for c in changes if c is not None and c < 0)
-    flat = sum(1 for c in changes if c is not None and c == 0)
-    st.caption(f"🔴 상승 {up} · ⚪ 보합 {flat} · 🔵 하락 {down}  ·  업종 대표 ETF 당일 등락률 기준 (실제 업종지수와 오차 있을 수 있음)")
 
 
 def render_holdings_treemap(holdings_df: pd.DataFrame):
@@ -1924,6 +1872,8 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
     if grouped.empty:
         st.info("표시할 보유종목이 없습니다.")
         return
+
+    total_value = grouped["평가금액"].sum()
 
     tickers = tuple(sorted({
         get_asset_ticker(c) for c in grouped["종목코드"] if get_asset_ticker(c)
@@ -1950,6 +1900,25 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
         lambda v: f"{v:+.2f}%" if v is not None else "조회 실패"
     )
     color_values = grouped["당일등락률"].fillna(0).tolist()
+
+    # 평가금액 가중 당일 등락률(포트폴리오 전체 관점의 하루 성적 요약) — 조회 성공한 종목만으로 계산
+    valid = grouped.dropna(subset=["당일등락률"])
+    if not valid.empty:
+        weighted_pct = (valid["당일등락률"] * valid["평가금액"]).sum() / valid["평가금액"].sum()
+        weighted_color = color_pnl(weighted_pct)
+        st.markdown(
+            f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
+            f'margin-bottom:0.6rem">'
+            f'<span style="font-size:0.85rem;color:var(--text-dim)">보유종목 평가금액 합계</span>'
+            f'<span style="font-size:1.05rem;font-weight:700">{total_value:,.0f}원</span>'
+            f'</div>'
+            f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
+            f'margin-bottom:0.8rem">'
+            f'<span style="font-size:0.85rem;color:var(--text-dim)">평가금액 가중 당일 등락률</span>'
+            f'<span style="font-size:1.05rem;font-weight:700;color:{weighted_color}">{weighted_pct:+.2f}%</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 
     view_mode = st.radio(
         "보기 방식", ["트리맵", "순위"], horizontal=True,
@@ -2107,7 +2076,6 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
 
     render_market_indices()
     render_investor_trend()
-    render_sector_heatmap()
     render_holdings_treemap(holdings_df)
 
     s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
