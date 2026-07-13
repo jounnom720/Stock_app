@@ -123,11 +123,14 @@ MARKET_INDICES = [
     {"group": "국내 증시",      "name": "코스닥",     "ticker": "^KQ11"},
     {"group": "환율·원자재",    "name": "USD/KRW",    "ticker": "KRW=X"},
     {"group": "환율·원자재",    "name": "WTI 유가",   "ticker": "CL=F"},
+    {"group": "환율·원자재",    "name": "국제 금",    "ticker": "GC=F"},
     {"group": "미국 증시",      "name": "S&P500",     "ticker": "^GSPC"},
     {"group": "미국 증시",      "name": "나스닥",     "ticker": "^IXIC"},
+    {"group": "미국 증시",      "name": "다우존스",   "ticker": "^DJI"},
     {"group": "위험심리·금리",  "name": "VIX",        "ticker": "^VIX"},
     {"group": "위험심리·금리",  "name": "달러인덱스", "ticker": "DX-Y.NYB"},
     {"group": "위험심리·금리",  "name": "美 10년물",  "ticker": "^TNX"},
+    {"group": "위험심리·금리",  "name": "비트코인",   "ticker": "BTC-USD"},
 ]
 
 # ============================================================
@@ -1145,10 +1148,19 @@ st.markdown("""
     gap: 0.6rem;
 }
 .mkt-card {
+    position: relative;
     background: var(--card-bg);
     border: 1px solid var(--card-border);
     border-radius: 10px;
-    padding: 0.9rem 1.05rem;
+    padding: 0.9rem 1.05rem 0.9rem 1.15rem;
+}
+.mkt-card::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0.7rem; bottom: 0.7rem;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--mkt-bar, var(--card-border));
 }
 .mkt-group-tag { font-size: 0.74rem; color: var(--text-dim2); margin-bottom: 0.2rem; }
 .mkt-name { font-size: 0.92rem; color: var(--text-dim); font-weight: 600; }
@@ -1626,7 +1638,7 @@ def main(spreadsheet_id: str):
 # 탭1: 통합 대시보드
 # ============================================================
 def render_market_indices():
-    """대시보드 상단 시장 지표 카드 — 9개 지표를 한 그리드에 가로로 펼쳐 배치."""
+    """대시보드 상단 시장 지표 카드 — 12개 지표를 한 그리드에 가로로 펼쳐 배치."""
     st.markdown('<div class="section-title">시장 지표</div>', unsafe_allow_html=True)
 
     data = get_market_index_data()
@@ -1643,12 +1655,14 @@ def render_market_indices():
             chg = info["change_pct"]
             if item["ticker"] == "^TNX":
                 value_str = f"{cur:,.2f}%"
+            elif item["ticker"] == "BTC-USD":
+                value_str = f"${cur:,.0f}"
             else:
                 value_str = f"{cur:,.2f}" if abs(cur) < 1000 else f"{cur:,.0f}"
             change_str = f"{chg:+.2f}%"
             color = color_pnl(chg)
         cards.append(f"""
-        <div class="mkt-card">
+        <div class="mkt-card" style="--mkt-bar:{color}">
             <div class="mkt-group-tag">{item['group']}</div>
             <div class="mkt-name">{item['name']}</div>
             <div class="mkt-value">{value_str}</div>
