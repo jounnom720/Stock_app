@@ -9,9 +9,11 @@ test_indicators_app.py
 본 서비스(stock_app_main.py)와는 완전히 별개로 동작하므로,
 여기서 무슨 일이 생겨도 지인들이 쓰는 본 앱에는 영향이 없습니다.
 
-이 파일 하나만 있으면 실행되도록, 모든 로직을 이 파일 안에 포함시켰습니다
-(market_regime.py / stock_indicators.py / investor_trend.py / glossary.py / insight_generator.py
- 내용을 그대로 통합, 별도 import 불필요).
+이번 버전에 추가된 것:
+- 오늘 실제 종가·등락률을 화면 상단에 명확히 표시 (지표만 봐서는 오늘 얼마나
+  올랐는지 안 보였던 문제 보완)
+- "이 데이터는 실시간이 아니라 KRX 확정 기준"이라는 안내 문구
+- 캐시를 무시하고 강제로 새로 조회하는 버튼 (이전 조회 결과가 남아있을 가능성 차단)
 """
 
 from dataclasses import dataclass, field
@@ -81,6 +83,7 @@ class StockIndicatorResult:
     ticker: str
     latest_date: str
     latest_close: float
+    day_change_pct: Optional[float]   # 오늘 등락률 (pykrx가 제공하는 원본 값)
     ma_deviation_pct: Optional[float]
     rsi: Optional[float]
     volume_ratio: Optional[float]
@@ -139,13 +142,22 @@ def calc_volume_ratio(volume_series: pd.Series, window: int = VOLUME_WINDOW):
 def get_stock_indicators(ticker: str) -> StockIndicatorResult:
     df = fetch_ohlcv(ticker)
     if df.empty:
-        return StockIndicatorResult(ticker, "", 0.0, None, None, None, 0)
+        return StockIndicatorResult(ticker, "", 0.0, None, None, None, None, 0)
     close = df["종가"]
     vol = df["거래량"]
+
+    # pykrx가 반환하는 원본 등락률 컬럼을 그대로 사용 (직접 계산하지 않고 원본 신뢰)
+    day_change_pct = None
+    if "등락률" in df.columns:
+        val = df["등락률"].iloc[-1]
+        if not pd.isna(val):
+            day_change_pct = round(float(val), 2)
+
     return StockIndicatorResult(
         ticker=ticker,
         latest_date=str(df.index[-1].date()),
         latest_close=float(close.iloc[-1]),
+        day_change_pct=day_change_pct,
         ma_deviation_pct=calc_ma_deviation(close),
         rsi=calc_rsi(close),
         volume_ratio=calc_volume_ratio(vol),
@@ -355,6 +367,14 @@ def generate_insight(regime_result, indicator_result, investor_result=None):
 st.title("종목 지표 테스트")
 st.caption("시장 국면 + 종목 지표 + 투자자별(외국인/기관/개인) 순매수 동향을 종합한 인사이트를 확인하는 화면입니다.")
 
+st.info(
+    "⚠️ 이 화면의 시세·거래량·투자자 동향은 **실시간 데이터가 아니라, "
+    "한국거래소(KRX)가 그날그날 확정 발표하는 통계 기준**입니다. "
+    "장중이나 장 마감 직후에는 증권사 앱(실시간 시세)과 숫자가 다를 수 있고, "
+    "특히 투자자별 동향은 가격 데이터보다 확정이 더 늦게 되는 경우가 많습니다. "
+    "정확한 비교를 원하시면 장 마감 몇 시간 후(저녁 시간대)에 다시 확인해보세요."
+)
+
 col1, col2, col3 = st.columns([2, 2, 1])
 with col1:
     ticker = st.text_input("종목코드", value="005930", help="예: 삼성전자 005930, KODEX200 069500")
@@ -366,7 +386,14 @@ with col3:
     st.write("")
     run = st.button("조회하기", use_container_width=True)
 
+ignore_cache = st.checkbox("캐시 무시하고 최신 데이터로 새로 조회", value=False,
+                            help="이전에 조회한 결과가 남아있는 것 같으면 체크 후 조회하세요.")
+
 if run:
+    if ignore_cache:
+        fetch_ohlcv.clear()
+        fetch_investor_trading_value.clear()
+
     with st.spinner("데이터를 가져오는 중..."):
         indicators = get_stock_indicators(ticker)
         investor = get_investor_trend(ticker)
@@ -376,6 +403,14 @@ if run:
         st.warning("시세 데이터를 가져오지 못했습니다. 종목코드를 다시 확인해주세요.")
     else:
         st.success(f"조회 완료 — 최근 {indicators.data_points}일치 데이터 확보 (기준일: {indicators.latest_date})")
+
+        # 오늘 실제 종가와 등락률을 가장 눈에 띄게 표시
+        price_col, change_col = st.columns(2)
+        price_col.metric("오늘 종가 (KRX 확정 기준)", f"{indicators.latest_close:,.0f}원")
+        if indicators.day_change_pct is not None:
+            change_col.metric("오늘 등락률", f"{indicators.day_change_pct:+.2f}%")
+        else:
+            change_col.metric("오늘 등락률", "정보 없음")
 
         m1, m2, m3 = st.columns(3)
         m1.metric("이동평균 이격도", f"{indicators.ma_deviation_pct}%" if indicators.ma_deviation_pct is not None else "데이터 부족")
@@ -396,7 +431,7 @@ if run:
                     f"{net:,}원 (오늘)"
                 )
         else:
-            st.info("투자자 동향 데이터를 가져오지 못했습니다.")
+            st.info("투자자 동향 데이터를 아직 가져오지 못했습니다. (KRX 확정 지연일 가능성이 높습니다 — 저녁에 다시 시도해보세요.)")
 
         st.divider()
         st.subheader("종합 인사이트 코멘트")
