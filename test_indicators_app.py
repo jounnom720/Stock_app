@@ -367,6 +367,21 @@ def generate_insight(regime_result, indicator_result, investor_result=None):
 st.title("종목 지표 테스트")
 st.caption("시장 국면 + 종목 지표 + 투자자별(외국인/기관/개인) 순매수 동향을 종합한 인사이트를 확인하는 화면입니다.")
 
+st.markdown(
+    """
+    <style>
+    div[data-testid="stPopover"] button {
+        justify-content: flex-start !important;
+        text-align: left !important;
+    }
+    div[data-testid="stPopover"] button p {
+        text-align: left !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 with st.popover(
     "⚠️ 이 화면의 시세·거래량·투자자 동향은 KRX(한국거래소) 기준 시세이며, "
     "증권사 앱의 통합시세(NXT 포함)와 다를 수 있습니다.",
@@ -436,7 +451,7 @@ if run:
                     f"{net:,}원 (오늘)"
                 )
         else:
-            st.info("투자자 동향 데이터를 아직 가져오지 못했습니다. (KRX 확정 지연일 가능성이 높습니다 — 저녁에 다시 시도해보세요.)")
+            st.info("투자자 동향 데이터를 아직 가져오지 못했습니다. (KRX 확정 지연일 가능성이 높습니다 — NXT 거래 종료 후 다시 시도해보세요.)")
 
         st.divider()
         st.subheader("종합 인사이트 코멘트")
