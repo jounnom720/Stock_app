@@ -384,7 +384,7 @@ st.markdown(
 
 with st.popover(
     "⚠️ 이 화면의 시세·거래량·투자자 동향은 KRX(한국거래소) 기준 시세이며, "
-    "증권사 앱의 통합시세(NXT 포함)와 다를 수 있습니다.",
+    "통합시세(NXT 포함)와 다를 수 있습니다.",
     use_container_width=True,
 ):
     st.write(
