@@ -21,7 +21,6 @@ import hmac
 import hashlib
 import base64
 import time
-import requests
 
 # ============================================================
 # 기본 설정
@@ -664,72 +663,6 @@ def get_day_change(tickers: tuple) -> dict[str, dict]:
         return {}
     return _fetch_current_and_prev_close(list(tickers))
 
-
-@st.cache_data(ttl=300)
-def get_investor_trend(sosok: str) -> dict:
-    """네이버 금융 '투자자별 매매동향 일별' 페이지를 조회해 코스피/코스닥 전체 시장의
-    최근 20거래일치 개인·외국인·기관계 순매수 금액(단위: 억원)을 반환.
-    sosok: '01'=코스피, '02'=코스닥.
-    yfinance에는 없는 데이터라 네이버 페이지를 직접 파싱하며, 페이지 구조가 바뀌면
-    실패할 수 있어 실패 사유를 debug 필드에 담아 반환 (화면에서 원인 확인 가능)."""
-    try:
-        bizdate = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        url = f"https://finance.naver.com/sise/investorDealTrendDay.nhn?bizdate={bizdate}&sosok={sosok}&page=1"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://finance.naver.com/sise/",
-        }
-        resp = requests.get(url, headers=headers, timeout=6)
-        resp.encoding = "euc-kr"
-        if resp.status_code != 200:
-            return {"ok": False, "debug": f"HTTP {resp.status_code}"}
-
-        try:
-            tables = pd.read_html(resp.text)
-        except Exception as e:
-            return {"ok": False, "debug": f"테이블 파싱 실패: {e} (응답 길이 {len(resp.text)}자)"}
-
-        target = None
-        for t in tables:
-            col_text = " ".join(str(c) for c in t.columns)
-            cell_text = t.astype(str).apply(lambda col: col.str.cat(sep=" "), axis=0).str.cat(sep=" ")
-            flat = col_text + " " + cell_text
-            if "외국인" in flat and "개인" in flat and "기관" in flat:
-                target = t
-                break
-        if target is None:
-            table_shapes = [t.shape for t in tables]
-            return {"ok": False, "debug": f"'외국인/개인/기관' 포함 테이블 없음 (테이블 {len(tables)}개, 크기: {table_shapes})"}
-
-        target.columns = [str(c) for c in target.columns]
-        first_col = target.iloc[:, 0].astype(str)
-        data_rows = target[first_col.str.match(r"^\d{2}\.\d{2}\.\d{2}$")]
-        if data_rows.empty:
-            return {"ok": False, "debug": f"날짜 형식(YY.MM.DD) 행 없음. 첫 열 샘플: {first_col.tolist()[:5]}"}
-
-        cols = list(target.columns)
-
-        def _find(row, keyword):
-            for c in cols:
-                if keyword in str(c):
-                    return _safe_num(row[c])
-            return 0.0
-
-        # 최근 20거래일치를 전부 담아 반환 — 일간(1일)/주간(5일)/월간(20일) 합산에 재사용
-        # (네이버 '투자자 동향' 위젯의 주간=직전 5거래일, 월간=직전 20거래일 정의와 동일하게 맞춤)
-        rows = []
-        for _, row in data_rows.head(20).iterrows():
-            rows.append({
-                "date": str(row.iloc[0]),
-                "개인": _find(row, "개인"),
-                "외국인": _find(row, "외국인"),
-                "기관계": _find(row, "기관"),
-            })
-
-        return {"ok": True, "date": rows[0]["date"], "rows": rows}
-    except Exception as e:
-        logging.warning("투자자별 매매동향 조회 실패 (sosok=%s): %s", sosok, e)
-        return {"ok": False, "debug": f"예외 발생: {type(e).__name__}: {e}"}
 
 # ============================================================
 # 숫자 안전 변환 (빈 셀·하이픈·쉼표 등으로 인한 크래시 방지)
@@ -1708,36 +1641,28 @@ def main(spreadsheet_id: str):
     # ──────────────────────────────────────────────
     # 탭 구성
     # ──────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 통합 대시보드", "💼 보유 종목", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"])
+    # st.tabs()는 "지금 어느 탭이 선택되어 있는지"를 브라우저 쪽에서만 기억하고
+    # session_state에는 저장하지 않는다. 그래서 탭 안에서 '카드형→표'처럼 화면 구성이
+    # 크게 바뀌는 위젯을 클릭하면, Streamlit이 화면을 완전히 새로 그리는 걸로 착각해
+    # 첫 번째 탭으로 튕겨나가는 버그가 있다 (Streamlit 자체의 알려진 미해결 이슈).
+    # session_state에 직접 선택된 탭을 저장하는 라디오 버튼으로 대체해 이 문제를 원천 차단한다.
+    MAIN_TABS = ["📈 통합 대시보드", "💼 보유 종목", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"]
 
-    # ══════════════════════════════════════════════
-    # 탭1: 통합 대시보드
-    # ══════════════════════════════════════════════
-    with tab1:
+    selected_main_tab = st.radio(
+        "메인 메뉴", MAIN_TABS, horizontal=True,
+        key="active_main_tab", label_visibility="collapsed",
+    )
+    st.markdown("<div style='margin-top:-0.5rem'></div>", unsafe_allow_html=True)
+
+    if selected_main_tab == MAIN_TABS[0]:
         render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=trade_df, transfer_df=transfer_df)
-
-    # ══════════════════════════════════════════════
-    # 탭2: 보유 종목 상세
-    # ══════════════════════════════════════════════
-    with tab2:
+    elif selected_main_tab == MAIN_TABS[1]:
         render_holdings(holdings_df, prices, nonstock_df)
-
-    # ══════════════════════════════════════════════
-    # 탭3: 거래이력
-    # ══════════════════════════════════════════════
-    with tab3:
+    elif selected_main_tab == MAIN_TABS[2]:
         render_trades(trade_df)
-
-    # ══════════════════════════════════════════════
-    # 탭4: 현금흐름 (거래이력 기반 자동 계산)
-    # ══════════════════════════════════════════════
-    with tab4:
+    elif selected_main_tab == MAIN_TABS[3]:
         render_cashflow(trade_df, cashlog_df)
-
-    # ══════════════════════════════════════════════
-    # 탭5: 데이터 관리
-    # ══════════════════════════════════════════════
-    with tab5:
+    elif selected_main_tab == MAIN_TABS[4]:
         render_data_mgmt(nonstock_df, cash_df)
 
 
@@ -1776,136 +1701,6 @@ def render_market_indices():
             <div class="mkt-change" style="color:{color}">{change_str}</div>
         </div>""")
     st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
-
-
-@st.cache_data(ttl=300)
-def get_market_trading_volume(code: str) -> dict:
-    """코스피/코스닥 전체 시장의 당일 거래량·거래대금 조회 (code: 'KOSPI' 또는 'KOSDAQ').
-    네이버 금융 일별시세 페이지를 파싱하며, 실패 시 debug 필드에 사유를 담아 반환."""
-    try:
-        url = f"https://finance.naver.com/sise/sise_index_day.naver?code={code}&page=1"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://finance.naver.com/sise/",
-        }
-        resp = requests.get(url, headers=headers, timeout=6)
-        resp.encoding = "euc-kr"
-        if resp.status_code != 200:
-            return {"ok": False, "debug": f"HTTP {resp.status_code}"}
-        tables = pd.read_html(resp.text)
-        target = None
-        for t in tables:
-            col_text = " ".join(str(c) for c in t.columns)
-            if "거래량" in col_text and "거래대금" in col_text:
-                target = t
-                break
-        if target is None:
-            return {"ok": False, "debug": f"거래량/거래대금 포함 테이블 없음 (테이블 {len(tables)}개)"}
-        target.columns = [str(c) for c in target.columns]
-        first_col = target.iloc[:, 0].astype(str)
-        data_rows = target[first_col.str.match(r"^\d{2,4}\.\d{2}\.\d{2}$")]
-        if data_rows.empty:
-            return {"ok": False, "debug": f"날짜 행 없음. 첫 열 샘플: {first_col.tolist()[:5]}"}
-        latest = data_rows.iloc[0]
-        cols = list(target.columns)
-
-        def _find(keyword):
-            for c in cols:
-                if keyword in str(c):
-                    return _safe_num(latest[c])
-            return 0.0
-
-        return {
-            "ok": True,
-            "date": str(latest.iloc[0]),
-            "거래량": _find("거래량"),
-            "거래대금": _find("거래대금"),
-        }
-    except Exception as e:
-        return {"ok": False, "debug": f"예외 발생: {type(e).__name__}: {e}"}
-
-
-def render_investor_trend():
-    """코스피/코스닥 전체 시장의 개인·외국인·기관계 순매수 동향 (네이버페이 증권 '투자자 동향' UI 참고).
-    Jone의 보유종목과 무관하게, 국내 증시 전체의 수급 흐름을 보여주는 섹션.
-    일간/주간(직전 5거래일)/월간(직전 20거래일) 토글 제공 — 네이버 위젯의 기간 정의와 동일하게 맞춤."""
-    st.markdown('<div class="section-title">투자자 동향</div>', unsafe_allow_html=True)
-
-    col_market, col_period = st.columns([1, 1])
-    with col_market:
-        market = st.radio(
-            "시장 선택", ["코스피", "코스닥"], horizontal=True,
-            key="investor_trend_market", label_visibility="collapsed",
-        )
-    with col_period:
-        period = st.radio(
-            "기간 선택", ["일간", "주간", "월간"], horizontal=True,
-            key="investor_trend_period", label_visibility="collapsed",
-        )
-
-    sosok = "01" if market == "코스피" else "02"
-    trend = get_investor_trend(sosok)
-
-    if not trend.get("ok"):
-        st.info("투자자별 매매동향 조회에 실패했습니다. 잠시 후 다시 시도해주세요.")
-        st.caption(f"⚠️ 실패 원인: {trend.get('debug', '알 수 없음')}")
-        return
-
-    rows = trend["rows"]
-    n = {"일간": 1, "주간": 5, "월간": 20}[period]
-    window = rows[:n]
-    sums = {
-        "외국인": sum(r["외국인"] for r in window),
-        "기관": sum(r["기관계"] for r in window),
-        "개인": sum(r["개인"] for r in window),
-    }
-    max_abs = max(abs(v) for v in sums.values()) or 1
-
-    cards_html = ""
-    for name, val in sums.items():
-        color = color_pnl(val)
-        bar_h = max(int(abs(val) / max_abs * 64), 6)
-        cards_html += f"""
-        <div style="flex:1;text-align:center">
-            <div style="font-size:0.9rem;color:var(--text-dim);margin-bottom:0.35rem">{name}</div>
-            <div style="font-size:1.15rem;font-weight:700;color:{color};margin-bottom:0.5rem;
-                        font-variant-numeric:tabular-nums">{val:+,.0f}억원</div>
-            <div style="height:64px;display:flex;align-items:flex-end;justify-content:center">
-                <div style="width:34px;height:{bar_h}px;border-radius:4px 4px 0 0;background:{color}"></div>
-            </div>
-        </div>"""
-
-    period_label = {"일간": window[-1]["date"], "주간": f"{window[-1]['date']} ~ {window[0]['date']} 합산",
-                     "월간": f"{window[-1]['date']} ~ {window[0]['date']} 합산"}[period]
-
-    # 거래량·거래대금 (해당 시장 전체 기준, 당일) — 투자자 동향과 한 카드로 묶어 시인성 강화
-    vol_data = get_market_trading_volume("KOSPI" if market == "코스피" else "KOSDAQ")
-    vol_html = ""
-    if vol_data.get("ok"):
-        value_amt_eok = vol_data["거래대금"] / 100  # 네이버 원본 단위 백만원 → 억원
-        vol_html = f"""
-        <div style="display:flex;border-top:1px solid var(--card-border);margin-top:14px;padding-top:12px">
-            <div style="flex:1;text-align:center;border-right:1px solid var(--card-border)">
-                <div style="font-size:0.78rem;color:var(--text-dim2);margin-bottom:0.3rem">{market} 거래량 (당일)</div>
-                <div style="font-size:1.05rem;font-weight:700">{vol_data['거래량']:,.0f}
-                    <span style="font-size:0.68rem;color:var(--text-dim2);font-weight:500">천주</span></div>
-            </div>
-            <div style="flex:1;text-align:center">
-                <div style="font-size:0.78rem;color:var(--text-dim2);margin-bottom:0.3rem">{market} 거래대금 (당일)</div>
-                <div style="font-size:1.05rem;font-weight:700">{value_amt_eok:,.0f}
-                    <span style="font-size:0.68rem;color:var(--text-dim2);font-weight:500">억원</span></div>
-            </div>
-        </div>"""
-
-    st.markdown(
-        f'<div style="background:var(--card-bg);border:1px solid var(--card-border);'
-        f'border-radius:12px;padding:18px 16px 14px">'
-        f'<div style="display:flex">{cards_html}</div>{vol_html}</div>',
-        unsafe_allow_html=True,
-    )
-    st.caption(f"기준: {period_label} · 출처: 네이버페이 증권 (실시간 아님, 당일 잠정/확정 집계 기준)")
-    if not vol_data.get("ok"):
-        st.caption(f"⚠️ 거래량·거래대금 조회 실패: {vol_data.get('debug', '알 수 없음')}")
 
 
 def render_holdings_treemap(holdings_df: pd.DataFrame):
@@ -2127,7 +1922,6 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
 def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
     render_market_indices()
-    render_investor_trend()
     render_holdings_treemap(holdings_df)
 
     s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
