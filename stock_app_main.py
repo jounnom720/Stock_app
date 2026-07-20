@@ -808,47 +808,95 @@ def validate_trade_df(trade_df: pd.DataFrame) -> list:
     return warnings_list
 
 # ============================================================
+# 평균매입가 재생 (단일 로직 — calc_holdings·calc_realized_pnl이 공유)
+# ============================================================
+def _replay_trade_ledger(trade_df: pd.DataFrame):
+    """거래이력을 시간순으로 한 번 재생하며 계좌+종목코드별 평균매입단가·보유수량을 계산.
+
+    이전에는 calc_holdings()와 calc_realized_pnl()이 각각 독립적으로 평균매입가
+    로직을 구현하고 있었음(같은 계산이 두 곳에 나뉘어 있어, 한쪽만 고치면 두 화면의
+    숫자가 어긋날 수 있는 구조였음). 이제 이 함수 하나로 합쳐서, 평균매입가 계산은
+    이 함수만 거쳐가도록 통일함.
+
+    Returns:
+        (sell_events, final_state)
+        - sell_events: 매도 발생 시점마다의 상세 정보 리스트 (calc_realized_pnl이 사용)
+        - final_state: {(계좌, 종목코드): {"종목명","보유수량","평균단가"}} 최종 보유 현황 (calc_holdings가 사용)
+    """
+    if trade_df.empty:
+        return [], {}
+
+    df = trade_df.copy()
+    df["_거래일자_dt"] = pd.to_datetime(df["거래일자"], errors="coerce")
+    df = df.sort_values("_거래일자_dt").reset_index(drop=True)
+
+    qty_held = {}
+    avg_cost = {}
+    names = {}
+    sell_events = []
+
+    for _, row in df.iterrows():
+        code = str(row.get("종목코드", "")).strip()
+        name = str(row.get("종목명", "")).strip()
+        account = str(row.get("운용사", "")).strip()
+        qty = int(_safe_num(row.get("거래수량", 0)))
+        price = _safe_num(row.get("거래단가", 0))
+        구분 = str(row.get("거래구분", "")).strip()
+        date = row["_거래일자_dt"]
+        key = (account, code)  # 계좌+종목코드 단위로 평균단가 분리 관리 (동일 종목이 여러 계좌에 있을 수 있음)
+        names[key] = name
+
+        if 구분 == "매수":
+            prev_qty = qty_held.get(key, 0)
+            prev_avg = avg_cost.get(key, 0.0)
+            new_qty = prev_qty + qty
+            new_avg = (prev_avg * prev_qty + price * qty) / new_qty if new_qty else price
+            qty_held[key] = new_qty
+            avg_cost[key] = new_avg
+        elif 구분 == "매도":
+            prev_qty = qty_held.get(key, 0)
+            prev_avg = avg_cost.get(key, price)
+            # 보유수량을 초과하는 매도는 실현손익 계산에서 초과분을 제외 (데이터 입력 오류로 인한 손익 부풀림 방지)
+            effective_qty = min(qty, prev_qty) if prev_qty > 0 else 0
+            sell_events.append({
+                "거래일자": date, "계좌": account, "종목코드": code, "종목명": name,
+                "매도수량": qty, "매도단가": price, "평균매입단가": prev_avg,
+                "effective_qty": effective_qty,
+            })
+            qty_held[key] = max(0, prev_qty - qty)
+            # 매도 후에도 남은 수량의 평균단가 자체는 변하지 않음 (평균매입가법 원칙)
+
+    final_state = {}
+    for key, qty in qty_held.items():
+        if qty > 0:
+            final_state[key] = {
+                "종목명": names.get(key, ""),
+                "보유수량": qty,
+                "평균단가": avg_cost.get(key, 0.0),
+            }
+
+    return sell_events, final_state
+
+
+# ============================================================
 # 보유 종목 계산
 # ============================================================
 def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
-    """거래이력으로 현재 보유 종목과 평균단가 계산."""
-    if trade_df.empty:
-        return pd.DataFrame()
-
-    holdings = {}
-    for _, row in trade_df.iterrows():
-        code = str(row.get("종목코드", "")).strip()
-        name = str(row.get("종목명", "")).strip()
-        qty = int(_safe_num(row.get("거래수량", 0)))
-        price = _safe_num(row.get("거래단가", 0))
-        account = str(row.get("운용사", "")).strip()
-        구분 = str(row.get("거래구분", "")).strip()
-
-        key = (account, code)  # 계좌+종목코드 단위로 집계 (동일 종목이 여러 계좌에 있을 수 있음)
-        if key not in holdings:
-            holdings[key] = {"종목코드": code, "종목명": name, "계좌": account,
-                              "보유수량": 0, "매수금액합계": 0.0}
-        if 구분 == "매수":
-            holdings[key]["보유수량"] += qty
-            holdings[key]["매수금액합계"] += qty * price
-        elif 구분 == "매도":
-            if holdings[key]["보유수량"] > 0:
-                avg = holdings[key]["매수금액합계"] / holdings[key]["보유수량"]
-                holdings[key]["보유수량"] = max(0, holdings[key]["보유수량"] - qty)
-                holdings[key]["매수금액합계"] = avg * holdings[key]["보유수량"]
+    """거래이력으로 현재 보유 종목과 평균단가 계산. (_replay_trade_ledger 공유 로직 사용)"""
+    _, final_state = _replay_trade_ledger(trade_df)
 
     rows = []
-    for key, h in holdings.items():
-        if h["보유수량"] > 0:
-            avg = h["매수금액합계"] / h["보유수량"] if h["보유수량"] else 0
-            rows.append({
-                "종목코드": h["종목코드"],
-                "종목명": h["종목명"],
-                "계좌": h["계좌"],
-                "보유수량": h["보유수량"],
-                "평균단가": round(avg),
-                "매입금액": round(avg * h["보유수량"]),
-            })
+    for (account, code), h in final_state.items():
+        avg = h["평균단가"]
+        qty = h["보유수량"]
+        rows.append({
+            "종목코드": code,
+            "종목명": h["종목명"],
+            "계좌": account,
+            "보유수량": qty,
+            "평균단가": round(avg),
+            "매입금액": round(avg * qty),
+        })
 
     return pd.DataFrame(rows)
 
@@ -858,49 +906,21 @@ def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
 def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
     """매도 건별 실현손익을 평균매입가법으로 계산하는 단일 함수.
     주식/ETF 전체가 이 함수 하나만 거쳐가므로 화면마다 다른 숫자가 나올 수 없다.
+    (_replay_trade_ledger 공유 로직 사용)
     """
-    if trade_df.empty:
-        return pd.DataFrame()
+    sell_events, _ = _replay_trade_ledger(trade_df)
 
-    df = trade_df.copy()
-    df["거래일자"] = pd.to_datetime(df["거래일자"], errors="coerce")
-    df = df.sort_values("거래일자").reset_index(drop=True)
-
-    avg_cost = {}
-    qty_held = {}
     realized_rows = []
-
-    for _, row in df.iterrows():
-        code = str(row["종목코드"]).strip()
-        name = row["종목명"]
-        qty = int(_safe_num(row["거래수량"]))
-        price = _safe_num(row["거래단가"])
-        account = row["운용사"]
-        date = row["거래일자"]
-        key = (str(account).strip(), code)  # 계좌+종목코드 단위로 평균단가 분리 관리
-
-        if row["거래구분"] == "매수":
-            prev_qty = qty_held.get(key, 0)
-            prev_avg = avg_cost.get(key, 0.0)
-            new_qty = prev_qty + qty
-            new_avg = (prev_avg * prev_qty + price * qty) / new_qty if new_qty else price
-            qty_held[key] = new_qty
-            avg_cost[key] = new_avg
-        elif row["거래구분"] == "매도":
-            prev_avg = avg_cost.get(key, price)
-            prev_qty = qty_held.get(key, 0)
-            # 보유수량을 초과하는 매도는 실현손익 계산에서 초과분을 제외 (데이터 입력 오류로 인한 손익 부풀림 방지)
-            effective_qty = min(qty, prev_qty) if prev_qty > 0 else 0
-            매도금액 = effective_qty * price
-            매입금액 = effective_qty * prev_avg
-            실현손익 = 매도금액 - 매입금액
-            realized_rows.append({
-                "거래일자": date, "계좌": account, "종목코드": code, "종목명": name,
-                "매도수량": qty, "매도단가": price, "평균매입단가": round(prev_avg),
-                "매도금액": round(매도금액), "매입금액": round(매입금액),
-                "실현손익": round(실현손익),
-            })
-            qty_held[key] = max(0, prev_qty - qty)
+    for ev in sell_events:
+        매도금액 = ev["effective_qty"] * ev["매도단가"]
+        매입금액 = ev["effective_qty"] * ev["평균매입단가"]
+        실현손익 = 매도금액 - 매입금액
+        realized_rows.append({
+            "거래일자": ev["거래일자"], "계좌": ev["계좌"], "종목코드": ev["종목코드"], "종목명": ev["종목명"],
+            "매도수량": ev["매도수량"], "매도단가": ev["매도단가"], "평균매입단가": round(ev["평균매입단가"]),
+            "매도금액": round(매도금액), "매입금액": round(매입금액),
+            "실현손익": round(실현손익),
+        })
 
     return pd.DataFrame(realized_rows)
 
