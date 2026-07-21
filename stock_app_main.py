@@ -616,16 +616,23 @@ def show_login():
             st.error("계정 상태를 확인할 수 없습니다. 관리자에게 문의해주세요.")
             return
 
-        # 승인된 사용자 → 개인 시트 찾기/생성
+        # 승인된 사용자 → 개인 시트 연결
+        # 화이트리스트에 spreadsheet_id가 이미 있으면(예: v1.0에서 마이그레이션된 기존 사용자)
+        # 그 값을 그대로 사용한다 — Drive 검색/신규 생성 로직은 절대 타지 않는다.
+        # spreadsheet_id가 비어있는 '완전히 새로운' 사용자만 find_or_create로 개인 시트를 만든다.
         display_name = str(status_row.get("이름", "")).strip() or email.split("@")[0]
-        with st.spinner("개인 자산관리 시트를 확인하는 중..."):
-            try:
-                sheet_id, created = find_or_create_user_spreadsheet(credentials, display_name)
-            except Exception as e:
-                st.error(f"개인 시트를 확인/생성하는 중 오류가 발생했습니다: {e}")
-                return
-            existing_sid = str(status_row.get("spreadsheet_id", "")).strip()
-            if created or not existing_sid:
+        existing_sid = str(status_row.get("spreadsheet_id", "")).strip()
+        created = False
+
+        if existing_sid:
+            sheet_id = existing_sid
+        else:
+            with st.spinner("개인 자산관리 시트를 새로 만드는 중..."):
+                try:
+                    sheet_id, created = find_or_create_user_spreadsheet(credentials, display_name)
+                except Exception as e:
+                    st.error(f"개인 시트를 확인/생성하는 중 오류가 발생했습니다: {e}")
+                    return
                 save_user_spreadsheet_id(email, sheet_id)
 
         st.session_state["logged_in"] = True
