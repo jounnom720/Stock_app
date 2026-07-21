@@ -1,9 +1,10 @@
 """
-통합자산관리 시스템 v1.0
+통합자산관리 시스템 v2.0
 - 신한은행 IRP (TDF + ETF)
 - 미래에셋증권 (국내주식 + ETF)
 - Google Sheets 실시간 연동
 - yfinance 실시간 시세
+- Google OAuth 로그인 (v2.0: 아이디/비밀번호 방식 폐지, 개인 소유 시트로 전환)
 """
 
 import streamlit as st
@@ -12,22 +13,24 @@ import numpy as np
 import gspread
 import yfinance as yf
 import plotly.graph_objects as go
-from google.oauth2.service_account import Credentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import logging
-import bcrypt
 import hmac
 import hashlib
 import base64
 import time
+import secrets as pysecrets
 
 # ============================================================
 # 기본 설정
 # ============================================================
 logging.basicConfig(level=logging.WARNING)
 KST = ZoneInfo("Asia/Seoul")
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v2.0.0"
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -134,7 +137,7 @@ MARKET_INDICES = [
 ]
 
 # ============================================================
-# Google Sheets 연결
+# Google Sheets 연결 (서비스 계정 — 화이트리스트 '사용자계정' 시트 전용)
 # ============================================================
 SHEET_NAMES = {
     "거래이력":        "거래이력",
@@ -146,9 +149,12 @@ SHEET_NAMES = {
 
 @st.cache_resource(ttl=60)
 def get_gspread_client():
+    """서비스 계정으로 인증하는 클라이언트.
+    v2.0부터는 개인 자산 시트가 아니라, 관리자용 '사용자계정'(화이트리스트) 시트에만 사용된다.
+    개인 자산 시트는 이제 각자 본인 소유이므로 아래 get_user_gspread_client()로 접근한다."""
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(
+        creds = ServiceAccountCredentials.from_service_account_info(
             creds_dict,
             scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"],
         )
@@ -157,12 +163,132 @@ def get_gspread_client():
         logging.warning("gspread 연결 실패: %s", e)
         return None
 
+# ============================================================
+# Google OAuth (개인별 로그인 + 개인 소유 시트)
+# ============================================================
+OAUTH_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
+APP_TAG_KEY = "owner_app"
+APP_TAG_VALUE = "jone_asset_manager"
+
+# 신규 사용자의 개인 시트를 처음 생성할 때 자동으로 만들 탭과 헤더.
+# stock_app_main.py의 load_sheet()/load_sheet_optional() 호출부와 이름이 반드시 일치해야 한다.
+REQUIRED_SHEET_HEADERS = {
+    "거래이력":        ["거래일자", "운용사", "종목코드", "종목명", "거래구분", "거래수량", "거래단가", "비고"],
+    "비주식자산":      ["계좌", "자산군", "상품명", "원금", "평가금액", "반영일자", "비고"],
+    "현금성자산":      ["계좌", "예수금", "반영일자"],
+    "월별자산스냅샷":  ["년월", "통합원금", "통합평가"],
+    "계좌간이체":      ["거래일자", "출금계좌", "입금계좌", "금액", "실현손익", "비고"],
+    "현금출납내역":    ["날짜", "계좌", "구분", "금액", "사유"],
+}
+
+def get_oauth_flow():
+    client_config = {
+        "web": {
+            "client_id": st.secrets["google_oauth"]["client_id"],
+            "client_secret": st.secrets["google_oauth"]["client_secret"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [st.secrets["google_oauth"]["redirect_uri"]],
+        }
+    }
+    flow = Flow.from_client_config(client_config, scopes=OAUTH_SCOPES)
+    flow.redirect_uri = st.secrets["google_oauth"]["redirect_uri"]
+    return flow
+
+def _generate_pkce_pair():
+    code_verifier = base64.urlsafe_b64encode(pysecrets.token_bytes(64)).decode("utf-8").rstrip("=")
+    digest = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+    return code_verifier, code_challenge
+
+@st.cache_resource(ttl=60 * 60 * 12)
+def _oauth_credential_store() -> dict:
+    """서버 프로세스가 살아있는 동안 '이메일 → OAuth Credentials'를 보관하는 전역 저장소.
+    탭 재연결 등으로 session_state가 초기화돼도(원래 아이디/비밀번호 버전에서 겪던 것과 동일한 문제),
+    서버 프로세스 자체가 재시작되지 않았다면 재로그인 없이 세션을 복구하기 위함.
+    [주의] 서버가 재배포/절전 복귀 등으로 재시작되면 이 저장소는 비워지므로, 그 경우에는
+    다시 'Google 계정으로 로그인' 버튼을 한 번 눌러야 한다 (대부분 동의 화면 없이 바로 통과됨)."""
+    return {}
+
+def _save_credentials(email: str, credentials):
+    _oauth_credential_store()[email] = credentials
+
+def _restore_credentials(email: str):
+    return _oauth_credential_store().get(email)
+
+def get_user_gspread_client():
+    """로그인한 사용자 본인의 OAuth 자격증명으로 gspread 클라이언트 생성.
+    개인 자산 시트는 drive.file 스코프이므로 이 앱이 만들었거나 사용자가 직접 연 파일만 접근 가능하며,
+    서비스 계정이 아니라 반드시 사용자 본인 권한으로 열어야 한다."""
+    credentials = st.session_state.get("oauth_credentials")
+    if credentials is None:
+        return None
+    try:
+        return gspread.authorize(credentials)
+    except Exception as e:
+        logging.warning("사용자 OAuth gspread 인증 실패: %s", e)
+        return None
+
+def get_user_email(credentials) -> str:
+    oauth2_service = build("oauth2", "v2", credentials=credentials)
+    user_info = oauth2_service.userinfo().get().execute()
+    return user_info.get("email", "")
+
+def _initialize_sheet_structure(credentials, spreadsheet_id: str):
+    """새로 생성된 개인 시트에 필수 탭과 헤더 행을 만든다.
+    Drive API로 처음 생성된 스프레드시트에는 'Sheet1' 하나만 있으므로,
+    그 시트 이름을 첫 번째 탭 이름으로 바꾸고 나머지는 새로 추가한다."""
+    try:
+        gc = gspread.authorize(credentials)
+        sh = gc.open_by_key(spreadsheet_id)
+        sheet_order = list(REQUIRED_SHEET_HEADERS.keys())
+        first_name = sheet_order[0]
+
+        default_ws = sh.sheet1
+        default_ws.update_title(first_name)
+        default_ws.update("A1", [REQUIRED_SHEET_HEADERS[first_name]])
+
+        for name in sheet_order[1:]:
+            headers = REQUIRED_SHEET_HEADERS[name]
+            ws = sh.add_worksheet(title=name, rows=200, cols=max(10, len(headers)))
+            ws.update("A1", [headers])
+    except Exception as e:
+        logging.warning("신규 시트 초기 구조 세팅 실패: %s", e)
+
+def find_or_create_user_spreadsheet(credentials, display_name: str):
+    """로그인한 사용자의 드라이브에서 이 앱이 만든 자산관리 시트를 찾거나, 없으면 새로 생성.
+    반환값: (spreadsheet_id, created 여부)"""
+    drive_service = build("drive", "v3", credentials=credentials)
+    query = (
+        f"appProperties has {{ key='{APP_TAG_KEY}' and value='{APP_TAG_VALUE}' }} "
+        "and trashed = false"
+    )
+    results = drive_service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
+    files = results.get("files", [])
+    if files:
+        return files[0]["id"], False
+
+    file_metadata = {
+        "name": f"{display_name}_통합자산관리",
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+        "appProperties": {APP_TAG_KEY: APP_TAG_VALUE},
+    }
+    new_file = drive_service.files().create(body=file_metadata, fields="id").execute()
+    new_id = new_file["id"]
+    _initialize_sheet_structure(credentials, new_id)
+    return new_id, True
+
 @st.cache_resource(ttl=60)
 def get_spreadsheet(spreadsheet_id: str):
-    """사용자별 자산 데이터 시트를 연다.
-    spreadsheet_id를 인자로 받아 캐시 키에 포함시킴으로써,
-    사용자마다 다른 시트가 캐시에서 섞이지 않도록 함."""
-    client = get_gspread_client()
+    """사용자 개인 자산 시트를 연다.
+    v2.0부터는 서비스 계정이 아니라 로그인한 사용자 본인의 OAuth 자격증명으로 접근한다
+    (drive.file 스코프 특성상 서비스 계정에는 애초에 접근 권한이 없음)."""
+    client = get_user_gspread_client()
     if client is None:
         return None
     try:
@@ -211,13 +337,15 @@ def load_sheet_optional(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ============================================================
-# 계정 인증 (로그인)
+# 화이트리스트 (사용자계정 시트 — 서비스 계정으로 접근)
+# 컬럼: 이메일 / 이름 / spreadsheet_id / 상태 / 등록일
 # ============================================================
 @st.cache_resource(ttl=60)
 def get_accounts_spreadsheet():
     """모든 사용자 계정 정보가 담긴 '관리자용 계정 시트'를 연다.
     이 시트의 ID는 secrets의 [accounts] spreadsheet_id 값으로 고정되어 있으며,
-    사용자 개인 자산 시트와는 별개의 시트임."""
+    사용자 개인 자산 시트와는 별개의 시트임. 여기는 계속 서비스 계정으로 접근한다
+    (지인 본인이 이 화이트리스트 시트에 접근할 필요는 없으므로)."""
     client = get_gspread_client()
     if client is None:
         return None
@@ -244,154 +372,51 @@ def load_accounts_df() -> pd.DataFrame:
         logging.warning("계정 목록 로드 실패: %s", e)
         return pd.DataFrame()
 
-def authenticate(user_id: str, password: str):
-    """아이디/비밀번호를 '사용자계정' 시트와 대조.
-    성공 시 {'이름':..., 'spreadsheet_id':...} 딕셔너리 반환, 실패 시 None."""
+def get_whitelist_status(email: str):
+    """화이트리스트 시트에서 이메일로 계정 정보를 조회. 없으면 None, 있으면 해당 행(Series) 반환."""
     df = load_accounts_df()
-    if df.empty:
+    if df.empty or "이메일" not in df.columns or not email:
         return None
-    row = df[(df["아이디"] == user_id) & (df["상태"] == "활성")]
+    row = df[df["이메일"].astype(str).str.strip().str.lower() == email.strip().lower()]
     if row.empty:
         return None
-    row = row.iloc[0]
-    stored_hash = str(row["비밀번호_해시"]).encode("utf-8")
-    try:
-        if bcrypt.checkpw(password.encode("utf-8"), stored_hash):
-            return {"이름": row["이름"], "spreadsheet_id": row["spreadsheet_id"]}
-    except Exception as e:
-        logging.warning("비밀번호 검증 실패: %s", e)
-    return None
+    return row.iloc[0]
 
-def get_active_account(user_id: str):
-    """아이디로 '활성' 상태 계정 정보 조회 (비밀번호 검증 없이). 자동 재로그인 토큰 검증용."""
-    df = load_accounts_df()
-    if df.empty:
-        return None
-    row = df[(df["아이디"] == user_id) & (df["상태"] == "활성")]
-    if row.empty:
-        return None
-    row = row.iloc[0]
-    return {"이름": row["이름"], "spreadsheet_id": row["spreadsheet_id"]}
-
-# ============================================================
-# 세션 유지 토큰 (탭 클릭 등으로 연결이 끊겼다 재연결돼도 로그인 유지)
-# ============================================================
-def _session_secret() -> bytes:
-    """Secrets에 [auth] secret_key가 없으면 세션 유지 기능은 조용히 비활성화됨(로그인 자체는 정상 동작)."""
-    key = st.secrets.get("auth", {}).get("secret_key", "")
-    return key.encode("utf-8") if key else b""
-
-def make_session_token(user_id: str, ttl_hours: int = 24) -> str | None:
-    secret = _session_secret()
-    if not secret:
-        return None
-    expires = int(time.time()) + ttl_hours * 3600
-    payload = f"{user_id}:{expires}"
-    sig = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()[:20]
-    raw = f"{payload}:{sig}"
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8")
-
-def verify_session_token(token: str) -> str | None:
-    """토큰이 유효하면 user_id를, 아니면 None을 반환."""
-    secret = _session_secret()
-    if not secret or not token:
-        return None
-    try:
-        raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
-        user_id, expires_str, sig = raw.rsplit(":", 2)
-        expected_sig = hmac.new(secret, f"{user_id}:{expires_str}".encode("utf-8"), hashlib.sha256).hexdigest()[:20]
-        if not hmac.compare_digest(sig, expected_sig):
-            return None
-        if int(expires_str) < int(time.time()):
-            return None
-        return user_id
-    except Exception as e:
-        logging.warning("세션 토큰 검증 실패: %s", e)
-        return None
-
-def add_account(user_id: str, password: str, name: str, spreadsheet_id: str, email: str = "") -> bool:
-    """관리자가 신규 계정을 '사용자계정' 시트에 추가. bcrypt로 비밀번호를 해싱해서 저장.
-    컬럼 순서: 아이디 / 비밀번호_해시 / 이름 / 이메일 / spreadsheet_id / 등록일 / 상태"""
+def register_pending_request(email: str, name: str) -> bool:
+    """화이트리스트에 없는 이메일이 처음 로그인 시도하면 '승인대기' 상태로 자동 등록.
+    관리자가 '가입 승인' 탭에서 승인해야 실제로 앱을 사용할 수 있다."""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
             return False
         ws = spreadsheet.worksheet("사용자계정")
-        hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        ws.append_row([user_id, hashed, name, email, spreadsheet_id, str(date.today()), "활성"])
+        ws.append_row([email, name, "", "승인대기", str(date.today())])
         load_accounts_df.clear()
         return True
     except Exception as e:
-        logging.warning("계정 추가 실패: %s", e)
+        logging.warning("승인 대기 등록 실패: %s", e)
         return False
 
-
-def add_signup_request(user_id: str, password: str, name: str, email: str) -> tuple[bool, str]:
-    """지인이 회원가입을 신청하면 '사용자계정' 시트에 상태='승인대기'로 추가.
-    승인 전에는 authenticate()가 '활성' 상태만 통과시키므로 자동으로 로그인이 차단된다."""
+def approve_email(sheet_row_number: int) -> bool:
+    """대기 중인 이메일을 승인 (상태만 '활성'으로 변경).
+    v1.0과 달리 여기서 시트를 만들어 공유하는 과정이 없다 — 승인된 사용자가 다음에 로그인하면
+    find_or_create_user_spreadsheet()가 본인 소유 드라이브에 시트를 자동으로 만들기 때문."""
     try:
-        df = load_accounts_df()
-        if not df.empty and user_id in df["아이디"].values:
-            return False, "이미 사용 중인 아이디입니다."
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
-            return False, "계정 시트 연결에 실패했습니다."
-        ws = spreadsheet.worksheet("사용자계정")
-        hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        # spreadsheet_id는 승인 시 템플릿을 복사해 자동으로 채워지므로 신청 단계에서는 빈 값
-        ws.append_row([user_id, hashed, name, email, "", str(date.today()), "승인대기"])
-        load_accounts_df.clear()
-        return True, "가입 신청이 접수되었습니다. 관리자 승인이 완료되면 입력하신 이메일로 자산관리 시트 공유 안내가 발송됩니다."
-    except Exception as e:
-        logging.warning("가입 신청 실패: %s", e)
-        return False, f"가입 신청 중 오류가 발생했습니다: {e}"
-
-
-def approve_signup(sheet_row_number: int, user_email: str, user_name: str) -> tuple[bool, str]:
-    """대기 중인 가입 신청을 승인.
-    [주의] 서비스 계정으로 새 구글시트를 '복사 생성'하면 서비스 계정 자체의 드라이브 저장공간이 0이라
-    'storage quota exceeded' 오류가 남. 그래서 파일을 새로 만들지 않고, Jone이 미리 본인 드라이브에
-    만들어 서비스 계정에 편집자로 공유해둔 '템플릿 풀' 중 아직 아무에게도 배정 안 된 것을 하나 골라
-    1) 제목만 신청자 이름으로 바꾸고, 2) 신청자 이메일에 편집자로 공유(구글이 초대 메일 자동 발송)한다."""
-    try:
-        client = get_gspread_client()
-        if client is None:
-            return False, "구글 인증에 실패했습니다."
-
-        pool = list(st.secrets.get("template", {}).get("pool", []))
-        if not pool:
-            return False, "secrets에 [template] pool(템플릿 spreadsheet_id 목록)이 설정되어 있지 않습니다."
-
-        df = load_accounts_df()
-        assigned_ids = set(df["spreadsheet_id"].astype(str).str.strip()) if not df.empty else set()
-        available = [sid for sid in pool if sid not in assigned_ids]
-        if not available:
-            return False, "배정 가능한 여분 템플릿이 없습니다. 템플릿을 몇 개 더 만들어 secrets에 추가해주세요."
-
-        new_id = available[0]
-        sheet = client.open_by_key(new_id)
-        sheet.update_title(f"{user_name}_자산관리")
-        sheet.share(
-            user_email, perm_type="user", role="writer", notify=True,
-            email_message="자산관리 앱 계정이 승인되었습니다. 아래 링크의 구글시트에 본인 거래 데이터를 입력해주세요.",
-        )
-
-        spreadsheet = get_accounts_spreadsheet()
+            return False
         ws = spreadsheet.worksheet("사용자계정")
         header = ws.row_values(1)
-        sheet_id_col = header.index("spreadsheet_id") + 1
         status_col = header.index("상태") + 1
-        ws.update_cell(sheet_row_number, sheet_id_col, new_id)
         ws.update_cell(sheet_row_number, status_col, "활성")
         load_accounts_df.clear()
-        return True, f"승인 완료: 준비된 템플릿을 배정하고 {user_email}로 편집 권한 공유 메일이 발송되었습니다. (남은 여분 템플릿 {len(available) - 1}개)"
+        return True
     except Exception as e:
-        logging.warning("가입 승인 실패: %s", e)
-        return False, f"승인 처리 중 오류가 발생했습니다: {type(e).__name__} - {e}"
+        logging.warning("이메일 승인 실패: %s", e)
+        return False
 
-
-def reject_signup(sheet_row_number: int) -> bool:
-    """대기 중인 가입 신청을 '거부' 상태로 변경 (바로 삭제하지 않아 이력이 남음)."""
+def reject_email(sheet_row_number: int) -> bool:
+    """대기 중인 신청을 '거부' 상태로 변경 (바로 삭제하지 않아 이력이 남음)."""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
@@ -406,17 +431,55 @@ def reject_signup(sheet_row_number: int) -> bool:
         logging.warning("가입 거부 처리 실패: %s", e)
         return False
 
-def update_account_status(user_id: str, new_status: str) -> bool:
-    """'사용자계정' 시트에서 특정 아이디의 상태(활성/비활성)를 변경."""
+def add_account_email(email: str, name: str, spreadsheet_id: str = "") -> bool:
+    """관리자가 화이트리스트에 이메일을 직접 추가 (사전 승인 · 긴급 등록용).
+    spreadsheet_id는 비워두면 해당 사용자가 첫 로그인할 때 자동으로 채워진다.
+    (기존 아이디/비밀번호 시절 계정을 이메일 기반으로 재등록할 때는 여기에
+    기존 spreadsheet_id를 직접 입력해 그 사용자의 기존 시트를 그대로 이어서 쓰게 할 수 있다.)"""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        ws.append_row([email, name, spreadsheet_id, "활성", str(date.today())])
+        load_accounts_df.clear()
+        return True
+    except Exception as e:
+        logging.warning("계정 추가 실패: %s", e)
+        return False
+
+def save_user_spreadsheet_id(email: str, spreadsheet_id: str) -> bool:
+    """사용자가 처음 로그인해 개인 시트가 새로 만들어지면, 화이트리스트 시트의 spreadsheet_id 칸을 채운다.
+    관리자가 '사용자 현황' 탭에서 누가 어떤 시트를 쓰는지 확인할 수 있도록 함."""
+    try:
+        df = load_accounts_df()
+        if df.empty or email not in df["이메일"].values:
+            return False
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        row_idx = df.index[df["이메일"] == email][0] + 2  # 헤더 행 고려
+        header = ws.row_values(1)
+        sid_col = header.index("spreadsheet_id") + 1
+        ws.update_cell(row_idx, sid_col, spreadsheet_id)
+        load_accounts_df.clear()
+        return True
+    except Exception as e:
+        logging.warning("spreadsheet_id 저장 실패: %s", e)
+        return False
+
+def update_account_status(email: str, new_status: str) -> bool:
+    """'사용자계정' 시트에서 특정 이메일의 상태(활성/비활성)를 변경."""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
             return False
         ws = spreadsheet.worksheet("사용자계정")
         df = pd.DataFrame(ws.get_all_records())
-        if df.empty or user_id not in df["아이디"].values:
+        if df.empty or email not in df["이메일"].values:
             return False
-        row_idx = df.index[df["아이디"] == user_id][0] + 2  # 헤더 행 고려
+        row_idx = df.index[df["이메일"] == email][0] + 2
         status_col = df.columns.get_loc("상태") + 1
         ws.update_cell(row_idx, status_col, new_status)
         load_accounts_df.clear()
@@ -425,30 +488,8 @@ def update_account_status(user_id: str, new_status: str) -> bool:
         logging.warning("계정 상태 변경 실패: %s", e)
         return False
 
-def reset_account_password(user_id: str, new_password: str) -> bool:
-    """'사용자계정' 시트에서 특정 아이디의 비밀번호 해시를 재설정."""
-    try:
-        spreadsheet = get_accounts_spreadsheet()
-        if spreadsheet is None:
-            return False
-        ws = spreadsheet.worksheet("사용자계정")
-        df = pd.DataFrame(ws.get_all_records())
-        if df.empty or user_id not in df["아이디"].values:
-            return False
-        row_idx = df.index[df["아이디"] == user_id][0] + 2
-        pw_col = df.columns.get_loc("비밀번호_해시") + 1
-        new_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        ws.update_cell(row_idx, pw_col, new_hash)
-        load_accounts_df.clear()
-        return True
-    except Exception as e:
-        logging.warning("비밀번호 초기화 실패: %s", e)
-        return False
-
 def delete_account_by_row(sheet_row_number: int) -> bool:
-    """'사용자계정' 시트에서 특정 행(구글시트 실제 행 번호, 헤더=1행)을 통째로 삭제.
-    아이디가 아닌 '행 번호'로 지정하는 이유: 등록 실수 등으로 동일 아이디가
-    중복 등록된 경우에도 원하는 한 행만 정확히 삭제하기 위함."""
+    """'사용자계정' 시트에서 특정 행(구글시트 실제 행 번호, 헤더=1행)을 통째로 삭제."""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
@@ -461,10 +502,9 @@ def delete_account_by_row(sheet_row_number: int) -> bool:
         logging.warning("계정 삭제 실패: %s", e)
         return False
 
-def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str, email: str = None) -> bool:
-    """'사용자계정' 시트에서 특정 행의 이름/spreadsheet_id(/이메일)를 그대로 덮어씀.
-    spreadsheet_id나 이메일을 잘못 등록한 경우, 계정을 삭제·재생성하지 않고 바로 고칠 수 있도록 함.
-    email이 None이면 이메일 컬럼은 건드리지 않는다(하위 호환)."""
+def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str) -> bool:
+    """'사용자계정' 시트에서 특정 행의 이름/spreadsheet_id를 그대로 덮어씀.
+    spreadsheet_id를 잘못 등록한 경우, 계정을 삭제·재생성하지 않고 바로 고칠 수 있도록 함."""
     try:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
@@ -475,94 +515,154 @@ def update_account_fields(sheet_row_number: int, name: str, spreadsheet_id: str,
         sheet_id_col = header.index("spreadsheet_id") + 1
         ws.update_cell(sheet_row_number, name_col, name)
         ws.update_cell(sheet_row_number, sheet_id_col, spreadsheet_id.strip())
-        if email is not None and "이메일" in header:
-            email_col = header.index("이메일") + 1
-            ws.update_cell(sheet_row_number, email_col, email.strip())
         load_accounts_df.clear()
         return True
     except Exception as e:
         logging.warning("계정 정보 수정 실패: %s", e)
         return False
 
+# ============================================================
+# 세션 유지 토큰 (탭 클릭 등으로 연결이 끊겼다 재연결돼도 로그인 유지)
+# v2.0: user_id 대신 email을 서명해서 담는다.
+# ============================================================
+def _session_secret() -> bytes:
+    """Secrets에 [auth] secret_key가 없으면 세션 유지 기능은 조용히 비활성화됨(로그인 자체는 정상 동작)."""
+    key = st.secrets.get("auth", {}).get("secret_key", "")
+    return key.encode("utf-8") if key else b""
+
+def make_session_token(email: str, ttl_hours: int = 24) -> str | None:
+    secret = _session_secret()
+    if not secret:
+        return None
+    expires = int(time.time()) + ttl_hours * 3600
+    payload = f"{email}:{expires}"
+    sig = hmac.new(secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()[:20]
+    raw = f"{payload}:{sig}"
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8")
+
+def verify_session_token(token: str) -> str | None:
+    """토큰이 유효하면 email을, 아니면 None을 반환."""
+    secret = _session_secret()
+    if not secret or not token:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
+        email, expires_str, sig = raw.rsplit(":", 2)
+        expected_sig = hmac.new(secret, f"{email}:{expires_str}".encode("utf-8"), hashlib.sha256).hexdigest()[:20]
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        if int(expires_str) < int(time.time()):
+            return None
+        return email
+    except Exception as e:
+        logging.warning("세션 토큰 검증 실패: %s", e)
+        return None
+
+# ============================================================
+# 로그인 화면 (Google OAuth)
+# ============================================================
 def show_login():
-    """로그인 화면. 성공 시 session_state에 사용자 정보를 저장하고 재실행."""
+    """Google 계정으로 로그인. 사전에 화이트리스트에 등록·승인된 이메일만 앱을 사용할 수 있다."""
     st.markdown("## 📊 통합자산관리 시스템")
+    st.caption("Google 계정으로 로그인해주세요. 사전에 승인된 이메일만 사용할 수 있습니다.")
 
-    tab_login, tab_signup = st.tabs(["로그인", "📝 회원가입 신청"])
+    query_params = st.query_params
 
-    # ---------- 로그인 ----------
-    with tab_login:
-        with st.form("login_form"):
-            user_id = st.text_input("아이디")
-            password = st.text_input("비밀번호", type="password")
-            submitted = st.form_submit_button("로그인")
-        if submitted:
-            result = authenticate(user_id, password)
-            if result:
-                st.session_state["logged_in"] = True
-                st.session_state["user_name"] = result["이름"]
-                st.session_state["spreadsheet_id"] = result["spreadsheet_id"]
-                st.session_state["user_id"] = user_id
-                # secrets에 [admin] user_id = "본인 로그인 아이디" 를 등록해두면,
-                # 그 아이디로 로그인했을 때만 관리자 메뉴가 보이도록 함
-                st.session_state["is_admin"] = (user_id == st.secrets.get("admin", {}).get("user_id"))
-                # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
-                token = make_session_token(user_id)
-                if token:
-                    st.query_params["t"] = token
+    if "code" in query_params:
+        # code_verifier는 session_state가 아니라, 구글이 그대로 되돌려주는
+        # state 파라미터에 실어 보냈으므로 여기서 그대로 꺼낸다.
+        code_verifier = query_params.get("state")
+        if not code_verifier:
+            st.error("코드 검증값을 찾을 수 없습니다. 처음부터 다시 로그인해주세요.")
+            st.query_params.clear()
+            if st.button("처음으로 돌아가기"):
                 st.rerun()
-            else:
-                # 아이디는 있지만 아직 '활성'이 아닌 경우, 원인을 구체적으로 안내
-                df = load_accounts_df()
-                row = df[df["아이디"] == user_id] if (not df.empty and user_id) else pd.DataFrame()
-                if not row.empty and row.iloc[0].get("상태") == "승인대기":
-                    st.warning("관리자 승인 대기 중인 계정입니다. 승인이 완료되면 이메일로 안내드립니다.")
-                elif not row.empty and row.iloc[0].get("상태") == "거부":
-                    st.error("가입이 거부된 계정입니다. 관리자에게 문의해주세요.")
-                else:
-                    st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+            return
 
-        # 관리자 전용 계정 직접 추가 패널 (긴급/소수 계정용. 평소엔 '회원가입 신청' 탭 사용을 권장)
-        with st.expander("🔐 관리자 (계정 직접 추가)"):
-            admin_pw = st.text_input("관리자 비밀번호", type="password", key="admin_pw")
-            if admin_pw and admin_pw == st.secrets.get("admin", {}).get("password"):
-                st.success("관리자 인증됨")
-                with st.form("add_account_form"):
-                    new_id = st.text_input("신규 아이디")
-                    new_pw = st.text_input("신규 비밀번호", type="password")
-                    new_name = st.text_input("이름")
-                    new_email = st.text_input("이메일 (구글 계정)")
-                    new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
-                    add_submitted = st.form_submit_button("계정 추가")
-                if add_submitted:
-                    if add_account(new_id, new_pw, new_name, new_sheet_id, new_email):
-                        st.success(f"'{new_id}' 계정이 추가되었습니다.")
-                    else:
-                        st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
+        try:
+            flow = get_oauth_flow()
+            flow.fetch_token(code=query_params["code"], code_verifier=code_verifier)
+            credentials = flow.credentials
+            email = get_user_email(credentials)
+            st.query_params.clear()
+        except Exception as e:
+            st.error(f"로그인 처리 중 오류가 발생했습니다: {e}")
+            st.query_params.clear()
+            return
 
-    # ---------- 회원가입 신청 (지인 누구나 접근 가능) ----------
-    with tab_signup:
-        st.caption(
-            "아이디/비밀번호/이름/이메일을 입력해 신청하면, 관리자 승인 후 "
-            "자산관리용 구글시트가 자동으로 만들어지고 입력하신 이메일로 편집 권한 공유 메일이 발송됩니다."
+        if not email:
+            st.error("Google 계정 정보를 가져오지 못했습니다. 다시 시도해주세요.")
+            return
+
+        status_row = get_whitelist_status(email)
+
+        if status_row is None:
+            # 처음 시도하는 이메일 → 승인대기로 자동 등록
+            register_pending_request(email, email.split("@")[0])
+            st.warning(
+                "처음 로그인하시는 계정이라 승인 대기 등록을 완료했습니다. "
+                "관리자(Jone)의 승인이 완료되면 다시 이 페이지에서 로그인해주세요."
+            )
+            return
+
+        상태 = str(status_row.get("상태", "")).strip()
+        if 상태 == "승인대기":
+            st.warning("관리자 승인 대기 중인 계정입니다. 승인이 완료되면 다시 로그인해주세요.")
+            return
+        if 상태 == "거부":
+            st.error("가입이 거부된 계정입니다. 관리자에게 문의해주세요.")
+            return
+        if 상태 != "활성":
+            st.error("계정 상태를 확인할 수 없습니다. 관리자에게 문의해주세요.")
+            return
+
+        # 승인된 사용자 → 개인 시트 찾기/생성
+        display_name = str(status_row.get("이름", "")).strip() or email.split("@")[0]
+        with st.spinner("개인 자산관리 시트를 확인하는 중..."):
+            try:
+                sheet_id, created = find_or_create_user_spreadsheet(credentials, display_name)
+            except Exception as e:
+                st.error(f"개인 시트를 확인/생성하는 중 오류가 발생했습니다: {e}")
+                return
+            existing_sid = str(status_row.get("spreadsheet_id", "")).strip()
+            if created or not existing_sid:
+                save_user_spreadsheet_id(email, sheet_id)
+
+        st.session_state["logged_in"] = True
+        st.session_state["user_name"] = display_name
+        st.session_state["user_email"] = email
+        st.session_state["spreadsheet_id"] = sheet_id
+        st.session_state["oauth_credentials"] = credentials
+        st.session_state["is_admin"] = (
+            email.strip().lower() == str(st.secrets.get("admin", {}).get("email", "")).strip().lower()
         )
-        with st.form("signup_form"):
-            su_id = st.text_input("사용할 아이디")
-            su_pw = st.text_input("사용할 비밀번호", type="password")
-            su_pw2 = st.text_input("비밀번호 확인", type="password")
-            su_name = st.text_input("이름")
-            su_email = st.text_input("이메일 (구글 계정 · 시트 공유용이므로 정확히 입력)")
-            su_submitted = st.form_submit_button("가입 신청", type="primary")
-        if su_submitted:
-            if not (su_id and su_pw and su_name and su_email):
-                st.warning("모든 항목을 입력해주세요.")
-            elif su_pw != su_pw2:
-                st.warning("비밀번호가 서로 일치하지 않습니다.")
-            elif "@" not in su_email:
-                st.warning("이메일 형식을 확인해주세요.")
-            else:
-                ok, msg = add_signup_request(su_id, su_pw, su_name, su_email)
-                (st.success if ok else st.error)(msg)
+        _save_credentials(email, credentials)
+
+        # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
+        token = make_session_token(email)
+        if token:
+            st.query_params["t"] = token
+
+        if created:
+            st.success("🆕 개인 자산관리 시트를 새로 만들었습니다.")
+        st.rerun()
+
+    else:
+        code_verifier, code_challenge = _generate_pkce_pair()
+        flow = get_oauth_flow()
+        auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true",
+            prompt="consent",
+            code_challenge=code_challenge,
+            code_challenge_method="S256",
+            state=code_verifier,
+        )
+        st.link_button("🔐 Google 계정으로 로그인", auth_url, type="primary")
+        st.caption(
+            "처음 로그인하는 경우 자동으로 '승인 대기' 등록되며, 관리자 승인이 완료된 뒤 "
+            "다시 로그인하면 이용할 수 있습니다."
+        )
 
 # ============================================================
 # 실시간 시세 조회
@@ -775,7 +875,7 @@ def _replay_trade_ledger(trade_df: pd.DataFrame):
         qty = int(_safe_num(row.get("거래수량", 0)))
         price = _safe_num(row.get("거래단가", 0))
         구분 = str(row.get("거래구분", "")).strip()
-        date = row["_거래일자_dt"]
+        date_ = row["_거래일자_dt"]
         key = (account, code)  # 계좌+종목코드 단위로 평균단가 분리 관리 (동일 종목이 여러 계좌에 있을 수 있음)
         names[key] = name
 
@@ -792,7 +892,7 @@ def _replay_trade_ledger(trade_df: pd.DataFrame):
             # 보유수량을 초과하는 매도는 실현손익 계산에서 초과분을 제외 (데이터 입력 오류로 인한 손익 부풀림 방지)
             effective_qty = min(qty, prev_qty) if prev_qty > 0 else 0
             sell_events.append({
-                "거래일자": date, "계좌": account, "종목코드": code, "종목명": name,
+                "거래일자": date_, "계좌": account, "종목코드": code, "종목명": name,
                 "매도수량": qty, "매도단가": price, "평균매입단가": prev_avg,
                 "effective_qty": effective_qty,
             })
@@ -1425,22 +1525,23 @@ def render_admin_panel():
 
                 # ---------- 계정 관리 ----------
                 with tab_a:
-                    st.caption("새 계정 추가")
+                    st.caption("이메일 직접 추가 (사전 승인 · 긴급 등록용)")
                     with st.form("admin_add_account_form"):
-                        new_id = st.text_input("신규 아이디")
-                        new_pw = st.text_input("신규 비밀번호", type="password")
+                        new_email = st.text_input("이메일 (구글 계정)")
                         new_name = st.text_input("이름")
-                        new_sheet_id = st.text_input("이 사용자의 구글시트 ID")
+                        new_sheet_id = st.text_input(
+                            "연결할 구글시트 spreadsheet_id (선택 — 비워두면 첫 로그인 시 자동 생성)"
+                        )
                         add_submitted = st.form_submit_button("계정 추가", type="primary", width="stretch")
                     if add_submitted:
-                        if new_id and new_pw and new_name and new_sheet_id:
-                            if add_account(new_id, new_pw, new_name, new_sheet_id):
-                                st.success(f"'{new_id}' 계정이 추가되었습니다.")
+                        if new_email and new_name:
+                            if add_account_email(new_email, new_name, new_sheet_id):
+                                st.success(f"'{new_email}' 계정이 추가되었습니다.")
                                 st.rerun()
                             else:
                                 st.error("계정 추가에 실패했습니다. 로그를 확인하세요.")
                         else:
-                            st.warning("모든 항목을 입력해주세요.")
+                            st.warning("이메일과 이름을 입력해주세요.")
 
                     st.markdown("---")
 
@@ -1452,44 +1553,30 @@ def render_admin_panel():
                         acc_options = {}
                         for i, row in df_acc.iterrows():
                             sheet_row = i + 2  # 헤더가 1행이므로 +2
-                            label = f"{row.get('아이디','')} / {row.get('이름','')}"
+                            label = f"{row.get('이메일','')} / {row.get('이름','')}"
                             acc_options[label] = (sheet_row, row)
                         selected_label = st.selectbox(
                             "대상 계정", list(acc_options.keys()), key="admin_selected_account",
                         )
                         target_row_num, target_row_data = acc_options[selected_label]
-                        target_id = str(target_row_data.get("아이디", ""))
+                        target_email = str(target_row_data.get("이메일", ""))
                         # key에 행번호를 포함시켜, 계정을 바꿔 선택하면 입력창도 그 계정의 값으로 새로 그려지도록 함
                         # (key가 그대로면 Streamlit이 이전 입력값을 계속 기억해 다른 계정으로 착각하게 됨)
 
                         st.markdown("---")
-                        st.caption(f"'{target_id}' 계정 상태 변경 / 비밀번호 초기화")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            new_status = st.selectbox(
-                                "상태 변경", ["활성", "비활성"], key=f"admin_new_status_{target_row_num}",
-                            )
-                            if st.button("상태 적용", key=f"admin_status_btn_{target_row_num}", width="stretch"):
-                                if update_account_status(target_id, new_status):
-                                    st.success(f"'{target_id}' 계정 상태가 '{new_status}'로 변경되었습니다.")
-                                    st.rerun()
-                                else:
-                                    st.error("상태 변경에 실패했습니다.")
-                        with col2:
-                            reset_pw = st.text_input(
-                                "새 비밀번호", type="password", key=f"admin_reset_pw_{target_row_num}",
-                            )
-                            if st.button("비밀번호 초기화", key=f"admin_reset_btn_{target_row_num}", width="stretch"):
-                                if reset_pw:
-                                    if reset_account_password(target_id, reset_pw):
-                                        st.success(f"'{target_id}' 비밀번호가 초기화되었습니다.")
-                                    else:
-                                        st.error("비밀번호 초기화에 실패했습니다.")
-                                else:
-                                    st.warning("새 비밀번호를 입력해주세요.")
+                        st.caption(f"'{target_email}' 계정 상태 변경")
+                        new_status = st.selectbox(
+                            "상태 변경", ["활성", "비활성"], key=f"admin_new_status_{target_row_num}",
+                        )
+                        if st.button("상태 적용", key=f"admin_status_btn_{target_row_num}", width="stretch"):
+                            if update_account_status(target_email, new_status):
+                                st.success(f"'{target_email}' 계정 상태가 '{new_status}'로 변경되었습니다.")
+                                st.rerun()
+                            else:
+                                st.error("상태 변경에 실패했습니다.")
 
                         st.markdown("---")
-                        st.caption("✏️ 계정 정보 수정 (이름 · 연결된 구글시트 ID · 이메일)")
+                        st.caption("✏️ 계정 정보 수정 (이름 · 연결된 구글시트 ID)")
                         edit_name = st.text_input(
                             "이름", value=str(target_row_data.get("이름", "")),
                             key=f"admin_edit_name_{target_row_num}",
@@ -1499,31 +1586,26 @@ def render_admin_panel():
                             value=str(target_row_data.get("spreadsheet_id", "")),
                             key=f"admin_edit_sheet_id_{target_row_num}",
                         )
-                        edit_email = st.text_input(
-                            "이메일 (구글 계정 · 시트 공유용)",
-                            value=str(target_row_data.get("이메일", "")),
-                            key=f"admin_edit_email_{target_row_num}",
-                        )
                         if st.button("💾 정보 저장", key="admin_edit_save_btn", width="stretch"):
-                            if update_account_fields(target_row_num, edit_name, edit_sheet_id, edit_email):
-                                st.success(f"'{target_id}' 계정 정보가 수정되었습니다.")
+                            if update_account_fields(target_row_num, edit_name, edit_sheet_id):
+                                st.success(f"'{target_email}' 계정 정보가 수정되었습니다.")
                                 st.rerun()
                             else:
                                 st.error("정보 수정에 실패했습니다.")
 
                         st.markdown("---")
                         st.caption("🗑 계정 삭제 (되돌릴 수 없음)")
-                        st.warning(f"'{target_id}' 계정을 삭제합니다. 이 작업은 되돌릴 수 없습니다.")
-                        if st.button(f"🗑 '{target_id}' 계정 삭제", key=f"admin_delete_btn_{target_row_num}", width="stretch"):
+                        st.warning(f"'{target_email}' 계정을 삭제합니다. 이 작업은 되돌릴 수 없습니다.")
+                        if st.button(f"🗑 '{target_email}' 계정 삭제", key=f"admin_delete_btn_{target_row_num}", width="stretch"):
                             if delete_account_by_row(target_row_num):
-                                st.success(f"'{target_id}' 계정이 삭제되었습니다.")
+                                st.success(f"'{target_email}' 계정이 삭제되었습니다.")
                                 st.rerun()
                             else:
                                 st.error("삭제에 실패했습니다.")
 
                 # ---------- 가입 승인 ----------
                 with tab_pending:
-                    st.caption("지인이 '회원가입 신청' 탭으로 접수한 요청을 확인하고 승인/거부합니다.")
+                    st.caption("지인이 Google 로그인을 처음 시도하면 자동으로 여기에 접수됩니다. 확인 후 승인/거부하세요.")
                     pending_df = (
                         df_acc[df_acc["상태"] == "승인대기"]
                         if not df_acc.empty else pd.DataFrame()
@@ -1535,22 +1617,20 @@ def render_admin_panel():
                         for i, prow in pending_df.iterrows():
                             sheet_row = i + 2  # 헤더가 1행이므로 +2
                             with st.container(border=True):
-                                st.markdown(f"**{prow.get('이름','')}**  (아이디: {prow.get('아이디','')})")
+                                st.markdown(f"**{prow.get('이름','')}**")
                                 st.caption(f"이메일: {prow.get('이메일','')} · 신청일: {prow.get('등록일','')}")
                                 c1, c2 = st.columns(2)
                                 with c1:
-                                    if st.button("✅ 승인 (템플릿 자동 공유)", key=f"approve_{sheet_row}",
+                                    if st.button("✅ 승인", key=f"approve_{sheet_row}",
                                                  width="stretch", type="primary"):
-                                        with st.spinner("템플릿 시트 복사 및 공유 처리 중..."):
-                                            ok, msg = approve_signup(
-                                                sheet_row, prow.get("이메일", ""), prow.get("이름", "")
-                                            )
-                                        (st.success if ok else st.error)(msg)
-                                        if ok:
+                                        if approve_email(sheet_row):
+                                            st.success("승인 완료: 다음에 이 이메일로 로그인하면 개인 시트가 자동으로 만들어집니다.")
                                             st.rerun()
+                                        else:
+                                            st.error("승인 처리에 실패했습니다.")
                                 with c2:
                                     if st.button("❌ 거부", key=f"reject_{sheet_row}", width="stretch"):
-                                        if reject_signup(sheet_row):
+                                        if reject_email(sheet_row):
                                             st.warning("거부 처리되었습니다.")
                                             st.rerun()
                                         else:
@@ -1559,7 +1639,7 @@ def render_admin_panel():
                 # ---------- 사용자 현황 ----------
                 with tab_b:
                     if not df_acc.empty:
-                        display_cols = [c for c in ["아이디", "이름", "이메일", "상태", "등록일"] if c in df_acc.columns]
+                        display_cols = [c for c in ["이메일", "이름", "상태", "등록일"] if c in df_acc.columns]
                         st.dataframe(df_acc[display_cols], width="stretch", hide_index=True)
                         st.caption(f"총 {len(df_acc)}개 계정 · 활성 {sum(df_acc['상태'] == '활성')}개 · "
                                    f"승인대기 {sum(df_acc['상태'] == '승인대기')}개")
@@ -1598,7 +1678,7 @@ def main(spreadsheet_id: str):
         st.markdown(f"<div style='text-align:right;color:gray;font-size:0.8rem;padding-top:1rem'>{now_kst()} 기준</div>",
                     unsafe_allow_html=True)
         if st.button("로그아웃", key="logout_btn"):
-            for k in ("logged_in", "user_name", "spreadsheet_id", "user_id", "is_admin"):
+            for k in ("logged_in", "user_name", "user_email", "spreadsheet_id", "oauth_credentials", "is_admin"):
                 st.session_state.pop(k, None)
             st.query_params.clear()
             st.rerun()
@@ -2792,7 +2872,7 @@ def render_data_mgmt(nonstock_df, cash_df):
             cost = _safe_float(row.get("원금", 0))
             eva  = _safe_float(row.get("평가금액", 0))
             pnl  = eva - cost
-            date = str(row.get("반영일자", "")).strip()
+            date_ = str(row.get("반영일자", "")).strip()
             note = str(row.get("비고", "")).strip()
 
             badge_bg, badge_color = get_account_color(acct, _acct_order_ns)
@@ -2819,7 +2899,7 @@ def render_data_mgmt(nonstock_df, cash_df):
                 f"<td style='{p_r}'>{cost_str}</td>"
                 f"<td style='{p_r};font-weight:600;'>{eva_str}</td>"
                 f"{pnl_td}"
-                f"<td style='{p_r};color:var(--text-dim);font-size:0.88rem;'>{date}</td>"
+                f"<td style='{p_r};color:var(--text-dim);font-size:0.88rem;'>{date_}</td>"
                 f"<td style='{p};color:var(--text-dim);font-size:0.88rem;'>{note}</td>"
                 "</tr>"
             )
@@ -2885,18 +2965,30 @@ def render_data_mgmt(nonstock_df, cash_df):
 if __name__ == "__main__" or True:
     # 세션 연결이 끊겼다 재연결된 경우, 주소창의 서명된 토큰으로 자동 재로그인 시도
     # (탭 클릭 등으로 웹소켓이 재연결되면서 session_state가 초기화되는 경우에 대한 방어 코드)
+    # v2.0: 토큰에는 email이 담겨 있고, 실제 API 접근에 필요한 OAuth Credentials는
+    # _oauth_credential_store()(서버 프로세스 전역 캐시)에서 복구를 시도한다.
+    # 서버가 재시작되어 캐시가 비어있다면 복구에 실패하며, 이 경우 로그인 화면에서
+    # 'Google 계정으로 로그인' 버튼을 한 번 더 눌러야 한다.
     if not st.session_state.get("logged_in"):
         token = st.query_params.get("t")
         if token:
-            restored_user_id = verify_session_token(token)
-            if restored_user_id:
-                account = get_active_account(restored_user_id)
-                if account:
+            restored_email = verify_session_token(token)
+            if restored_email:
+                cached_credentials = _restore_credentials(restored_email)
+                status_row = get_whitelist_status(restored_email)
+                if (
+                    cached_credentials is not None
+                    and status_row is not None
+                    and str(status_row.get("상태", "")).strip() == "활성"
+                ):
                     st.session_state["logged_in"] = True
-                    st.session_state["user_name"] = account["이름"]
-                    st.session_state["spreadsheet_id"] = account["spreadsheet_id"]
-                    st.session_state["user_id"] = restored_user_id
-                    st.session_state["is_admin"] = (restored_user_id == st.secrets.get("admin", {}).get("user_id"))
+                    st.session_state["user_name"] = str(status_row.get("이름", "")).strip() or restored_email.split("@")[0]
+                    st.session_state["user_email"] = restored_email
+                    st.session_state["spreadsheet_id"] = str(status_row.get("spreadsheet_id", "")).strip()
+                    st.session_state["oauth_credentials"] = cached_credentials
+                    st.session_state["is_admin"] = (
+                        restored_email.strip().lower() == str(st.secrets.get("admin", {}).get("email", "")).strip().lower()
+                    )
 
     if not st.session_state.get("logged_in"):
         show_login()
