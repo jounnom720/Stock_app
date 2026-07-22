@@ -1511,6 +1511,63 @@ def load_all_data(spreadsheet_id: str):
     cashlog_df   = load_sheet_optional("현금출납내역", spreadsheet_id)  # 생활비 인출 등 현금 입출금 이력 (아직 없는 사용자도 있어 선택적 로더 사용)
     return trade_df, nonstock_df, cash_df, monthly_df, transfer_df, cashlog_df
 
+def save_monthly_snapshot(spreadsheet_id: str, yearmonth: str, principal, eval_amount) -> tuple[bool, str]:
+    """'월별자산스냅샷' 시트에 이번 달(또는 지정 월) 스냅샷을 저장.
+    같은 년월(yearmonth, 'YYYY-MM' 형식) 행이 이미 있으면 그 값을 덮어쓰고, 없으면 새 줄로 추가한다.
+    거래이력을 기반으로 자동 계산해서 넣는 게 아니라, 호출된 시점의 통합원금/통합평가금액을
+    그대로 한 줄의 '기록'으로 남기는 방식이다 (원래 이 시트의 성격 — 월말 스냅샷 — 을 그대로 유지)."""
+    try:
+        spreadsheet = get_spreadsheet(spreadsheet_id)
+        if spreadsheet is None:
+            return False, "개인 시트를 열지 못했습니다."
+
+        try:
+            ws = spreadsheet.worksheet("월별자산스냅샷")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title="월별자산스냅샷", rows=200, cols=5)
+            ws.update("A1", [["년월", "통합원금", "통합평가"]])
+
+        records = ws.get_all_values()
+        if not records:
+            ws.update("A1", [["년월", "통합원금", "통합평가"]])
+            records = [["년월", "통합원금", "통합평가"]]
+
+        header = records[0]
+        try:
+            ym_col = header.index("년월")
+            cost_col = header.index("통합원금")
+            eval_col = header.index("통합평가")
+        except ValueError:
+            return False, "'월별자산스냅샷' 시트의 헤더(년월/통합원금/통합평가)를 찾을 수 없습니다."
+
+        # 기존에 같은 년월 행이 있는지 찾기 (셀 값이 "2026-07-01 00:00:00"처럼 길게 들어있어도
+        # 앞 7글자만 비교해 같은 달로 인식)
+        target_row = None
+        for i, row in enumerate(records[1:], start=2):  # 실제 시트 행번호 (헤더=1행)
+            cell_val = row[ym_col] if ym_col < len(row) else ""
+            if str(cell_val).strip()[:7] == yearmonth:
+                target_row = i
+                break
+
+        if target_row:
+            ws.update_cell(target_row, cost_col + 1, int(principal))
+            ws.update_cell(target_row, eval_col + 1, int(eval_amount))
+            msg = f"{yearmonth} 스냅샷 값을 갱신했습니다."
+        else:
+            new_row = [""] * len(header)
+            new_row[ym_col] = yearmonth
+            new_row[cost_col] = int(principal)
+            new_row[eval_col] = int(eval_amount)
+            ws.append_row(new_row)
+            msg = f"{yearmonth} 스냅샷을 새로 추가했습니다."
+
+        load_sheet.clear()
+        load_all_data.clear()
+        return True, msg
+    except Exception as e:
+        logging.warning("월별 스냅샷 저장 실패: %s", e)
+        return False, f"저장 중 오류가 발생했습니다: {type(e).__name__} - {e}"
+
 # ============================================================
 # 메인 앱
 # ============================================================
@@ -1716,7 +1773,9 @@ def main(spreadsheet_id: str):
     with col_refresh:
         if st.button("🔄 시세 새로고침", key="refresh_btn"):
             st.cache_data.clear()
-            st.rerun()
+            # 버튼 클릭 자체가 이미 화면을 자동으로 다시 그리므로, 여기서 st.rerun()을
+            # 추가로 호출하지 않는다. 중복 rerun이 현재 선택된 탭(active_main_tab) 상태를
+            # 놓쳐 통합 대시보드로 튕기는 원인이 되었었다.
 
     prices = get_prices(tuple(tickers)) if tickers else {}
     holdings_df = enrich_with_prices(holdings_df, prices)
@@ -2282,6 +2341,30 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             st.plotly_chart(fig_trend, width="stretch")
         except Exception as e:
             st.caption(f"추이 차트 오류: {e}")
+
+    # ── 월별 스냅샷 자동 저장 ──
+    # '월별자산스냅샷' 시트는 거래이력에서 자동 계산되지 않고, 그때그때 스냅샷을 남기는 방식이라
+    # 여기서 버튼 한 번으로 '지금 이 순간'의 통합원금/통합평가금액을 이번 달 기록으로 저장한다.
+    st.markdown('<div class="section-title">이번 달 스냅샷 저장</div>', unsafe_allow_html=True)
+    this_yearmonth = datetime.now(KST).strftime("%Y-%m")
+    already_exists = (
+        not monthly_df.empty
+        and "년월" in monthly_df.columns
+        and monthly_df["년월"].astype(str).str.strip().str.slice(0, 7).eq(this_yearmonth).any()
+    )
+    st.caption(
+        f"{this_yearmonth} 기준 통합원금 {fmt_money_full(total_cost)} · 통합평가금액 {fmt_money_full(total_eval)}"
+        f"{'을(를) 이미 있는 이번 달 기록에 덮어씁니다.' if already_exists else '을(를) 새 줄로 추가합니다.'}"
+    )
+    if st.button("📸 이번 달 스냅샷 저장", key="save_monthly_snapshot_btn"):
+        spreadsheet_id_for_snapshot = st.session_state.get("spreadsheet_id", "")
+        with st.spinner("스냅샷 저장 중..."):
+            ok, msg = save_monthly_snapshot(
+                spreadsheet_id_for_snapshot, this_yearmonth, total_cost, total_eval
+            )
+        (st.success if ok else st.error)(msg)
+        if ok:
+            st.rerun()
 
     # ── 개발자 정보 (통합 대시보드 맨 아래에만 표시) ──
     st.markdown("---")
