@@ -2353,6 +2353,10 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             fig_trend.add_trace(go.Bar(
                 x=mdf["년월_표시"], y=mdf["통합평가"],
                 name="평가금액", marker_color="#e0635e", opacity=0.85,
+                text=[f"{v:,.0f}" for v in mdf["통합평가"]],
+                textposition="outside",
+                textfont=dict(size=12, color="#e0635e"),
+                cliponaxis=False,
             ))
             fig_trend.add_trace(go.Scatter(
                 x=mdf["년월_표시"], y=mdf["통합원금"],
@@ -2360,15 +2364,18 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
                 line=dict(color="#5b9bd8", width=2),
                 marker=dict(size=7),
                 text=[f"{v:,.0f}" for v in mdf["통합원금"]],
-                textposition="top center",
+                textposition="bottom center",
                 textfont=dict(size=11, color="#5b9bd8"),
             ))
+            # 막대 위 라벨이 그래프 위쪽 경계에 잘리지 않도록, 최댓값보다 여유 있게 y축 범위를 확보
+            _max_val = max(mdf["통합평가"].max(), mdf["통합원금"].max())
             fig_trend.update_layout(
-                height=280,
-                margin=dict(t=10, b=30, l=10, r=10),
-                legend=dict(orientation="h", y=1.08),
-                yaxis=dict(tickformat=","),
+                height=300,
+                margin=dict(t=30, b=30, l=10, r=10),
+                legend=dict(orientation="h", y=1.1),
+                yaxis=dict(tickformat=",", range=[0, _max_val * 1.2]),
                 xaxis=dict(type="category", tickangle=0),
+                bargap=0.5,
             )
             st.plotly_chart(fig_trend, width="stretch")
         except Exception as e:
