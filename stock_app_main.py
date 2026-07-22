@@ -1569,6 +1569,17 @@ def save_monthly_snapshot(spreadsheet_id: str, yearmonth: str, principal, eval_a
         except ValueError:
             return False, "'월별자산스냅샷' 시트의 헤더(년월/통합원금/통합평가)를 찾을 수 없습니다."
 
+        # 저장시각/통합손익/통합수익률은 있으면 채우고, 없으면 건드리지 않는다 (하위 호환)
+        time_col = header.index("저장시각") if "저장시각" in header else None
+        pnl_col = header.index("통합손익") if "통합손익" in header else None
+        pct_col = header.index("통합수익률") if "통합수익률" in header else None
+
+        principal_int = int(principal)
+        eval_int = int(eval_amount)
+        pnl_val = eval_int - principal_int
+        pct_val = round(pnl_val / principal_int * 100, 2) if principal_int else 0
+        saved_at = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
         # 기존에 같은 년월 행이 있는지 찾기 (셀 값이 "2026-07-01 00:00:00"처럼 길게 들어있어도
         # 앞 7글자만 비교해 같은 달로 인식)
         target_row = None
@@ -1579,14 +1590,26 @@ def save_monthly_snapshot(spreadsheet_id: str, yearmonth: str, principal, eval_a
                 break
 
         if target_row:
-            ws.update_cell(target_row, cost_col + 1, int(principal))
-            ws.update_cell(target_row, eval_col + 1, int(eval_amount))
+            ws.update_cell(target_row, cost_col + 1, principal_int)
+            ws.update_cell(target_row, eval_col + 1, eval_int)
+            if time_col is not None:
+                ws.update_cell(target_row, time_col + 1, saved_at)
+            if pnl_col is not None:
+                ws.update_cell(target_row, pnl_col + 1, pnl_val)
+            if pct_col is not None:
+                ws.update_cell(target_row, pct_col + 1, pct_val)
             msg = f"{yearmonth} 스냅샷 값을 갱신했습니다."
         else:
             new_row = [""] * len(header)
             new_row[ym_col] = yearmonth
-            new_row[cost_col] = int(principal)
-            new_row[eval_col] = int(eval_amount)
+            new_row[cost_col] = principal_int
+            new_row[eval_col] = eval_int
+            if time_col is not None:
+                new_row[time_col] = saved_at
+            if pnl_col is not None:
+                new_row[pnl_col] = pnl_val
+            if pct_col is not None:
+                new_row[pct_col] = pct_val
             ws.append_row(new_row)
             msg = f"{yearmonth} 스냅샷을 새로 추가했습니다."
 
@@ -2361,11 +2384,11 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             fig_trend.add_trace(go.Scatter(
                 x=mdf["년월_표시"], y=mdf["통합원금"],
                 name="원금", mode="lines+markers+text",
-                line=dict(color="#5b9bd8", width=2),
-                marker=dict(size=7),
+                line=dict(color="#8ecaff", width=2),
+                marker=dict(size=7, color="#8ecaff"),
                 text=[f"{v:,.0f}" for v in mdf["통합원금"]],
-                textposition="bottom center",
-                textfont=dict(size=11, color="#5b9bd8"),
+                textposition="middle right",
+                textfont=dict(size=13, color="#ffffff", family="Arial Black"),
             ))
             # 막대 위 라벨이 그래프 위쪽 경계에 잘리지 않도록, 최댓값보다 여유 있게 y축 범위를 확보
             _max_val = max(mdf["통합평가"].max(), mdf["통합원금"].max())
