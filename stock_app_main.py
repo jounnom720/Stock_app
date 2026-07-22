@@ -283,6 +283,26 @@ def find_or_create_user_spreadsheet(credentials, display_name: str):
     _initialize_sheet_structure(credentials, new_id)
     return new_id, True
 
+def _is_quota_error(e: Exception) -> bool:
+    """구글 시트 API의 분당 요청 한도(429) 초과 오류인지 판별."""
+    msg = str(e)
+    return "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg
+
+def _call_with_retry(func, *args, max_retries: int = 3, base_delay: float = 2.0, **kwargs):
+    """구글 API 호출 중 429(분당 요청 한도 초과) 오류가 나면 잠깐 기다렸다가 자동으로 재시도한다.
+    '전체 캐시 초기화'나 '시세 새로고침'을 짧은 시간 안에 여러 번 누르는 경우를 대비."""
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if _is_quota_error(e) and attempt < max_retries - 1:
+                time.sleep(base_delay * (attempt + 1))
+                continue
+            raise
+    raise last_exc
+
 @st.cache_resource(ttl=60)
 def get_spreadsheet(spreadsheet_id: str):
     """사용자 개인 자산 시트를 연다.
@@ -292,10 +312,13 @@ def get_spreadsheet(spreadsheet_id: str):
     if client is None:
         return None
     try:
-        return client.open_by_key(spreadsheet_id)
+        return _call_with_retry(client.open_by_key, spreadsheet_id)
     except Exception as e:
         logging.warning("스프레드시트 열기 실패: %s", e)
-        st.error(f"⚠️ 구글시트 열기 실패 (spreadsheet_id: {spreadsheet_id[:8]}...): {type(e).__name__} - {e}")
+        if _is_quota_error(e):
+            st.error("⚠️ 구글 API 요청이 잠시 몰렸습니다 (분당 읽기 한도 초과). 1분 정도 기다린 후 다시 시도해주세요.")
+        else:
+            st.error(f"⚠️ 구글시트 열기 실패 (spreadsheet_id: {spreadsheet_id[:8]}...): {type(e).__name__} - {e}")
         return None
 
 @st.cache_data(ttl=30)
@@ -305,8 +328,8 @@ def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
         if spreadsheet is None:
             st.error(f"⚠️ '{sheet_name}' 시트 로드 실패: 스프레드시트 자체를 열지 못했습니다 (spreadsheet_id 또는 공유 권한을 확인하세요).")
             return pd.DataFrame()
-        ws = spreadsheet.worksheet(sheet_name)
-        records = ws.get_all_records()
+        ws = _call_with_retry(spreadsheet.worksheet, sheet_name)
+        records = _call_with_retry(ws.get_all_records)
         df = pd.DataFrame(records)
         # gspread가 숫자 셀을 int로 반환 → 종목코드 앞자리 0 유실 방지
         if "종목코드" in df.columns:
@@ -316,7 +339,13 @@ def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
         return df
     except Exception as e:
         logging.warning("시트 로드 실패 [%s]: %s", sheet_name, e)
-        st.error(f"⚠️ '{sheet_name}' 시트 로드 중 오류: {type(e).__name__} - {e}")
+        if _is_quota_error(e):
+            st.error(
+                f"⚠️ '{sheet_name}' 시트 로드 실패: 구글 API 요청이 잠시 몰렸습니다 (분당 읽기 한도 초과). "
+                f"1분 정도 기다린 후 다시 시도해주세요."
+            )
+        else:
+            st.error(f"⚠️ '{sheet_name}' 시트 로드 중 오류: {type(e).__name__} - {e}")
         return pd.DataFrame()
 
 
@@ -328,8 +357,8 @@ def load_sheet_optional(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
         spreadsheet = get_spreadsheet(spreadsheet_id)
         if spreadsheet is None:
             return pd.DataFrame()
-        ws = spreadsheet.worksheet(sheet_name)
-        return pd.DataFrame(ws.get_all_records())
+        ws = _call_with_retry(spreadsheet.worksheet, sheet_name)
+        return pd.DataFrame(_call_with_retry(ws.get_all_records))
     except gspread.exceptions.WorksheetNotFound:
         return pd.DataFrame()
     except Exception as e:
@@ -351,7 +380,7 @@ def get_accounts_spreadsheet():
         return None
     try:
         sheet_id = st.secrets["accounts"]["spreadsheet_id"]
-        return client.open_by_key(sheet_id)
+        return _call_with_retry(client.open_by_key, sheet_id)
     except Exception as e:
         logging.warning("계정 시트 열기 실패: %s", e)
         return None
@@ -366,8 +395,8 @@ def load_accounts_df() -> pd.DataFrame:
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
             return pd.DataFrame()
-        ws = spreadsheet.worksheet("사용자계정")
-        return pd.DataFrame(ws.get_all_records())
+        ws = _call_with_retry(spreadsheet.worksheet, "사용자계정")
+        return pd.DataFrame(_call_with_retry(ws.get_all_records))
     except Exception as e:
         logging.warning("계정 목록 로드 실패: %s", e)
         return pd.DataFrame()
@@ -2327,9 +2356,12 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             ))
             fig_trend.add_trace(go.Scatter(
                 x=mdf["년월_표시"], y=mdf["통합원금"],
-                name="원금", mode="lines+markers",
+                name="원금", mode="lines+markers+text",
                 line=dict(color="#5b9bd8", width=2),
                 marker=dict(size=7),
+                text=[f"{v:,.0f}" for v in mdf["통합원금"]],
+                textposition="top center",
+                textfont=dict(size=11, color="#5b9bd8"),
             ))
             fig_trend.update_layout(
                 height=280,
