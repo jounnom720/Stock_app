@@ -180,39 +180,102 @@ APP_TAG_VALUE = "jone_asset_manager"
 REQUIRED_SHEET_HEADERS = {
     "거래이력":        ["거래일자", "운용사", "종목코드", "종목명", "거래구분", "거래수량", "거래단가", "비고"],
     "비주식자산":      ["계좌", "자산군", "상품명", "원금", "평가금액", "반영일자", "비고"],
-    "현금성자산":      ["계좌", "예수금", "반영일자"],
+    "현금성자산":      ["기준일", "계좌", "유형", "원금", "평가금액", "메모"],
     "월별자산스냅샷":  ["년월", "통합원금", "통합평가"],
     "계좌간이체":      ["거래일자", "출금계좌", "입금계좌", "금액", "실현손익", "비고"],
     "현금출납내역":    ["날짜", "계좌", "구분", "금액", "사유"],
 }
 
 # 시트 서식 통일 규칙: 시트별 컬럼명 -> 'money'(천단위 콤마+오른쪽정렬) / 'number'(오른쪽정렬)
-# / 'percent'(%+오른쪽정렬) / 'date'(날짜·시각 형식+가운데정렬) / 'text'(가운데정렬만, 숫자서식은 손대지 않음).
+# / 'percent'(%+오른쪽정렬) / 'date'(날짜·시각 형식+가운데정렬) / 'text'(가운데정렬만, 숫자서식은 손대지 않음)
+# / 'text_left'(왼쪽정렬만, 숫자서식은 손대지 않음 — 비고/사유/메모 등 자유서술 칸 전용).
 # 규칙에 없는 컬럼(사용자가 시트에 직접 추가한 열 등)은 'text'로 처리되어 가운데 정렬만 적용된다.
 COLUMN_FORMAT_RULES = {
     "거래이력": {
         "거래일자": "date", "운용사": "text", "종목코드": "text", "종목명": "text",
-        "거래구분": "text", "거래수량": "number", "거래단가": "money", "비고": "text",
+        "거래구분": "text", "거래수량": "number", "거래단가": "money", "비고": "text_left",
     },
     "비주식자산": {
         "계좌": "text", "자산군": "text", "상품명": "text", "원금": "money",
-        "평가금액": "money", "반영일자": "date", "비고": "text",
+        "평가금액": "money", "반영일자": "date", "비고": "text_left",
     },
     "현금성자산": {
-        "계좌": "text", "예수금": "money", "반영일자": "date",
+        "기준일": "date", "계좌": "text", "유형": "text", "원금": "money",
+        "평가금액": "money", "메모": "text_left",
     },
     "월별자산스냅샷": {
         "년월": "yearmonth", "저장시각": "datetime", "통합원금": "money", "통합평가": "money",
-        "통합손익": "money", "통합수익률": "percent", "메모": "text",
+        "통합손익": "money", "통합수익률": "percent", "메모": "text_left",
     },
     "계좌간이체": {
         "거래일자": "date", "출금계좌": "text", "출금자산군": "text", "입금계좌": "text",
-        "입금자산군": "text", "이체금액": "money", "실현손익": "money", "금액": "money", "비고": "text",
+        "입금자산군": "text", "이체금액": "money", "실현손익": "money", "금액": "money", "비고": "text_left",
     },
     "현금출납내역": {
-        "날짜": "date", "계좌": "text", "구분": "text", "금액": "money", "사유": "text",
+        "날짜": "date", "계좌": "text", "구분": "text", "금액": "money", "사유": "text_left",
     },
 }
+
+def _normalize_date_values_in_sheet(sh) -> list:
+    """구글시트의 날짜 계열 컬럼(COLUMN_FORMAT_RULES에서 kind가 date/datetime/yearmonth인 컬럼)에서
+    셀 '값' 자체가 텍스트("2026-03-05")와 실제 날짜(직접 입력한 날짜선택기 등)로 섞여 들어간
+    경우를 통일한다. _apply_column_formatting은 화면에 보이는 표시형식(서식)만 바꾸고 값 자체는
+    건드리지 않으므로, 이미 텍스트로 저장된 셀은 서식을 새로 입혀도 실제 날짜로 바뀌지 않는다.
+    이 함수는 각 셀 값을 pandas로 파싱해 'YYYY-MM-DD' 문자열로 다시 쓰되, USER_ENTERED 입력
+    방식을 사용해 구글시트가 이를 실제 날짜값으로 재인식하도록 만든다.
+    파싱에 실패하는 값(빈 칸, 손상된 값 등)은 원래 값 그대로 두고 건드리지 않는다."""
+    DATE_KINDS = {"date": "%Y-%m-%d", "datetime": "%Y-%m-%d %H:%M:%S", "yearmonth": "%Y-%m"}
+    touched = []
+    for sheet_name, rules in COLUMN_FORMAT_RULES.items():
+        date_cols = [col for col, kind in rules.items() if kind in DATE_KINDS]
+        if not date_cols:
+            continue
+        try:
+            ws = sh.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            continue
+        header = ws.row_values(1)
+        if not header:
+            continue
+        all_values = _call_with_retry(ws.get_all_values)
+        if len(all_values) < 2:
+            continue  # 헤더 외에 데이터가 없음
+
+        sheet_changed = False
+        for col_name in date_cols:
+            if col_name not in header:
+                continue
+            col_idx = header.index(col_name)  # 0-based
+            strftime_fmt = DATE_KINDS[rules[col_name]]
+
+            new_col_values = []
+            col_changed = False
+            for row in all_values[1:]:
+                raw = row[col_idx] if col_idx < len(row) else ""
+                raw_str = str(raw).strip()
+                if raw_str == "":
+                    new_col_values.append([raw])
+                    continue
+                parsed = pd.to_datetime(raw, errors="coerce")
+                if pd.isna(parsed):
+                    new_col_values.append([raw])  # 파싱 불가 값은 손대지 않음
+                    continue
+                normalized_text = parsed.strftime(strftime_fmt)
+                if normalized_text != raw_str:
+                    col_changed = True
+                new_col_values.append([normalized_text])
+
+            if col_changed:
+                col_letter = gspread.utils.rowcol_to_a1(1, col_idx + 1).rstrip("0123456789")
+                cell_range = f"{col_letter}2:{col_letter}{len(all_values)}"
+                _call_with_retry(
+                    ws.update, new_col_values, cell_range, value_input_option="USER_ENTERED"
+                )
+                sheet_changed = True
+
+        if sheet_changed:
+            touched.append(sheet_name)
+    return touched
 
 def _apply_column_formatting(sh) -> list:
     """이미 열려 있는 gspread Spreadsheet 객체(sh)에 금액 천단위 콤마·정렬·글꼴 서식을 일괄 적용.
@@ -292,8 +355,16 @@ def _apply_column_formatting(sh) -> list:
                     "textFormat": {**BASE_FONT, "bold": False},
                 }
                 fields = "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)"
+            elif kind == "text_left":
+                # 비고/사유/메모 등 자유서술 칸: 가운데 정렬 대신 왼쪽 정렬.
+                # 마찬가지로 numberFormat 필드는 요청하지 않는다(아래 else와 동일한 이유).
+                cell_format = {
+                    "horizontalAlignment": "LEFT",
+                    "textFormat": {**BASE_FONT, "bold": False},
+                }
+                fields = "userEnteredFormat(horizontalAlignment,textFormat)"
             else:
-                # 순수 텍스트 칸(종목명·비고 등)은 numberFormat 필드를 아예 요청하지 않는다.
+                # 순수 텍스트 칸(종목명 등)은 numberFormat 필드를 아예 요청하지 않는다.
                 # fields 마스크에 numberFormat을 넣어놓고 값을 안 채우면 구글이 기존 서식을
                 # 지워버려 날짜가 일련번호로 깨지는 버그가 있었다 — 그 원인을 제거한 부분.
                 cell_format = {
@@ -320,15 +391,22 @@ def _apply_column_formatting(sh) -> list:
     return formatted
 
 def apply_sheet_formatting(spreadsheet_id: str) -> tuple[bool, str]:
-    """'데이터 관리' 탭의 버튼에서 호출 — 이미 쓰고 있는 개인 시트에 서식 규칙을 소급 적용."""
+    """'데이터 관리' 탭의 버튼에서 호출 — 이미 쓰고 있는 개인 시트에 서식 규칙을 소급 적용.
+    1) 날짜 계열 컬럼의 셀 '값' 자체(텍스트/날짜 혼재)를 먼저 통일하고,
+    2) 그 다음 표시형식(폰트·정렬·숫자서식)을 적용한다. 순서가 바뀌면 텍스트로 남아있던
+    날짜 셀에는 서식만 입혀지고 실제 값은 그대로 텍스트로 남아 혼재가 해결되지 않는다."""
     try:
         spreadsheet = get_spreadsheet(spreadsheet_id)
         if spreadsheet is None:
             return False, "개인 시트를 열지 못했습니다."
+        normalized = _normalize_date_values_in_sheet(spreadsheet)
         formatted = _apply_column_formatting(spreadsheet)
         if not formatted:
             return False, "서식을 적용할 시트를 찾지 못했습니다."
-        return True, f"서식 정리 완료: {', '.join(formatted)}"
+        msg = f"서식 정리 완료: {', '.join(formatted)}"
+        if normalized:
+            msg += f" (날짜 값 통일: {', '.join(normalized)})"
+        return True, msg
     except Exception as e:
         logging.warning("시트 서식 적용 실패: %s", e)
         return False, f"서식 적용 중 오류가 발생했습니다: {type(e).__name__} - {e}"
