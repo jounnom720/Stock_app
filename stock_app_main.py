@@ -8,6 +8,7 @@
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import gspread
@@ -953,7 +954,22 @@ def show_login():
             code_challenge_method="S256",
             state=code_verifier,
         )
-        st.link_button("🔐 Google 계정으로 로그인", auth_url, type="primary")
+        # [주의] st.link_button은 Streamlit이 항상 새 탭/새 창으로 링크를 여는 고정 동작이라
+        # (공식 문서에 명시된 제약, 개발자가 끌 수 없음) 로그인 버튼 클릭 → 새 창에서 계정 선택
+        # 화면이 뜨고, 원래 창은 로그인 전 화면으로 남는 불편함이 있었다.
+        # 아래는 순수 HTML 버튼 + JS로 '지금 보고 있는 창(window.top)' 자체를 구글 로그인 주소로
+        # 이동시켜, 새 창을 띄우지 않고 같은 창 안에서 그대로 넘어가도록 만든 버전이다.
+        login_button_html = f"""
+        <div style="display:flex;">
+          <button onclick="window.top.location.href='{auth_url}';" style="
+              background-color:#FF4B4B; color:#FFFFFF; border:none;
+              padding:0.6rem 1.2rem; border-radius:0.5rem; font-size:1rem;
+              font-weight:600; cursor:pointer; font-family:inherit;">
+            🔐 Google 계정으로 로그인
+          </button>
+        </div>
+        """
+        components.html(login_button_html, height=60)
         st.caption(
             "처음 로그인하는 경우 자동으로 '승인 대기' 등록되며, 관리자 승인이 완료된 뒤 "
             "다시 로그인하면 이용할 수 있습니다."
