@@ -215,12 +215,14 @@ COLUMN_FORMAT_RULES = {
 }
 
 def _apply_column_formatting(sh) -> list:
-    """이미 열려 있는 gspread Spreadsheet 객체(sh)에 금액 천단위 콤마·정렬 서식을 일괄 적용.
+    """이미 열려 있는 gspread Spreadsheet 객체(sh)에 금액 천단위 콤마·정렬·글꼴 서식을 일괄 적용.
     신규 사용자의 시트를 처음 만들 때(_initialize_sheet_structure)와, 기존 사용자가
     '데이터 관리' 탭에서 버튼으로 요청할 때(apply_sheet_formatting) 양쪽이 공유하는 실제 로직.
-    값 자체는 건드리지 않고 표시 형식(숫자 포맷·정렬)만 바꾼다.
+    셀 값(내용) 자체는 절대 건드리지 않고 표시 형식(글꼴·숫자 포맷·정렬)만 바꾼다.
     [주의] 시트·컬럼마다 별도로 API를 호출하면 호출 수가 많아져 429(할당량 초과) 위험이 커지므로,
     모든 서식 변경 요청을 한 번에 모아서 batch_update 단 1회 호출로 처리한다."""
+    BASE_FONT = {"fontFamily": "Arial", "fontSize": 10}
+
     formatted = []
     requests = []
     for sheet_name, rules in COLUMN_FORMAT_RULES.items():
@@ -234,9 +236,11 @@ def _apply_column_formatting(sh) -> list:
 
         sheet_id = ws.id
         ncols = len(header)
-        last_row = max(int(ws.row_count), 200)  # 여유 있게 확보
+        # 이전에 손으로 서식을 만지다 보면 행마다 폰트가 제각각이거나, 뒤쪽에 추가된 행이
+        # 시트의 공식 row_count보다 실제로 더 많을 수 있어 넉넉하게 여유를 둔다.
+        last_row = max(int(ws.row_count), 3000)
 
-        # 헤더 행: 굵게 + 가운데 정렬
+        # 헤더 행: 굵게 + 가운데 정렬 + 글꼴 통일
         requests.append({
             "repeatCell": {
                 "range": {
@@ -244,7 +248,7 @@ def _apply_column_formatting(sh) -> list:
                     "startColumnIndex": 0, "endColumnIndex": ncols,
                 },
                 "cell": {"userEnteredFormat": {
-                    "textFormat": {"bold": True},
+                    "textFormat": {**BASE_FONT, "bold": True},
                     "horizontalAlignment": "CENTER",
                 }},
                 "fields": "userEnteredFormat(textFormat,horizontalAlignment)",
@@ -257,17 +261,19 @@ def _apply_column_formatting(sh) -> list:
                 cell_format = {
                     "numberFormat": {"type": "NUMBER", "pattern": "#,##0"},
                     "horizontalAlignment": "RIGHT",
+                    "textFormat": {**BASE_FONT, "bold": False},
                 }
-                fields = "userEnteredFormat(numberFormat,horizontalAlignment)"
             elif kind == "percent":
                 cell_format = {
                     "numberFormat": {"type": "NUMBER", "pattern": '0.00"%"'},
                     "horizontalAlignment": "RIGHT",
+                    "textFormat": {**BASE_FONT, "bold": False},
                 }
-                fields = "userEnteredFormat(numberFormat,horizontalAlignment)"
             else:
-                cell_format = {"horizontalAlignment": "CENTER"}
-                fields = "userEnteredFormat(horizontalAlignment)"
+                cell_format = {
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {**BASE_FONT, "bold": False},
+                }
 
             requests.append({
                 "repeatCell": {
@@ -276,7 +282,7 @@ def _apply_column_formatting(sh) -> list:
                         "startColumnIndex": i, "endColumnIndex": i + 1,
                     },
                     "cell": {"userEnteredFormat": cell_format},
-                    "fields": fields,
+                    "fields": "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)",
                 }
             })
 
