@@ -2354,7 +2354,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     # ── 월별 자산 추이 ──
     if not monthly_df.empty:
         st.markdown('<div class="section-title">월별 자산 추이</div>', unsafe_allow_html=True)
-        st.caption("📌 빨간 막대 = 그 달 말 기준 통합 평가금액 · 파란 선·점 = 그 달 말 기준 통합 투자원금. 두 값의 차이가 누적 손익입니다.")
+        st.caption("📌 빨간 막대 = 그 달 말 기준 통합 평가금액 · 파란 선·점 = 그 달 말 기준 통합 투자원금. 정확한 금액은 막대 위에 마우스를 올리거나 아래 표를 확인하세요.")
         if len(monthly_df) < 2:
             st.info("월별 데이터가 1개월치만 있어 추이(변화)를 비교할 수 없습니다. 매월 스냅샷이 쌓이면 추이선이 나타납니다.")
         try:
@@ -2372,35 +2372,59 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
                 return s
             mdf["년월_표시"] = mdf["년월"].apply(normalize_yearmonth)
 
+            # ── 차트: 막대·선에는 텍스트 라벨을 넣지 않는다 (정확한 금액은 마우스오버 툴팁 또는 아래 표로 확인).
+            # 이전 버전은 막대(평가금액)와 선(원금) 라벨이 서로 겹쳐 보이는 문제가 있었는데,
+            # 라벨을 아예 없애고 표로 역할을 분리해 근본적으로 해결했다.
             fig_trend = go.Figure()
             fig_trend.add_trace(go.Bar(
                 x=mdf["년월_표시"], y=mdf["통합평가"],
                 name="평가금액", marker_color="#e0635e", opacity=0.85,
-                text=[f"{v:,.0f}" for v in mdf["통합평가"]],
-                textposition="outside",
-                textfont=dict(size=12, color="#e0635e"),
-                cliponaxis=False,
+                hovertemplate="%{x}<br>평가금액 %{y:,.0f}원<extra></extra>",
             ))
             fig_trend.add_trace(go.Scatter(
                 x=mdf["년월_표시"], y=mdf["통합원금"],
-                name="원금", mode="lines+markers+text",
+                name="원금", mode="lines+markers",
                 line=dict(color="#8ecaff", width=2),
-                marker=dict(size=7, color="#8ecaff"),
-                text=[f"{v:,.0f}" for v in mdf["통합원금"]],
-                textposition="middle right",
-                textfont=dict(size=13, color="#ffffff", family="Arial Black"),
+                marker=dict(size=8, color="#8ecaff"),
+                hovertemplate="%{x}<br>원금 %{y:,.0f}원<extra></extra>",
             ))
-            # 막대 위 라벨이 그래프 위쪽 경계에 잘리지 않도록, 최댓값보다 여유 있게 y축 범위를 확보
             _max_val = max(mdf["통합평가"].max(), mdf["통합원금"].max())
             fig_trend.update_layout(
-                height=300,
-                margin=dict(t=30, b=30, l=10, r=10),
+                height=280,
+                margin=dict(t=20, b=30, l=10, r=10),
                 legend=dict(orientation="h", y=1.1),
-                yaxis=dict(tickformat=",", range=[0, _max_val * 1.2]),
+                yaxis=dict(tickformat=",", range=[0, _max_val * 1.15]),
                 xaxis=dict(type="category", tickangle=0),
                 bargap=0.5,
+                hovermode="x unified",
             )
             st.plotly_chart(fig_trend, width="stretch")
+
+            # ── 상세 표: 월별 정확한 금액 · 손익 · 수익률 ──
+            table_df = mdf[["년월_표시", "통합원금", "통합평가"]].copy()
+            table_df["손익"] = table_df["통합평가"] - table_df["통합원금"]
+            table_df["수익률"] = table_df.apply(
+                lambda r: round(r["손익"] / r["통합원금"] * 100, 2) if r["통합원금"] else 0.0, axis=1
+            )
+            table_df = table_df.rename(columns={"년월_표시": "년월"}).sort_values("년월", ascending=False)
+
+            def _style_trend_pnl(v):
+                try:
+                    f = float(v)
+                except Exception:
+                    return ""
+                color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
+                return f"color: {color}; font-weight: 600"
+
+            styled_trend = table_df.style.map(_style_trend_pnl, subset=["손익", "수익률"])
+            col_config = build_number_column_config(
+                table_df, money_cols=["통합원금", "통합평가", "손익"], pct_cols=["수익률"]
+            )
+            st.dataframe(
+                styled_trend, width="stretch", hide_index=True,
+                column_config=col_config,
+                height=min(320, 50 + 40 * len(table_df)),
+            )
         except Exception as e:
             st.caption(f"추이 차트 오류: {e}")
 
