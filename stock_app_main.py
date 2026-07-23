@@ -186,6 +186,120 @@ REQUIRED_SHEET_HEADERS = {
     "현금출납내역":    ["날짜", "계좌", "구분", "금액", "사유"],
 }
 
+# 시트 서식 통일 규칙: 시트별 컬럼명 -> 'money'(천단위 콤마+오른쪽정렬) / 'number'(오른쪽정렬)
+# / 'percent'(%+오른쪽정렬) / 'text'(가운데정렬, 날짜·이름·구분값 등 기본값).
+# 규칙에 없는 컬럼(사용자가 시트에 직접 추가한 열 등)은 'text'로 처리되어 가운데 정렬만 적용된다.
+COLUMN_FORMAT_RULES = {
+    "거래이력": {
+        "거래일자": "text", "운용사": "text", "종목코드": "text", "종목명": "text",
+        "거래구분": "text", "거래수량": "number", "거래단가": "money", "비고": "text",
+    },
+    "비주식자산": {
+        "계좌": "text", "자산군": "text", "상품명": "text", "원금": "money",
+        "평가금액": "money", "반영일자": "text", "비고": "text",
+    },
+    "현금성자산": {
+        "계좌": "text", "예수금": "money", "반영일자": "text",
+    },
+    "월별자산스냅샷": {
+        "년월": "text", "저장시각": "text", "통합원금": "money", "통합평가": "money",
+        "통합손익": "money", "통합수익률": "percent", "메모": "text",
+    },
+    "계좌간이체": {
+        "거래일자": "text", "출금계좌": "text", "출금자산군": "text", "입금계좌": "text",
+        "입금자산군": "text", "이체금액": "money", "실현손익": "money", "금액": "money", "비고": "text",
+    },
+    "현금출납내역": {
+        "날짜": "text", "계좌": "text", "구분": "text", "금액": "money", "사유": "text",
+    },
+}
+
+def _apply_column_formatting(sh) -> list:
+    """이미 열려 있는 gspread Spreadsheet 객체(sh)에 금액 천단위 콤마·정렬 서식을 일괄 적용.
+    신규 사용자의 시트를 처음 만들 때(_initialize_sheet_structure)와, 기존 사용자가
+    '데이터 관리' 탭에서 버튼으로 요청할 때(apply_sheet_formatting) 양쪽이 공유하는 실제 로직.
+    값 자체는 건드리지 않고 표시 형식(숫자 포맷·정렬)만 바꾼다.
+    [주의] 시트·컬럼마다 별도로 API를 호출하면 호출 수가 많아져 429(할당량 초과) 위험이 커지므로,
+    모든 서식 변경 요청을 한 번에 모아서 batch_update 단 1회 호출로 처리한다."""
+    formatted = []
+    requests = []
+    for sheet_name, rules in COLUMN_FORMAT_RULES.items():
+        try:
+            ws = sh.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            continue  # 이 사용자에게 없는(선택적) 탭은 건너뜀
+        header = ws.row_values(1)
+        if not header:
+            continue
+
+        sheet_id = ws.id
+        ncols = len(header)
+        last_row = max(int(ws.row_count), 200)  # 여유 있게 확보
+
+        # 헤더 행: 굵게 + 가운데 정렬
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1,
+                    "startColumnIndex": 0, "endColumnIndex": ncols,
+                },
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"bold": True},
+                    "horizontalAlignment": "CENTER",
+                }},
+                "fields": "userEnteredFormat(textFormat,horizontalAlignment)",
+            }
+        })
+
+        for i, col_name in enumerate(header):
+            kind = rules.get(str(col_name).strip(), "text")
+            if kind in ("money", "number"):
+                cell_format = {
+                    "numberFormat": {"type": "NUMBER", "pattern": "#,##0"},
+                    "horizontalAlignment": "RIGHT",
+                }
+                fields = "userEnteredFormat(numberFormat,horizontalAlignment)"
+            elif kind == "percent":
+                cell_format = {
+                    "numberFormat": {"type": "NUMBER", "pattern": '0.00"%"'},
+                    "horizontalAlignment": "RIGHT",
+                }
+                fields = "userEnteredFormat(numberFormat,horizontalAlignment)"
+            else:
+                cell_format = {"horizontalAlignment": "CENTER"}
+                fields = "userEnteredFormat(horizontalAlignment)"
+
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": last_row,
+                        "startColumnIndex": i, "endColumnIndex": i + 1,
+                    },
+                    "cell": {"userEnteredFormat": cell_format},
+                    "fields": fields,
+                }
+            })
+
+        formatted.append(sheet_name)
+
+    if requests:
+        _call_with_retry(sh.batch_update, {"requests": requests})
+    return formatted
+
+def apply_sheet_formatting(spreadsheet_id: str) -> tuple[bool, str]:
+    """'데이터 관리' 탭의 버튼에서 호출 — 이미 쓰고 있는 개인 시트에 서식 규칙을 소급 적용."""
+    try:
+        spreadsheet = get_spreadsheet(spreadsheet_id)
+        if spreadsheet is None:
+            return False, "개인 시트를 열지 못했습니다."
+        formatted = _apply_column_formatting(spreadsheet)
+        if not formatted:
+            return False, "서식을 적용할 시트를 찾지 못했습니다."
+        return True, f"서식 정리 완료: {', '.join(formatted)}"
+    except Exception as e:
+        logging.warning("시트 서식 적용 실패: %s", e)
+        return False, f"서식 적용 중 오류가 발생했습니다: {type(e).__name__} - {e}"
+
 def get_oauth_flow():
     client_config = {
         "web": {
@@ -257,6 +371,9 @@ def _initialize_sheet_structure(credentials, spreadsheet_id: str):
             headers = REQUIRED_SHEET_HEADERS[name]
             ws = sh.add_worksheet(title=name, rows=200, cols=max(10, len(headers)))
             ws.update("A1", [headers])
+
+        # 처음 만든 시트부터 금액 콤마·정렬 서식이 통일되어 있도록 바로 적용
+        _apply_column_formatting(sh)
     except Exception as e:
         logging.warning("신규 시트 초기 구조 세팅 실패: %s", e)
 
@@ -3118,6 +3235,17 @@ def render_data_mgmt(nonstock_df, cash_df):
             _render_nonstock_table(cash_rows, show_pnl=False, total_eval=cash_total)
     else:
         st.info("비주식자산 데이터 없음")
+
+    st.markdown('<div class="mgmt-section-head">🎨 시트 서식 정리</div>', unsafe_allow_html=True)
+    st.caption(
+        "금액 칸은 천 단위 콤마(,)와 오른쪽 정렬로, 텍스트·날짜 칸은 가운데 정렬로 구글시트 서식을 통일합니다. "
+        "값(숫자 자체)은 바뀌지 않고, 보이는 형식만 정리됩니다."
+    )
+    if st.button("🎨 구글시트 서식 통일 적용", key="apply_format_btn", width="content"):
+        spreadsheet_id_for_format = st.session_state.get("spreadsheet_id", "")
+        with st.spinner("시트 서식을 정리하는 중..."):
+            ok, msg = apply_sheet_formatting(spreadsheet_id_for_format)
+        (st.success if ok else st.error)(msg)
 
     st.markdown('<div class="mgmt-section-head">🧹 캐시 초기화</div>', unsafe_allow_html=True)
     warn_html = (
