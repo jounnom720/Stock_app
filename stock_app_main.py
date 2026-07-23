@@ -471,6 +471,35 @@ def get_spreadsheet(spreadsheet_id: str):
             st.error(f"⚠️ 구글시트 열기 실패 (spreadsheet_id: {spreadsheet_id[:8]}...): {type(e).__name__} - {e}")
         return None
 
+# 여러 시트에 공통으로 등장하는 날짜/시각 계열 컬럼명 — 구글시트에서 읽어올 때 항상
+# "YYYY-MM-DD" 문자열로 통일해, 정수(일련번호)·문자열이 섞여 들어와도 이후 정렬·표시가 깨지지 않게 한다.
+DATE_LIKE_COLUMNS = ("거래일자", "반영일자", "날짜", "이체일자", "등록일", "저장시각", "기준일")
+
+def _normalize_date_value(v):
+    """구글시트 셀 값이 문자열 날짜("2026-03-05")든, 날짜 일련번호(정수/실수, 1899-12-30 기준)든
+    상관없이 "YYYY-MM-DD" 문자열로 통일해서 반환. 변환할 수 없는 값은 원래 문자열 그대로 둔다."""
+    if v is None or v == "":
+        return ""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            base = pd.Timestamp("1899-12-30")
+            ts = base + pd.Timedelta(days=float(v))
+            # 시각까지 포함된 값(저장시각 등)은 초 단위까지, 날짜만 있는 값은 날짜까지만 표시
+            if ts.hour or ts.minute or ts.second:
+                return ts.strftime("%Y-%m-%d %H:%M:%S")
+            return ts.strftime("%Y-%m-%d")
+        except Exception:
+            return str(v)
+    return str(v).strip()
+
+def _normalize_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """DATE_LIKE_COLUMNS에 해당하는 컬럼이 있으면 값의 타입(정수/문자열 혼재)에 상관없이
+    문자열로 통일한다. 거래일자 등이 int/str로 섞여 들어와 정렬 시 앱이 죽는 문제를 방지."""
+    for col in DATE_LIKE_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(_normalize_date_value)
+    return df
+
 @st.cache_data(ttl=30)
 def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
     try:
@@ -486,6 +515,7 @@ def load_sheet(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
             df["종목코드"] = df["종목코드"].apply(
                 lambda x: str(int(x)).zfill(6) if str(x).strip().isdigit() else str(x).strip()
             )
+        df = _normalize_date_columns(df)
         return df
     except Exception as e:
         logging.warning("시트 로드 실패 [%s]: %s", sheet_name, e)
@@ -508,7 +538,8 @@ def load_sheet_optional(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
         if spreadsheet is None:
             return pd.DataFrame()
         ws = _call_with_retry(spreadsheet.worksheet, sheet_name)
-        return pd.DataFrame(_call_with_retry(ws.get_all_records))
+        df = pd.DataFrame(_call_with_retry(ws.get_all_records))
+        return _normalize_date_columns(df)
     except gspread.exceptions.WorksheetNotFound:
         return pd.DataFrame()
     except Exception as e:
@@ -1212,6 +1243,16 @@ def color_pnl(v) -> str:
 
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+def _safe_date_str(v, fmt: str = "%Y-%m-%d") -> str:
+    """pandas Timestamp를 안전하게 문자열로 변환. NaT(날짜 파싱 실패)이면 '-'를 반환해
+    strftime 호출 시 앱이 죽는 것을 방지한다."""
+    try:
+        if pd.isna(v):
+            return "-"
+        return v.strftime(fmt)
+    except Exception:
+        return "-"
 
 def build_number_column_config(df: pd.DataFrame, money_cols: list[str] = None, pct_cols: list[str] = None) -> dict:
     """st.dataframe에 천 단위 콤마(,) 포맷을 적용하는 column_config 생성."""
@@ -2146,7 +2187,7 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         # 순위 리스트: 당일등락률 내림차순 정렬 (네이버페이 증권 '외국인 매매 상위' 랭킹 UI 참고)
         ranked = grouped.dropna(subset=["당일등락률"]).sort_values("당일등락률", ascending=False).reset_index(drop=True)
@@ -2893,7 +2934,10 @@ def render_trades(trade_df):
     if 종목필터 != "전체":
         df = df[df["종목명"] == 종목필터]
 
-    df = df.sort_values("거래일자", ascending=False)
+    # 거래일자를 실제 날짜로 변환해 정렬 (문자열/숫자가 섞여 있어도 정렬이 깨지지 않도록
+    # 원본 컬럼이 아니라 별도의 파싱된 컬럼 기준으로 정렬한다)
+    df["_거래일자_정렬용"] = pd.to_datetime(df["거래일자"], errors="coerce")
+    df = df.sort_values("_거래일자_정렬용", ascending=False).drop(columns=["_거래일자_정렬용"])
     df["거래금액"] = df["거래수량"] * df["거래단가"]
 
     # 통계
@@ -3047,7 +3091,7 @@ def render_cashflow(trade_df, cashlog_df=None):
             for _, buy in 후속매수.iterrows():
                 buy_amt = int(buy["거래수량"]) * float(buy["거래단가"])
                 items.append(
-                    f'<div class="sell-follow-item">↳ {buy["거래일자_dt"].strftime("%Y-%m-%d")} · '
+                    f'<div class="sell-follow-item">↳ {_safe_date_str(buy["거래일자_dt"])} · '
                     f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
                 )
             buy_html = "".join(items)
@@ -3061,7 +3105,7 @@ def render_cashflow(trade_df, cashlog_df=None):
             '<div class="sell-event-header">'
             f'<span class="acct-badge" style="background:{_badge_bg};color:{_badge_fg}">{ev_account}</span>'
             f'<span class="sell-event-name">{ev["제목"]}</span>'
-            f'<span class="sell-event-date">{ev_date.strftime("%Y-%m-%d")}</span>'
+            f'<span class="sell-event-date">{_safe_date_str(ev_date)}</span>'
             '<span class="sell-event-spacer"></span>'
             f'<span class="sell-event-amount">{fmt_money(ev_amount)} 회수</span>'
             f'{pnl_html}'
