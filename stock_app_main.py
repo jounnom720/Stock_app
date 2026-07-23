@@ -187,30 +187,30 @@ REQUIRED_SHEET_HEADERS = {
 }
 
 # 시트 서식 통일 규칙: 시트별 컬럼명 -> 'money'(천단위 콤마+오른쪽정렬) / 'number'(오른쪽정렬)
-# / 'percent'(%+오른쪽정렬) / 'text'(가운데정렬, 날짜·이름·구분값 등 기본값).
+# / 'percent'(%+오른쪽정렬) / 'date'(날짜·시각 형식+가운데정렬) / 'text'(가운데정렬만, 숫자서식은 손대지 않음).
 # 규칙에 없는 컬럼(사용자가 시트에 직접 추가한 열 등)은 'text'로 처리되어 가운데 정렬만 적용된다.
 COLUMN_FORMAT_RULES = {
     "거래이력": {
-        "거래일자": "text", "운용사": "text", "종목코드": "text", "종목명": "text",
+        "거래일자": "date", "운용사": "text", "종목코드": "text", "종목명": "text",
         "거래구분": "text", "거래수량": "number", "거래단가": "money", "비고": "text",
     },
     "비주식자산": {
         "계좌": "text", "자산군": "text", "상품명": "text", "원금": "money",
-        "평가금액": "money", "반영일자": "text", "비고": "text",
+        "평가금액": "money", "반영일자": "date", "비고": "text",
     },
     "현금성자산": {
-        "계좌": "text", "예수금": "money", "반영일자": "text",
+        "계좌": "text", "예수금": "money", "반영일자": "date",
     },
     "월별자산스냅샷": {
-        "년월": "text", "저장시각": "text", "통합원금": "money", "통합평가": "money",
+        "년월": "yearmonth", "저장시각": "datetime", "통합원금": "money", "통합평가": "money",
         "통합손익": "money", "통합수익률": "percent", "메모": "text",
     },
     "계좌간이체": {
-        "거래일자": "text", "출금계좌": "text", "출금자산군": "text", "입금계좌": "text",
+        "거래일자": "date", "출금계좌": "text", "출금자산군": "text", "입금계좌": "text",
         "입금자산군": "text", "이체금액": "money", "실현손익": "money", "금액": "money", "비고": "text",
     },
     "현금출납내역": {
-        "날짜": "text", "계좌": "text", "구분": "text", "금액": "money", "사유": "text",
+        "날짜": "date", "계좌": "text", "구분": "text", "금액": "money", "사유": "text",
     },
 }
 
@@ -263,17 +263,44 @@ def _apply_column_formatting(sh) -> list:
                     "horizontalAlignment": "RIGHT",
                     "textFormat": {**BASE_FONT, "bold": False},
                 }
+                fields = "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)"
             elif kind == "percent":
                 cell_format = {
                     "numberFormat": {"type": "NUMBER", "pattern": '0.00"%"'},
                     "horizontalAlignment": "RIGHT",
                     "textFormat": {**BASE_FONT, "bold": False},
                 }
+                fields = "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)"
+            elif kind == "date":
+                cell_format = {
+                    "numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"},
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {**BASE_FONT, "bold": False},
+                }
+                fields = "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)"
+            elif kind == "datetime":
+                cell_format = {
+                    "numberFormat": {"type": "DATE_TIME", "pattern": "yyyy-mm-dd hh:mm:ss"},
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {**BASE_FONT, "bold": False},
+                }
+                fields = "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)"
+            elif kind == "yearmonth":
+                cell_format = {
+                    "numberFormat": {"type": "DATE", "pattern": "yyyy-mm"},
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {**BASE_FONT, "bold": False},
+                }
+                fields = "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)"
             else:
+                # 순수 텍스트 칸(종목명·비고 등)은 numberFormat 필드를 아예 요청하지 않는다.
+                # fields 마스크에 numberFormat을 넣어놓고 값을 안 채우면 구글이 기존 서식을
+                # 지워버려 날짜가 일련번호로 깨지는 버그가 있었다 — 그 원인을 제거한 부분.
                 cell_format = {
                     "horizontalAlignment": "CENTER",
                     "textFormat": {**BASE_FONT, "bold": False},
                 }
+                fields = "userEnteredFormat(horizontalAlignment,textFormat)"
 
             requests.append({
                 "repeatCell": {
@@ -282,7 +309,7 @@ def _apply_column_formatting(sh) -> list:
                         "startColumnIndex": i, "endColumnIndex": i + 1,
                     },
                     "cell": {"userEnteredFormat": cell_format},
-                    "fields": "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)",
+                    "fields": fields,
                 }
             })
 
