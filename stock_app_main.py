@@ -14,8 +14,11 @@ import gspread
 import yfinance as yf
 import plotly.graph_objects as go
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google.oauth2.credentials import Credentials as UserOAuthCredentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from cryptography.fernet import Fernet, InvalidToken
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import logging
@@ -626,7 +629,7 @@ def load_sheet_optional(sheet_name: str, spreadsheet_id: str) -> pd.DataFrame:
 
 # ============================================================
 # 화이트리스트 (사용자계정 시트 — 서비스 계정으로 접근)
-# 컬럼: 이메일 / 이름 / spreadsheet_id / 상태 / 등록일
+# 컬럼: 이메일 / 이름 / spreadsheet_id / 상태 / 등록일 / refresh_token_enc(v2.1, 최초 저장 시 자동 추가)
 # ============================================================
 @st.cache_resource(ttl=60)
 def get_accounts_spreadsheet():
@@ -757,6 +760,77 @@ def save_user_spreadsheet_id(email: str, spreadsheet_id: str) -> bool:
         logging.warning("spreadsheet_id 저장 실패: %s", e)
         return False
 
+def _ensure_refresh_token_column(ws) -> int:
+    """'사용자계정' 시트에 'refresh_token_enc' 헤더가 없으면 맨 뒤에 추가하고, 그 열 번호(1-based)를 반환.
+    기존 사용자들의 시트에는 이 컬럼이 없을 수 있으므로, 최초 저장 시점에 자동으로 만들어준다."""
+    header = ws.row_values(1)
+    if "refresh_token_enc" in header:
+        return header.index("refresh_token_enc") + 1
+    new_col = len(header) + 1
+    ws.update_cell(1, new_col, "refresh_token_enc")
+    return new_col
+
+def save_user_refresh_token(email: str, refresh_token: str) -> bool:
+    """구글 OAuth에서 받은 refresh_token을 암호화해 '사용자계정' 시트에 영구 저장.
+    이렇게 저장해두면, 서버가 재시작되어 메모리 캐시(_oauth_credential_store)가 비워져도
+    이 값으로 브라우저 상호작용 없이 조용히 재로그인할 수 있다 (매번 동의화면이 뜨는 문제의 근본 해결).
+    secret_key 미설정 등으로 암호화가 불가능하면 아무것도 하지 않고 False를 반환한다."""
+    if not refresh_token:
+        return False
+    token_enc = _encrypt_refresh_token(refresh_token)
+    if not token_enc:
+        return False
+    try:
+        df = load_accounts_df()
+        if df.empty or "이메일" not in df.columns or email not in df["이메일"].values:
+            return False
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False
+        ws = spreadsheet.worksheet("사용자계정")
+        row_idx = df.index[df["이메일"] == email][0] + 2  # 헤더 행 고려
+        col_idx = _ensure_refresh_token_column(ws)
+        ws.update_cell(row_idx, col_idx, token_enc)
+        load_accounts_df.clear()
+        return True
+    except Exception as e:
+        logging.warning("refresh_token 저장 실패: %s", e)
+        return False
+
+def load_user_refresh_token(email: str):
+    """'사용자계정' 시트에 저장된 암호화된 refresh_token을 읽어 복호화해서 반환.
+    컬럼 자체가 없거나, 값이 비어있거나, 복호화에 실패하면 None을 반환한다."""
+    try:
+        df = load_accounts_df()
+        if df.empty or "refresh_token_enc" not in df.columns or "이메일" not in df.columns:
+            return None
+        row = df[df["이메일"].astype(str).str.strip().str.lower() == email.strip().lower()]
+        if row.empty:
+            return None
+        token_enc = str(row.iloc[0].get("refresh_token_enc", "")).strip()
+        if not token_enc:
+            return None
+        return _decrypt_refresh_token(token_enc)
+    except Exception as e:
+        logging.warning("refresh_token 조회 실패: %s", e)
+        return None
+
+def build_credentials_from_refresh_token(refresh_token: str):
+    """저장해둔 refresh_token만으로 구글 로그인 화면을 거치지 않고 곧바로 유효한
+    OAuth Credentials를 재구성한다. 마지막에 .refresh()로 실제 access_token을 한 번 발급받아
+    바로 API 호출에 쓸 수 있는 상태로 반환한다. refresh_token이 취소/만료된 경우 예외가
+    발생하며, 호출부에서 이를 잡아 '다시 로그인해주세요' 화면으로 넘어가도록 처리해야 한다."""
+    credentials = UserOAuthCredentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=st.secrets["google_oauth"]["client_id"],
+        client_secret=st.secrets["google_oauth"]["client_secret"],
+        scopes=OAUTH_SCOPES,
+    )
+    credentials.refresh(GoogleAuthRequest())
+    return credentials
+
 def update_account_status(email: str, new_status: str) -> bool:
     """'사용자계정' 시트에서 특정 이메일의 상태(활성/비활성)를 변경."""
     try:
@@ -817,6 +891,36 @@ def _session_secret() -> bytes:
     """Secrets에 [auth] secret_key가 없으면 세션 유지 기능은 조용히 비활성화됨(로그인 자체는 정상 동작)."""
     key = st.secrets.get("auth", {}).get("secret_key", "")
     return key.encode("utf-8") if key else b""
+
+def _refresh_token_cipher():
+    """[auth] secret_key로부터 Fernet(대칭키 암호화) 키를 유도한다.
+    같은 secret_key를 쓰는 한 서버가 재시작되어도 항상 같은 암호화 키가 나오므로,
+    구글시트에 저장해둔 암호문을 나중에 다시 복호화할 수 있다.
+    secret_key가 비어있으면(설정 안 한 경우) None을 반환해 이 기능 전체를 조용히 끈다."""
+    secret = _session_secret()
+    if not secret:
+        return None
+    fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret).digest())
+    return Fernet(fernet_key)
+
+def _encrypt_refresh_token(refresh_token: str) -> str:
+    """refresh_token(사실상 '평생 로그인'급 민감한 값)을 구글시트에 평문으로 저장하지 않기 위해
+    암호화한다. secret_key가 없으면 빈 문자열을 반환해 저장을 건너뛴다."""
+    cipher = _refresh_token_cipher()
+    if cipher is None or not refresh_token:
+        return ""
+    return cipher.encrypt(refresh_token.encode("utf-8")).decode("utf-8")
+
+def _decrypt_refresh_token(token_enc: str):
+    """저장된 암호문을 복호화. secret_key가 바뀌었거나 값이 손상된 경우 None을 반환."""
+    cipher = _refresh_token_cipher()
+    if cipher is None or not token_enc:
+        return None
+    try:
+        return cipher.decrypt(token_enc.encode("utf-8")).decode("utf-8")
+    except (InvalidToken, Exception) as e:
+        logging.warning("refresh_token 복호화 실패: %s", e)
+        return None
 
 def make_session_token(email: str, ttl_hours: int = 24) -> str | None:
     secret = _session_secret()
@@ -933,6 +1037,11 @@ def show_login():
         )
         _save_credentials(email, credentials)
 
+        # refresh_token이 새로 발급됐다면(최초 동의 시, 혹은 드물게 재동의 시) 영구 저장.
+        # 이렇게 저장해두면 서버가 재시작돼도 이 값 하나로 브라우저 상호작용 없이 재로그인 가능.
+        if getattr(credentials, "refresh_token", None):
+            save_user_refresh_token(email, credentials.refresh_token)
+
         # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
         token = make_session_token(email)
         if token:
@@ -948,7 +1057,14 @@ def show_login():
         auth_url, _ = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="true",
-            prompt="consent",
+            # [변경] prompt="consent"였던 것을 "select_account"로 변경.
+            # "consent"는 매번 강제로 권한 동의 화면을 띄우는 옵션이었다. 이제 refresh_token을
+            # 화이트리스트 시트에 영구 저장해두므로(save_user_refresh_token), 최초 1회만 동의를
+            # 받으면 되고 재로그인 때는 굳이 매번 동의 화면을 강제할 필요가 없다.
+            # "select_account"는 계정 선택 화면만 보여주고, 이미 이 앱에 동의한 계정이면
+            # 구글이 알아서 동의 화면을 생략해준다. (완전히 새로운 계정은 구글이 자체적으로
+            # 여전히 동의 화면을 보여준다 — 이건 구글의 필수 정책이라 우리가 끌 수 없다.)
+            prompt="select_account",
             code_challenge=code_challenge,
             code_challenge_method="S256",
             state=code_verifier,
@@ -960,6 +1076,7 @@ def show_login():
         # 화면 자체가 iframe 안에서 열리는 것을 보안상 거부하므로, 최상위 창(새 탭)에서 여는
         # 이 방식이 현재로선 가장 안전하게 동작하는 방법이라 원래대로 되돌린다.
         st.link_button("🔐 Google 계정으로 로그인", auth_url, type="primary")
+        st.caption("🔗 버튼을 누르면 새 탭에서 구글 로그인 화면이 열립니다. 로그인 후 이 페이지로 자동으로 돌아옵니다.")
         st.caption(
             "처음 로그인하는 경우 자동으로 '승인 대기' 등록되며, 관리자 승인이 완료된 뒤 "
             "다시 로그인하면 이용할 수 있습니다."
@@ -3430,30 +3547,37 @@ def render_data_mgmt(nonstock_df, cash_df):
 if __name__ == "__main__" or True:
     # 세션 연결이 끊겼다 재연결된 경우, 주소창의 서명된 토큰으로 자동 재로그인 시도
     # (탭 클릭 등으로 웹소켓이 재연결되면서 session_state가 초기화되는 경우에 대한 방어 코드)
-    # v2.0: 토큰에는 email이 담겨 있고, 실제 API 접근에 필요한 OAuth Credentials는
-    # _oauth_credential_store()(서버 프로세스 전역 캐시)에서 복구를 시도한다.
-    # 서버가 재시작되어 캐시가 비어있다면 복구에 실패하며, 이 경우 로그인 화면에서
-    # 'Google 계정으로 로그인' 버튼을 한 번 더 눌러야 한다.
+    # v2.1: 1순위로 _oauth_credential_store()(서버 프로세스 전역 캐시)에서 복구를 시도하고,
+    # 그마저 비어있으면(서버 재시작 등) 2순위로 화이트리스트 시트에 저장해둔 refresh_token으로
+    # 브라우저 상호작용 없이 조용히 재로그인을 시도한다. 이 refresh_token 자체가 없거나
+    # 만료/취소된 사용자만 결국 로그인 화면에서 버튼을 다시 눌러야 한다.
     if not st.session_state.get("logged_in"):
         token = st.query_params.get("t")
         if token:
             restored_email = verify_session_token(token)
             if restored_email:
-                cached_credentials = _restore_credentials(restored_email)
                 status_row = get_whitelist_status(restored_email)
-                if (
-                    cached_credentials is not None
-                    and status_row is not None
-                    and str(status_row.get("상태", "")).strip() == "활성"
-                ):
-                    st.session_state["logged_in"] = True
-                    st.session_state["user_name"] = str(status_row.get("이름", "")).strip() or restored_email.split("@")[0]
-                    st.session_state["user_email"] = restored_email
-                    st.session_state["spreadsheet_id"] = str(status_row.get("spreadsheet_id", "")).strip()
-                    st.session_state["oauth_credentials"] = cached_credentials
-                    st.session_state["is_admin"] = (
-                        restored_email.strip().lower() == str(st.secrets.get("admin", {}).get("email", "")).strip().lower()
-                    )
+                if status_row is not None and str(status_row.get("상태", "")).strip() == "활성":
+                    cached_credentials = _restore_credentials(restored_email)
+                    if cached_credentials is None:
+                        # 메모리 캐시 미스 → 영구 저장된 refresh_token으로 조용히 재구성 시도
+                        stored_refresh_token = load_user_refresh_token(restored_email)
+                        if stored_refresh_token:
+                            try:
+                                cached_credentials = build_credentials_from_refresh_token(stored_refresh_token)
+                                _save_credentials(restored_email, cached_credentials)
+                            except Exception as e:
+                                logging.warning("refresh_token으로 재로그인 실패: %s", e)
+                                cached_credentials = None
+                    if cached_credentials is not None:
+                        st.session_state["logged_in"] = True
+                        st.session_state["user_name"] = str(status_row.get("이름", "")).strip() or restored_email.split("@")[0]
+                        st.session_state["user_email"] = restored_email
+                        st.session_state["spreadsheet_id"] = str(status_row.get("spreadsheet_id", "")).strip()
+                        st.session_state["oauth_credentials"] = cached_credentials
+                        st.session_state["is_admin"] = (
+                            restored_email.strip().lower() == str(st.secrets.get("admin", {}).get("email", "")).strip().lower()
+                        )
 
     if not st.session_state.get("logged_in"):
         show_login()
