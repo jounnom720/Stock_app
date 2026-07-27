@@ -19,7 +19,8 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from cryptography.fernet import Fernet, InvalidToken
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from pykrx import stock as krx_stock
 from zoneinfo import ZoneInfo
 import logging
 import hmac
@@ -1178,13 +1179,42 @@ def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
             logging.warning("개별 등락률 조회 실패 [%s]: %s", t, e)
     return result
 
+def _fetch_krx_index_change(krx_ticker: str):
+    """코스피/코스닥은 야후 파이낸스(^KS11, ^KQ11) 대신 pykrx로 한국거래소(KRX) 데이터를
+    직접 가져온다. 야후는 국내 지수 갱신이 지연되거나(특히 변동성이 큰 날) 다른 티커와 묶어서
+    조회할 때 날짜가 어긋나는 경우가 있어, 오늘처럼 등락폭이 큰 날에는 '전일 대비'가 실제로는
+    '2거래일 전 대비'로 계산되는 문제가 있었다. KRX 원천 데이터를 쓰면 이 문제를 원천적으로 피한다.
+    krx_ticker: "1001"=코스피, "2001"=코스닥"""
+    try:
+        today = datetime.now(KST).strftime("%Y%m%d")
+        from_date = (datetime.now(KST) - timedelta(days=14)).strftime("%Y%m%d")
+        df = krx_stock.get_index_ohlcv_by_date(from_date, today, krx_ticker)
+        df = df[df["종가"] > 0]
+        if len(df) >= 2:
+            cur = float(df["종가"].iloc[-1])
+            prev = float(df["종가"].iloc[-2])
+            if prev != 0:
+                return {"current": cur, "change_pct": (cur - prev) / prev * 100}
+    except Exception as e:
+        logging.warning("KRX 지수 조회 실패 [%s]: %s", krx_ticker, e)
+    return None
+
 @st.cache_data(ttl=300)
 def get_market_index_data() -> dict[str, dict]:
     """주요 시장 지표(코스피·환율·VIX 등)의 현재가와 전일 대비 등락률을 조회.
-    반환값에는 실제로 이 데이터를 가져온 시각("_fetched_at")도 함께 담아, 화면에 캐시된 시각이
-    아니라 '진짜 조회된 시각'을 정확히 표시할 수 있도록 한다."""
-    tickers = [m["ticker"] for m in MARKET_INDICES]
-    result = _fetch_current_and_prev_close(tickers)
+    코스피(^KS11)·코스닥(^KQ11)은 KRX 원천 데이터(pykrx)로 별도 조회하고, 나머지는 야후에서
+    가져온다. 반환값에는 실제로 이 데이터를 가져온 시각("_fetched_at")도 함께 담아, 화면에
+    캐시된 시각이 아니라 '진짜 조회된 시각'을 정확히 표시할 수 있도록 한다."""
+    KRX_TICKER_MAP = {"^KS11": "1001", "^KQ11": "2001"}
+
+    yf_tickers = [m["ticker"] for m in MARKET_INDICES if m["ticker"] not in KRX_TICKER_MAP]
+    result = _fetch_current_and_prev_close(yf_tickers)
+
+    for yf_ticker, krx_code in KRX_TICKER_MAP.items():
+        krx_result = _fetch_krx_index_change(krx_code)
+        if krx_result:
+            result[yf_ticker] = krx_result
+
     result["_fetched_at"] = now_kst()
     return result
 
@@ -1729,6 +1759,7 @@ st.markdown("""
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: 0.6rem;
+    margin-bottom: 2.2rem;
 }
 .mkt-card {
     position: relative;
