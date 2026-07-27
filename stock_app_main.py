@@ -122,21 +122,24 @@ def get_account_color(acct_name: str, acct_order: list) -> tuple:
     return ACCOUNT_COLOR_PALETTE[idx % len(ACCOUNT_COLOR_PALETTE)]
 
 # ============================================================
-# 시장 지표 마스터 (대시보드 상단 카드용, 성격별 4그룹)
+# 주요 시장 지표 마스터 (대시보드 상단 카드용)
+# 순서: 코스피-코스닥-원달러환율-달러인덱스-WTI유가-브렌트유-국제금-나스닥종합-나스닥100-
+#       다우존스-S&P500-VIX-미국 국채 10년
 # ============================================================
 MARKET_INDICES = [
-    {"group": "국내 증시",      "name": "코스피",     "ticker": "^KS11"},
-    {"group": "국내 증시",      "name": "코스닥",     "ticker": "^KQ11"},
-    {"group": "환율·원자재",    "name": "USD/KRW",    "ticker": "KRW=X"},
-    {"group": "환율·원자재",    "name": "WTI 유가",   "ticker": "CL=F"},
-    {"group": "환율·원자재",    "name": "국제 금",    "ticker": "GC=F"},
-    {"group": "미국 증시",      "name": "S&P500",     "ticker": "^GSPC"},
-    {"group": "미국 증시",      "name": "나스닥",     "ticker": "^IXIC"},
-    {"group": "미국 증시",      "name": "다우존스",   "ticker": "^DJI"},
-    {"group": "위험심리·금리",  "name": "VIX",        "ticker": "^VIX"},
-    {"group": "위험심리·금리",  "name": "달러인덱스", "ticker": "DX-Y.NYB"},
-    {"group": "위험심리·금리",  "name": "美 10년물",  "ticker": "^TNX"},
-    {"group": "위험심리·금리",  "name": "비트코인",   "ticker": "BTC-USD"},
+    {"group": "국내 증시",     "name": "코스피",       "ticker": "^KS11"},
+    {"group": "국내 증시",     "name": "코스닥",       "ticker": "^KQ11"},
+    {"group": "환율",          "name": "원달러환율",   "ticker": "KRW=X"},
+    {"group": "환율",          "name": "달러인덱스",   "ticker": "DX-Y.NYB"},
+    {"group": "원자재",        "name": "WTI 유가",     "ticker": "CL=F"},
+    {"group": "원자재",        "name": "브렌트유",     "ticker": "BZ=F"},
+    {"group": "원자재",        "name": "국제 금",      "ticker": "GC=F"},
+    {"group": "미국 증시",     "name": "나스닥종합",   "ticker": "^IXIC"},
+    {"group": "미국 증시",     "name": "나스닥100",    "ticker": "^NDX"},
+    {"group": "미국 증시",     "name": "다우존스",     "ticker": "^DJI"},
+    {"group": "미국 증시",     "name": "S&P500",       "ticker": "^GSPC"},
+    {"group": "위험심리·금리", "name": "VIX",          "ticker": "^VIX"},
+    {"group": "위험심리·금리", "name": "미국 국채 10년", "ticker": "^TNX"},
 ]
 
 # ============================================================
@@ -1131,24 +1134,34 @@ def get_current_price(code: str, prices: dict) -> float | None:
 
 def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
     """여러 티커의 (현재가, 전일종가) 기준 등락률을 일괄 조회하고, 실패한 티커만 개별 재시도.
-    get_market_index_data()와 get_day_change()가 공통으로 사용하는 핵심 로직."""
+    get_market_index_data()와 get_day_change()가 공통으로 사용하는 핵심 로직.
+
+    [중요] 여러 티커를 한 번에 yf.download()로 묶어 받으면, 하나의 공유된 날짜 인덱스로
+    합쳐진다. 그런데 비트코인처럼 주말에도 거래되는 종목과 코스피·코스닥처럼 주말에 거래되지
+    않는 종목이 섞여 있으면, 공유 인덱스의 '마지막 행(iloc[-1])'과 '마지막에서 두 번째 행
+    (iloc[-2])'이 종목마다 서로 다른 실제 거래일을 가리키게 된다. 예를 들어 비트코인은
+    일요일에도 값이 있어 그 행이 안 지워지지만, 코스피는 그 행이 비어있다(NaN) — 이렇게 되면
+    코스피의 '전일 종가'가 실제로는 이틀 전 종가가 되어버리는 식으로 등락률이 완전히 틀어진다.
+    그래서 반드시 티커(컬럼)별로 각자 결측치를 제거한 뒤, 그 티커 자신의 마지막 2개 값만
+    사용해야 한다 — 공유 인덱스에서 같은 위치(iloc)를 그대로 믿으면 안 된다."""
     result = {}
     try:
         ticker_str = " ".join(ticker_list)
         data = yf.download(ticker_str, period="5d", progress=False, auto_adjust=True, threads=True)
         if "Close" in data.columns:
-            close = data["Close"].dropna(how="all")
-            if len(close) >= 2:
-                latest_row = close.iloc[-1]
-                prev_row = close.iloc[-2]
-                for t in ticker_list:
-                    try:
-                        cur = float(latest_row[t]) if hasattr(latest_row, "__getitem__") else float(latest_row)
-                        prev = float(prev_row[t]) if hasattr(prev_row, "__getitem__") else float(prev_row)
-                        if pd.notna(cur) and pd.notna(prev) and prev != 0:
+            close = data["Close"]
+            for t in ticker_list:
+                try:
+                    # 단일 티커만 요청한 경우 close 자체가 Series라 컬럼 선택이 불가능하므로 분기.
+                    col_series = close[t] if (hasattr(close, "columns") and t in close.columns) else close
+                    col_series = col_series.dropna()
+                    if len(col_series) >= 2:
+                        cur = float(col_series.iloc[-1])
+                        prev = float(col_series.iloc[-2])
+                        if prev != 0:
                             result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100}
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
     except Exception as e:
         logging.warning("일괄 등락률 조회 실패: %s", e)
 
@@ -1165,12 +1178,15 @@ def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
             logging.warning("개별 등락률 조회 실패 [%s]: %s", t, e)
     return result
 
-
 @st.cache_data(ttl=300)
 def get_market_index_data() -> dict[str, dict]:
-    """시장 지표(코스피·환율·VIX 등)의 현재가와 전일 대비 등락률을 조회."""
+    """주요 시장 지표(코스피·환율·VIX 등)의 현재가와 전일 대비 등락률을 조회.
+    반환값에는 실제로 이 데이터를 가져온 시각("_fetched_at")도 함께 담아, 화면에 캐시된 시각이
+    아니라 '진짜 조회된 시각'을 정확히 표시할 수 있도록 한다."""
     tickers = [m["ticker"] for m in MARKET_INDICES]
-    return _fetch_current_and_prev_close(tickers)
+    result = _fetch_current_and_prev_close(tickers)
+    result["_fetched_at"] = now_kst()
+    return result
 
 
 @st.cache_data(ttl=300)
@@ -1708,7 +1724,7 @@ st.markdown("""
     color: var(--text-dim);
 }
 
-/* ── 시장 지표 카드 (9개 전체를 한 그리드에 가로로 펼침) ── */
+/* ── 주요 시장 지표 카드 (13개 전체를 한 그리드에 가로로 펼침) ── */
 .mkt-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -2260,10 +2276,17 @@ def main(spreadsheet_id: str):
 # 탭1: 통합 대시보드
 # ============================================================
 def render_market_indices():
-    """대시보드 상단 시장 지표 카드 — 12개 지표를 한 그리드에 가로로 펼쳐 배치."""
-    st.markdown('<div class="section-title">시장 지표</div>', unsafe_allow_html=True)
-
+    """대시보드 상단 주요 시장 지표 카드 — 13개 지표를 한 그리드에 가로로 펼쳐 배치."""
     data = get_market_index_data()
+    fetched_at = data.get("_fetched_at", now_kst())
+    st.markdown(
+        f'<div class="section-title">주요 시장 지표'
+        f'<span style="font-size:0.75rem;color:gray;font-weight:400;margin-left:0.5rem">'
+        f'{fetched_at} 조회</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    PERCENT_TICKERS = {"^TNX"}  # 값 자체가 이미 %인 지표(국채 금리)
 
     cards = []
     for item in MARKET_INDICES:
@@ -2275,10 +2298,8 @@ def render_market_indices():
         else:
             cur = info["current"]
             chg = info["change_pct"]
-            if item["ticker"] == "^TNX":
+            if item["ticker"] in PERCENT_TICKERS:
                 value_str = f"{cur:,.2f}%"
-            elif item["ticker"] == "BTC-USD":
-                value_str = f"${cur:,.0f}"
             else:
                 value_str = f"{cur:,.2f}" if abs(cur) < 1000 else f"{cur:,.0f}"
             change_str = f"{chg:+.2f}%"
