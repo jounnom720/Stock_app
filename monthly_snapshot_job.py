@@ -417,7 +417,12 @@ def main():
     yearmonth = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     log.info("대상 월: %s", yearmonth)
 
-    service_account_json = json.loads(_env("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    raw_sa_json = _env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    log.info(
+        "[진단] GOOGLE_SERVICE_ACCOUNT_JSON 길이=%d, 시작=%r, 끝=%r",
+        len(raw_sa_json), raw_sa_json[:15], raw_sa_json[-15:],
+    )
+    service_account_json = json.loads(raw_sa_json)
     accounts_spreadsheet_id = _env("ACCOUNTS_SPREADSHEET_ID")
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = _env("GOOGLE_OAUTH_CLIENT_SECRET")
