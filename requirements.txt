@@ -13,3 +13,4 @@ setuptools==75.6.0
 pykrx
 google-auth-oauthlib==1.2.1
 google-api-python-client==2.149.0
+cryptography==43.0.3
