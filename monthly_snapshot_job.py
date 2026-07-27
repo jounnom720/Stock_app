@@ -456,7 +456,8 @@ def main():
     accounts_spreadsheet_id = _env("ACCOUNTS_SPREADSHEET_ID")
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = _env("GOOGLE_OAUTH_CLIENT_SECRET")
-    secret_key = _env("AUTH_SECRET_KEY")
+    secret_key = _env("AUTH_SECRET_KEY").strip()
+    log.info("[진단] AUTH_SECRET_KEY 길이=%d (Streamlit의 [auth] secret_key 길이와 같아야 함)", len(secret_key))
 
     sa_creds = ServiceAccountCredentials.from_service_account_info(
         service_account_json,
