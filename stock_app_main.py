@@ -1039,14 +1039,15 @@ def show_login():
         auth_url, _ = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="true",
-            # [변경] prompt="consent"였던 것을 "select_account"로 변경.
-            # "consent"는 매번 강제로 권한 동의 화면을 띄우는 옵션이었다. 이제 refresh_token을
-            # 화이트리스트 시트에 영구 저장해두므로(save_user_refresh_token), 최초 1회만 동의를
-            # 받으면 되고 재로그인 때는 굳이 매번 동의 화면을 강제할 필요가 없다.
-            # "select_account"는 계정 선택 화면만 보여주고, 이미 이 앱에 동의한 계정이면
-            # 구글이 알아서 동의 화면을 생략해준다. (완전히 새로운 계정은 구글이 자체적으로
-            # 여전히 동의 화면을 보여준다 — 이건 구글의 필수 정책이라 우리가 끌 수 없다.)
-            prompt="select_account",
+            # [재변경] "select_account"로 바꿨다가 다시 "consent"로 되돌림.
+            # select_account는 이미 동의한 계정에게는 구글이 refresh_token을 아예 안 줄 수 있는데,
+            # 이러면 access_token이 만료된 뒤(보통 1시간) 갱신할 방법이 없어 모든 구글시트
+            # 접근이 한꺼번에 RefreshError로 끊기는 실제 장애가 발생했다. "동의 화면을 매번
+            # 보여주더라도 refresh_token을 확실히 받는 것"이 세션이 끊기는 것보다 안전하다.
+            # 대신 이미 저장된 refresh_token으로 조용히 재로그인되는 세션 복구 경로
+            # (build_credentials_from_refresh_token)는 그대로 살아있어, 브라우저 세션이 유지되는
+            # 동안이나 24시간 이내 재방문 시에는 이 동의 화면 자체를 볼 일이 없다.
+            prompt="consent",
             code_challenge=code_challenge,
             code_challenge_method="S256",
             state=code_verifier,
