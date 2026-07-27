@@ -40,4 +40,4 @@ jobs:
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           AUTH_SECRET_KEY: ${{ secrets.AUTH_SECRET_KEY }}
           FORCE_RUN: ${{ github.event.inputs.force_run == 'true' && '1' || '' }}
-        run: python automation/monthly_snapshot_job.py
+        run: python monthly_snapshot_job.py
