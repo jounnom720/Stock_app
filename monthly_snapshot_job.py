@@ -417,9 +417,19 @@ def main():
     yearmonth = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     log.info("대상 월: %s", yearmonth)
 
-    raw_sa_json = _env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    # base64로 인코딩된 값을 기대한다 (사람이 JSON 파일을 직접 복사/붙여넣기 하면
+    # private_key 안의 '\n' 이스케이프가 실제 줄바꿈으로 깨지는 사고가 반복되어,
+    # 아예 복사 실수가 불가능한 base64 한 줄 문자열 방식으로 바꿨다).
+    raw_b64 = _env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    try:
+        raw_sa_json = base64.b64decode(raw_b64).decode("utf-8")
+    except Exception as e:
+        raise RuntimeError(
+            f"GOOGLE_SERVICE_ACCOUNT_JSON base64 디코딩 실패: {e} "
+            f"(base64로 인코딩한 값을 넣었는지 확인하세요)"
+        )
     log.info(
-        "[진단] GOOGLE_SERVICE_ACCOUNT_JSON 길이=%d, 시작=%r, 끝=%r",
+        "[진단] 디코딩된 JSON 길이=%d, 시작=%r, 끝=%r",
         len(raw_sa_json), raw_sa_json[:15], raw_sa_json[-15:],
     )
     service_account_json = json.loads(raw_sa_json)
