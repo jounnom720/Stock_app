@@ -634,19 +634,24 @@ def load_accounts_df() -> pd.DataFrame:
     """'사용자계정' 시트를 불러온다. 로그인·세션복구·관리자 메뉴 등 여러 곳에서 호출되므로
     캐시가 없으면 매 상호작용(재실행)마다 API를 새로 때려 429(할당량 초과) 위험이 커진다.
     계정 추가/수정/삭제/승인 등 쓰기 작업 직후에는 load_accounts_df.clear()로 즉시 무효화하여
-    캐시 때문에 방금 한 변경이 화면에 안 보이는 일이 없도록 한다."""
-    try:
-        spreadsheet = get_accounts_spreadsheet()
-        if spreadsheet is None:
-            return pd.DataFrame()
-        ws = _call_with_retry(spreadsheet.worksheet, "사용자계정")
-        return pd.DataFrame(_call_with_retry(ws.get_all_records))
-    except Exception as e:
-        logging.warning("계정 목록 로드 실패: %s", e)
-        return pd.DataFrame()
+    캐시 때문에 방금 한 변경이 화면에 안 보이는 일이 없도록 한다.
+
+    [중요] 조회에 실패하면(네트워크 오류, 콜드 스타트 시 일시적 오류, API 할당량 초과 등)
+    빈 DataFrame을 조용히 반환하지 않고 예외를 그대로 던진다. 예전에는 실패 시 빈 DataFrame을
+    반환했는데, 그러면 호출부(get_whitelist_status)가 '조회 실패'와 '이메일이 정말 화이트리스트에
+    없음'을 구분하지 못해 일시적 오류를 '완전히 새로운 사용자'로 오인하고 자동으로 승인대기
+    등록을 해버리는 사고가 있었다 (실제 활성 계정인데도 콜드 스타트 타이밍에 걸리면 매번 새로
+    등록되는 버그)."""
+    spreadsheet = get_accounts_spreadsheet()
+    if spreadsheet is None:
+        raise RuntimeError("화이트리스트 시트에 연결하지 못했습니다 (서비스 계정 인증 실패).")
+    ws = _call_with_retry(spreadsheet.worksheet, "사용자계정")
+    return pd.DataFrame(_call_with_retry(ws.get_all_records))
 
 def get_whitelist_status(email: str):
-    """화이트리스트 시트에서 이메일로 계정 정보를 조회. 없으면 None, 있으면 해당 행(Series) 반환."""
+    """화이트리스트 시트에서 이메일로 계정 정보를 조회. 없으면 None, 있으면 해당 행(Series) 반환.
+    조회 자체가 실패하면(load_accounts_df가 예외를 던지면) 그 예외를 그대로 위로 전파한다 —
+    호출부가 이 예외와 '정상 조회했지만 없음(None)'을 반드시 구분해서 처리해야 하기 때문이다."""
     df = load_accounts_df()
     if df.empty or "이메일" not in df.columns or not email:
         return None
@@ -657,8 +662,17 @@ def get_whitelist_status(email: str):
 
 def register_pending_request(email: str, name: str) -> bool:
     """화이트리스트에 없는 이메일이 처음 로그인 시도하면 '승인대기' 상태로 자동 등록.
-    관리자가 '가입 승인' 탭에서 승인해야 실제로 앱을 사용할 수 있다."""
+    관리자가 '가입 승인' 탭에서 승인해야 실제로 앱을 사용할 수 있다.
+
+    [이중 방어] 호출부에서 이미 '화이트리스트에 없음'을 확인하고 불렀더라도, 혹시 모를
+    경합(같은 이메일로 거의 동시에 두 번 로그인 시도 등)에 대비해 실제로 쓰기 직전에
+    캐시를 비우고 한 번 더 조회한다. 이미 어떤 상태로든 등록되어 있으면 중복으로
+    추가하지 않고 그냥 False를 반환한다."""
     try:
+        load_accounts_df.clear()
+        if get_whitelist_status(email) is not None:
+            logging.info("승인 대기 등록 건너뜀 - 이미 등록된 이메일: %s", email)
+            return False
         spreadsheet = get_accounts_spreadsheet()
         if spreadsheet is None:
             return False
@@ -968,10 +982,19 @@ def show_login():
             st.error("Google 계정 정보를 가져오지 못했습니다. 다시 시도해주세요.")
             return
 
-        status_row = get_whitelist_status(email)
+        try:
+            status_row = get_whitelist_status(email)
+        except Exception as e:
+            logging.warning("화이트리스트 조회 실패(로그인 중): %s", e)
+            st.error(
+                "계정 확인 중 일시적인 오류가 발생했습니다. "
+                "잠시 후 'Google 계정으로 로그인' 버튼을 다시 눌러주세요."
+            )
+            return
 
         if status_row is None:
-            # 처음 시도하는 이메일 → 승인대기로 자동 등록
+            # 조회는 정상적으로 됐지만(예외 없음) 화이트리스트에 정말 없는 경우에만
+            # 신규 사용자로 간주해 승인대기로 자동 등록한다.
             register_pending_request(email, email.split("@")[0])
             st.warning(
                 "처음 로그인하시는 계정이라 승인 대기 등록을 완료했습니다. "
@@ -1986,7 +2009,12 @@ def render_admin_panel():
 
                 # 이 메뉴가 열려있는 동안 모든 탭이 계정 목록을 공유해서 씀
                 # (탭마다 따로 불러오면 구글시트 API 호출이 3배로 늘어나 429 오류 위험이 커짐)
-                df_acc = load_accounts_df()
+                try:
+                    df_acc = load_accounts_df()
+                except Exception as e:
+                    logging.warning("화이트리스트 조회 실패(관리자 메뉴): %s", e)
+                    st.error("계정 목록을 불러오지 못했습니다. 잠시 후 새로고침해서 다시 시도해주세요.")
+                    return
 
                 tab_a, tab_pending, tab_b, tab_c = st.tabs(["계정 관리", "🆕 가입 승인", "사용자 현황", "시스템"])
 
@@ -3480,7 +3508,11 @@ if __name__ == "__main__" or True:
         if token:
             restored_email = verify_session_token(token)
             if restored_email:
-                status_row = get_whitelist_status(restored_email)
+                try:
+                    status_row = get_whitelist_status(restored_email)
+                except Exception as e:
+                    logging.warning("화이트리스트 조회 실패(세션 복구): %s", e)
+                    status_row = None  # 실패 시 자동 로그인만 건너뛰고, 아래에서 일반 로그인 화면으로 진행
                 if status_row is not None and str(status_row.get("상태", "")).strip() == "활성":
                     cached_credentials = _restore_credentials(restored_email)
                     if cached_credentials is None:
