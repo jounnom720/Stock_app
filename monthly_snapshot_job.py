@@ -29,6 +29,7 @@ calc_asset_summary / enrich_with_prices)은 stock_app_main.py에 있는 같은 �
 """
 
 import os
+import re
 import sys
 import json
 import base64
@@ -423,17 +424,11 @@ def main():
     raw_b64 = _env("GOOGLE_SERVICE_ACCOUNT_JSON")
 
     # 붙여넣기 과정에서 섞여 들어올 수 있는 공백/줄바꿈/탭을 전부 제거 (base64 자체에는
-    # 원래 이런 문자가 없어야 하므로, 있다면 실수로 섞인 것이니 제거하고 진행한다).
+    # 원래 이런 문자가 없어야 하므로, 있다면 실수로 섞인 것이니 조용히 제거하고 진행한다).
     cleaned_b64 = "".join(raw_b64.split())
-    if cleaned_b64 != raw_b64:
-        log.warning(
-            "[진단] GOOGLE_SERVICE_ACCOUNT_JSON 값에 공백/줄바꿈이 섞여있어 제거했습니다. "
-            "(원래 길이=%d → 정리 후 길이=%d)", len(raw_b64), len(cleaned_b64),
-        )
 
     # base64 알파벳(A-Z a-z 0-9 + / =)이 아닌 문자가 섞여 있으면 여기서 바로 명확히 알려준다.
-    import re as _re
-    invalid_chars = sorted(set(_re.sub(r"[A-Za-z0-9+/=]", "", cleaned_b64)))
+    invalid_chars = sorted(set(re.sub(r"[A-Za-z0-9+/=]", "", cleaned_b64)))
     if invalid_chars:
         raise RuntimeError(
             f"GOOGLE_SERVICE_ACCOUNT_JSON에 base64가 아닌 문자가 섞여 있습니다: {invalid_chars!r} "
@@ -448,16 +443,12 @@ def main():
             f"GOOGLE_SERVICE_ACCOUNT_JSON base64 디코딩 실패: {e} "
             f"(base64로 인코딩한 값을 넣었는지, 값이 잘리지 않았는지 확인하세요)"
         )
-    log.info(
-        "[진단] 디코딩된 JSON 길이=%d, 시작=%r, 끝=%r",
-        len(raw_sa_json), raw_sa_json[:15], raw_sa_json[-15:],
-    )
     service_account_json = json.loads(raw_sa_json)
     accounts_spreadsheet_id = _env("ACCOUNTS_SPREADSHEET_ID")
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = _env("GOOGLE_OAUTH_CLIENT_SECRET")
     secret_key = _env("AUTH_SECRET_KEY").strip()
-    log.info("[진단] AUTH_SECRET_KEY 길이=%d (Streamlit의 [auth] secret_key 길이와 같아야 함)", len(secret_key))
+
 
     sa_creds = ServiceAccountCredentials.from_service_account_info(
         service_account_json,
