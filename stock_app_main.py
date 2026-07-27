@@ -501,16 +501,34 @@ def _is_quota_error(e: Exception) -> bool:
     msg = str(e)
     return "429" in msg or "Quota exceeded" in msg or "RESOURCE_EXHAUSTED" in msg
 
+def _is_transient_error(e: Exception) -> bool:
+    """재시도해볼 가치가 있는 '일시적' 오류인지 판별.
+    할당량 초과(429)뿐 아니라, 서버가 막 깨어나는 콜드 스타트 순간에 흔히 나는
+    연결 타임아웃·연결 재설정·구글 쪽 5xx 오류까지 포함한다. 이런 오류들은 보통
+    몇 초 뒤 재시도하면 정상적으로 해결되는데, 예전에는 429만 재시도 대상이라
+    콜드 스타트 때 화이트리스트 조회가 한 번 실패하면 바로 포기해버리는 문제가 있었다."""
+    if _is_quota_error(e):
+        return True
+    msg = str(e)
+    transient_markers = (
+        "500", "502", "503", "504",
+        "Timeout", "timed out", "Connection aborted", "Connection reset",
+        "RemoteDisconnected", "ConnectionError", "Temporary failure",
+    )
+    return any(marker in msg for marker in transient_markers)
+
 def _call_with_retry(func, *args, max_retries: int = 3, base_delay: float = 2.0, **kwargs):
-    """구글 API 호출 중 429(분당 요청 한도 초과) 오류가 나면 잠깐 기다렸다가 자동으로 재시도한다.
-    '전체 캐시 초기화'나 '시세 새로고침'을 짧은 시간 안에 여러 번 누르는 경우를 대비."""
+    """구글 API 호출 중 일시적 오류(할당량 초과, 콜드 스타트 시 타임아웃/연결 오류 등)가 나면
+    잠깐 기다렸다가 자동으로 재시도한다.
+    '전체 캐시 초기화'나 '시세 새로고침'을 짧은 시간 안에 여러 번 누르는 경우,
+    그리고 서버가 방금 깨어나 첫 요청이 불안정한 경우를 대비."""
     last_exc = None
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
         except Exception as e:
             last_exc = e
-            if _is_quota_error(e) and attempt < max_retries - 1:
+            if _is_transient_error(e) and attempt < max_retries - 1:
                 time.sleep(base_delay * (attempt + 1))
                 continue
             raise
