@@ -19,8 +19,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from cryptography.fernet import Fernet, InvalidToken
-from datetime import datetime, date, timedelta
-from pykrx import stock as krx_stock
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import logging
 import hmac
@@ -122,28 +121,7 @@ def get_account_color(acct_name: str, acct_order: list) -> tuple:
         idx = 0
     return ACCOUNT_COLOR_PALETTE[idx % len(ACCOUNT_COLOR_PALETTE)]
 
-# ============================================================
-# 주요 시장 지표 마스터 (대시보드 상단 카드용)
-# 순서: 코스피-코스닥-원달러환율-달러인덱스-WTI유가-브렌트유-국제금-나스닥종합-나스닥100-
-#       다우존스-S&P500-VIX-미국 국채 10년
-# ============================================================
-MARKET_INDICES = [
-    {"group": "국내 증시",     "name": "코스피",       "ticker": "^KS11"},
-    {"group": "국내 증시",     "name": "코스닥",       "ticker": "^KQ11"},
-    {"group": "환율",          "name": "원달러환율",   "ticker": "KRW=X"},
-    {"group": "환율",          "name": "달러인덱스",   "ticker": "DX-Y.NYB"},
-    {"group": "원자재",        "name": "WTI 유가",     "ticker": "CL=F"},
-    {"group": "원자재",        "name": "브렌트유",     "ticker": "BZ=F"},
-    {"group": "원자재",        "name": "국제 금",      "ticker": "GC=F"},
-    {"group": "미국 증시",     "name": "나스닥종합",   "ticker": "^IXIC"},
-    {"group": "미국 증시",     "name": "나스닥100",    "ticker": "^NDX"},
-    {"group": "미국 증시",     "name": "다우존스",     "ticker": "^DJI"},
-    {"group": "미국 증시",     "name": "S&P500",       "ticker": "^GSPC"},
-    {"group": "위험심리·금리", "name": "VIX",          "ticker": "^VIX"},
-    {"group": "위험심리·금리", "name": "미국 국채 10년", "ticker": "^TNX"},
-]
 
-# ============================================================
 # Google Sheets 연결 (서비스 계정 — 화이트리스트 '사용자계정' 시트 전용)
 # ============================================================
 SHEET_NAMES = {
@@ -1135,7 +1113,7 @@ def get_current_price(code: str, prices: dict) -> float | None:
 
 def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
     """여러 티커의 (현재가, 전일종가) 기준 등락률을 일괄 조회하고, 실패한 티커만 개별 재시도.
-    get_market_index_data()와 get_day_change()가 공통으로 사용하는 핵심 로직.
+    get_day_change()가 사용하는 핵심 로직.
 
     [중요] 여러 티커를 한 번에 yf.download()로 묶어 받으면, 하나의 공유된 날짜 인덱스로
     합쳐진다. 그런데 비트코인처럼 주말에도 거래되는 종목과 코스피·코스닥처럼 주말에 거래되지
@@ -1178,46 +1156,6 @@ def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
         except Exception as e:
             logging.warning("개별 등락률 조회 실패 [%s]: %s", t, e)
     return result
-
-def _fetch_krx_index_change(krx_ticker: str):
-    """코스피/코스닥은 야후 파이낸스(^KS11, ^KQ11) 대신 pykrx로 한국거래소(KRX) 데이터를
-    직접 가져온다. 야후는 국내 지수 갱신이 지연되거나(특히 변동성이 큰 날) 다른 티커와 묶어서
-    조회할 때 날짜가 어긋나는 경우가 있어, 오늘처럼 등락폭이 큰 날에는 '전일 대비'가 실제로는
-    '2거래일 전 대비'로 계산되는 문제가 있었다. KRX 원천 데이터를 쓰면 이 문제를 원천적으로 피한다.
-    krx_ticker: "1001"=코스피, "2001"=코스닥"""
-    try:
-        today = datetime.now(KST).strftime("%Y%m%d")
-        from_date = (datetime.now(KST) - timedelta(days=14)).strftime("%Y%m%d")
-        df = krx_stock.get_index_ohlcv_by_date(from_date, today, krx_ticker)
-        df = df[df["종가"] > 0]
-        if len(df) >= 2:
-            cur = float(df["종가"].iloc[-1])
-            prev = float(df["종가"].iloc[-2])
-            if prev != 0:
-                return {"current": cur, "change_pct": (cur - prev) / prev * 100}
-    except Exception as e:
-        logging.warning("KRX 지수 조회 실패 [%s]: %s", krx_ticker, e)
-    return None
-
-@st.cache_data(ttl=300)
-def get_market_index_data() -> dict[str, dict]:
-    """주요 시장 지표(코스피·환율·VIX 등)의 현재가와 전일 대비 등락률을 조회.
-    코스피(^KS11)·코스닥(^KQ11)은 KRX 원천 데이터(pykrx)로 별도 조회하고, 나머지는 야후에서
-    가져온다. 반환값에는 실제로 이 데이터를 가져온 시각("_fetched_at")도 함께 담아, 화면에
-    캐시된 시각이 아니라 '진짜 조회된 시각'을 정확히 표시할 수 있도록 한다."""
-    KRX_TICKER_MAP = {"^KS11": "1001", "^KQ11": "2001"}
-
-    yf_tickers = [m["ticker"] for m in MARKET_INDICES if m["ticker"] not in KRX_TICKER_MAP]
-    result = _fetch_current_and_prev_close(yf_tickers)
-
-    for yf_ticker, krx_code in KRX_TICKER_MAP.items():
-        krx_result = _fetch_krx_index_change(krx_code)
-        if krx_result:
-            result[yf_ticker] = krx_result
-
-    result["_fetched_at"] = now_kst()
-    return result
-
 
 @st.cache_data(ttl=300)
 def get_day_change(tickers: tuple) -> dict[str, dict]:
@@ -1754,33 +1692,6 @@ st.markdown("""
     color: var(--text-dim);
 }
 
-/* ── 주요 시장 지표 카드 (13개 전체를 한 그리드에 가로로 펼침) ── */
-.mkt-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 0.6rem;
-    margin-bottom: 2.2rem;
-}
-.mkt-card {
-    position: relative;
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 10px;
-    padding: 0.9rem 1.05rem 0.9rem 1.15rem;
-}
-.mkt-card::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 0.7rem; bottom: 0.7rem;
-    width: 3px;
-    border-radius: 2px;
-    background: var(--mkt-bar, var(--card-border));
-}
-.mkt-group-tag { font-size: 0.74rem; color: var(--text-dim2); margin-bottom: 0.2rem; }
-.mkt-name { font-size: 0.92rem; color: var(--text-dim); font-weight: 600; }
-.mkt-value { font-size: 1.35rem; font-weight: 700; margin-top: 0.2rem; }
-.mkt-change { font-size: 0.92rem; font-weight: 600; margin-top: 0.2rem; }
-
 .section-title {
     font-size: 1.25rem;
     font-weight: 700;
@@ -2306,45 +2217,6 @@ def main(spreadsheet_id: str):
 # ============================================================
 # 탭1: 통합 대시보드
 # ============================================================
-def render_market_indices():
-    """대시보드 상단 주요 시장 지표 카드 — 13개 지표를 한 그리드에 가로로 펼쳐 배치."""
-    data = get_market_index_data()
-    fetched_at = data.get("_fetched_at", now_kst())
-    st.markdown(
-        f'<div class="section-title">주요 시장 지표'
-        f'<span style="font-size:0.75rem;color:gray;font-weight:400;margin-left:0.5rem">'
-        f'{fetched_at} 조회</span></div>',
-        unsafe_allow_html=True,
-    )
-
-    PERCENT_TICKERS = {"^TNX"}  # 값 자체가 이미 %인 지표(국채 금리)
-
-    cards = []
-    for item in MARKET_INDICES:
-        info = data.get(item["ticker"])
-        if info is None:
-            value_str = "-"
-            change_str = "조회 실패"
-            color = "#8a8d96"
-        else:
-            cur = info["current"]
-            chg = info["change_pct"]
-            if item["ticker"] in PERCENT_TICKERS:
-                value_str = f"{cur:,.2f}%"
-            else:
-                value_str = f"{cur:,.2f}" if abs(cur) < 1000 else f"{cur:,.0f}"
-            change_str = f"{chg:+.2f}%"
-            color = color_pnl(chg)
-        cards.append(f"""
-        <div class="mkt-card" style="--mkt-bar:{color}">
-            <div class="mkt-group-tag">{item['group']}</div>
-            <div class="mkt-name">{item['name']}</div>
-            <div class="mkt-value">{value_str}</div>
-            <div class="mkt-change" style="color:{color}">{change_str}</div>
-        </div>""")
-    st.markdown(f'<div class="mkt-row">{"".join(cards)}</div>', unsafe_allow_html=True)
-
-
 def render_holdings_treemap(holdings_df: pd.DataFrame):
     """보유종목 트리맵 — 사각형 크기=평가금액 비중, 색상=당일(전일 종가 대비) 등락률.
     같은 종목이 여러 계좌에 나뉘어 있으면 종목코드 기준으로 평가금액을 합산해서 하나로 표시.
@@ -2563,7 +2435,6 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
 
 def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
-    render_market_indices()
     render_holdings_treemap(holdings_df)
 
     s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
