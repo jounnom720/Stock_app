@@ -3087,7 +3087,9 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 def _fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
     """기술적 분석용 과거 일봉 데이터 조회. 전일 종가 기준이며 실시간 시세가 아니다."""
     try:
-        hist = yf.Ticker(ticker).history(period=period)
+        # auto_adjust=False: 배당 등으로 과거 가격을 보정하지 않은 '원래 가격' 그대로 가져온다.
+        # 보정된 가격을 쓰면 HTS/증권사 앱에서 보이는 숫자와 살짝 달라져 사용자가 혼란스러워한다.
+        hist = yf.Ticker(ticker).history(period=period, auto_adjust=False)
         if hist.empty:
             return pd.DataFrame()
         hist = hist.reset_index()
@@ -3194,8 +3196,14 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     # 종목코드 기준으로 계좌 합산 (같은 종목을 여러 계좌에 나눠 갖고 있어도 하나로만 표시)
     unique_codes = holdings_df[["종목코드", "종목명"]].drop_duplicates(subset="종목코드")
     options = {f"{row['종목명']} ({row['종목코드']})": row["종목코드"] for _, row in unique_codes.iterrows()}
+    labels = list(options.keys())
 
-    selected_label = st.selectbox("종목 선택", list(options.keys()), key="ta_ticker_select")
+    # 종목 선택 위젯 자체는 HTS처럼 거래량 차트 '아래'에 탭 형태로 배치할 것이므로,
+    # 여기서는 위젯을 만들지 않고 이전 선택값만 안전하게 읽어와 차트를 그리는 데 사용한다.
+    # (보유종목이 바뀌어 이전 선택값이 더 이상 없으면 첫 번째 종목으로 자동 대체)
+    if st.session_state.get("ta_ticker_select") not in options:
+        st.session_state["ta_ticker_select"] = labels[0]
+    selected_label = st.session_state["ta_ticker_select"]
     code = options[selected_label]
     ticker = get_asset_ticker(code)
 
@@ -3259,6 +3267,12 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         xaxis_rangeslider_visible=False,
     )
     st.plotly_chart(fig, width="stretch")
+
+    # ── 종목 선택 (HTS처럼 거래량 차트 바로 아래에 탭 형태로 배치) ──
+    st.radio(
+        "종목 선택", labels, horizontal=True,
+        key="ta_ticker_select", label_visibility="collapsed",
+    )
 
     # ── 최고가/최저가 요약 (숫자 카드) ──
     hi_col, lo_col = st.columns(2)
