@@ -3162,10 +3162,27 @@ def _calc_period_high_low(hist: pd.DataFrame) -> dict:
     }
 
 
+CANDLE_PERIOD_OPTIONS = {
+    "일봉": {"fetch_period": "1y", "resample": None, "unit": "일"},
+    "주봉": {"fetch_period": "3y", "resample": "W", "unit": "주"},
+    "월봉": {"fetch_period": "10y", "resample": "ME", "unit": "개월"},
+    "년봉": {"fetch_period": "max", "resample": "YE", "unit": "년"},
+}
+
+def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """일봉 데이터를 주봉/월봉/년봉으로 리샘플링. 시가는 기간의 첫 값, 고가/저가는 최대/최소,
+    종가는 기간의 마지막 값, 거래량은 합계로 집계한다 (증권사 HTS와 동일한 표준 방식)."""
+    df = hist.set_index("Date")
+    agg = df.resample(rule).agg({
+        "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum",
+    }).dropna(subset=["Close"])
+    return agg.reset_index()
+
+
 def render_technical_analysis(holdings_df: pd.DataFrame):
     st.markdown('<div class="section-title">기술적 분석</div>', unsafe_allow_html=True)
     st.caption(
-        "⚠ 전일 종가 기준 일봉 데이터로 계산합니다(실시간 아님). "
+        "⚠ 전일 종가 기준으로 계산합니다(실시간 아님). "
         "아래 수치는 매수·매도 신호가 아니라 통상적인 해석 기준을 참고용으로 제공하는 것이며, "
         "투자 판단과 책임은 본인에게 있습니다."
     )
@@ -3182,10 +3199,23 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     code = options[selected_label]
     ticker = get_asset_ticker(code)
 
-    hist = _fetch_price_history(ticker)
+    period_names = list(CANDLE_PERIOD_OPTIONS.keys())
+    selected_period_name = st.radio(
+        "기간", period_names, horizontal=True, key="ta_candle_period",
+    )
+    period_cfg = CANDLE_PERIOD_OPTIONS[selected_period_name]
+    unit = period_cfg["unit"]
+
+    hist = _fetch_price_history(ticker, period=period_cfg["fetch_period"])
     if hist.empty or len(hist) < 6:
         st.warning("이 종목은 과거 시세 데이터를 충분히 가져오지 못해 분석할 수 없습니다.")
         return
+
+    if period_cfg["resample"]:
+        hist = _resample_ohlcv(hist, period_cfg["resample"])
+        if len(hist) < 6:
+            st.warning(f"{selected_period_name} 기준으로는 데이터가 충분하지 않아 분석할 수 없습니다.")
+            return
 
     ind = _calc_technical_indicators(hist)
     hi_lo = _calc_period_high_low(hist)
@@ -3197,12 +3227,12 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     )
     fig.add_trace(go.Candlestick(
         x=hist["Date"], open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
-        name="일봉", increasing_line_color="#e35b5b", decreasing_line_color="#4a90d9",
+        name=selected_period_name, increasing_line_color="#e35b5b", decreasing_line_color="#4a90d9",
     ), row=1, col=1)
     for window, color in zip((5, 20, 60, 120), ("#f0a020", "#2ecc71", "#9b59b6", "#7f8c8d")):
         ma_series = hist["Close"].rolling(window).mean()
         fig.add_trace(go.Scatter(
-            x=hist["Date"], y=ma_series, name=f"{window}일 이동평균",
+            x=hist["Date"], y=ma_series, name=f"{window}{unit} 이동평균",
             line=dict(width=1.2, color=color, dash="dot"),
         ), row=1, col=1)
 
@@ -3243,11 +3273,11 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     for col, window in zip(gap_cols, (5, 20, 60, 120)):
         gap = ind.get(f"이격도{window}")
         with col:
-            st.metric(f"{window}일선 대비", f"{gap:+.1f}%" if gap is not None else "-")
+            st.metric(f"{window}{unit}선 대비", f"{gap:+.1f}%" if gap is not None else "-")
             st.caption(_gap_interpretation(gap))
 
     # ── RSI 요약 (이격도 카드와 동일하게, 설명 문구를 지표 바로 아래에 붙임) ──
-    st.markdown("##### RSI (14일)")
+    st.markdown(f"##### RSI (14{unit})")
     rsi = ind.get("RSI14")
     rsi_col, _, _, _ = st.columns(4)  # 이격도 카드와 같은 폭으로 맞춰 시각적 일관성 유지
     with rsi_col:
