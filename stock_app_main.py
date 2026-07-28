@@ -13,6 +13,7 @@ import numpy as np
 import gspread
 import yfinance as yf
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google.oauth2.credentials import Credentials as UserOAuthCredentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -3090,7 +3091,7 @@ def _fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
         if hist.empty:
             return pd.DataFrame()
         hist = hist.reset_index()
-        return hist[["Date", "Close", "Volume"]]
+        return hist[["Date", "Open", "High", "Low", "Close", "Volume"]]
     except Exception as e:
         logging.warning("과거 시세 조회 실패 [%s]: %s", ticker, e)
         return pd.DataFrame()
@@ -3149,6 +3150,18 @@ def _gap_interpretation(gap) -> str:
     return "이동평균과 비슷한 수준입니다."
 
 
+def _calc_period_high_low(hist: pd.DataFrame) -> dict:
+    """조회 기간(현재 1년) 중 최고가·최저가와 그 날짜를 계산."""
+    idx_high = hist["High"].idxmax()
+    idx_low = hist["Low"].idxmin()
+    return {
+        "최고가": float(hist.loc[idx_high, "High"]),
+        "최고가_날짜": hist.loc[idx_high, "Date"],
+        "최저가": float(hist.loc[idx_low, "Low"]),
+        "최저가_날짜": hist.loc[idx_low, "Date"],
+    }
+
+
 def render_technical_analysis(holdings_df: pd.DataFrame):
     st.markdown('<div class="section-title">기술적 분석</div>', unsafe_allow_html=True)
     st.caption(
@@ -3175,22 +3188,54 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         return
 
     ind = _calc_technical_indicators(hist)
+    hi_lo = _calc_period_high_low(hist)
 
-    # ── 차트: 종가 + 이동평균선 ──
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=hist["Date"], y=hist["Close"], name="종가", line=dict(width=2)))
-    for window, color in zip((5, 20, 60, 120), ("#f0a020", "#4a90d9", "#9b59b6", "#7f8c8d")):
+    # ── 차트: 캔들차트 + 이동평균선(위) + 거래량 막대(아래) ──
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.72, 0.28], vertical_spacing=0.03,
+    )
+    fig.add_trace(go.Candlestick(
+        x=hist["Date"], open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
+        name="일봉", increasing_line_color="#e35b5b", decreasing_line_color="#4a90d9",
+    ), row=1, col=1)
+    for window, color in zip((5, 20, 60, 120), ("#f0a020", "#2ecc71", "#9b59b6", "#7f8c8d")):
         ma_series = hist["Close"].rolling(window).mean()
         fig.add_trace(go.Scatter(
             x=hist["Date"], y=ma_series, name=f"{window}일 이동평균",
             line=dict(width=1.2, color=color, dash="dot"),
-        ))
+        ), row=1, col=1)
+
+    # 기간 내 최고가/최저가 라벨
+    fig.add_annotation(
+        x=hi_lo["최고가_날짜"], y=hi_lo["최고가"], text=f"최고 {hi_lo['최고가']:,.0f}",
+        showarrow=True, arrowhead=1, yshift=12, font=dict(size=11, color="#e35b5b"), row=1, col=1,
+    )
+    fig.add_annotation(
+        x=hi_lo["최저가_날짜"], y=hi_lo["최저가"], text=f"최저 {hi_lo['최저가']:,.0f}",
+        showarrow=True, arrowhead=1, yshift=-12, font=dict(size=11, color="#4a90d9"), row=1, col=1,
+    )
+
+    volume_colors = [
+        "#e35b5b" if c >= o else "#4a90d9" for o, c in zip(hist["Open"], hist["Close"])
+    ]
+    fig.add_trace(go.Bar(
+        x=hist["Date"], y=hist["Volume"], name="거래량", marker_color=volume_colors, showlegend=False,
+    ), row=2, col=1)
+
     fig.update_layout(
-        height=380, margin=dict(l=10, r=10, t=30, b=10),
+        height=520, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        xaxis_title=None, yaxis_title=None,
+        xaxis_rangeslider_visible=False,
     )
     st.plotly_chart(fig, width="stretch")
+
+    # ── 최고가/최저가 요약 (숫자 카드) ──
+    hi_col, lo_col = st.columns(2)
+    with hi_col:
+        st.metric("기간 내 최고가", f"{hi_lo['최고가']:,.0f}", help=f"{hi_lo['최고가_날짜'].strftime('%Y-%m-%d')} 기록")
+    with lo_col:
+        st.metric("기간 내 최저가", f"{hi_lo['최저가']:,.0f}", help=f"{hi_lo['최저가_날짜'].strftime('%Y-%m-%d')} 기록")
 
     # ── 이격도 요약 ──
     st.markdown("##### 이동평균 이격도")
@@ -3201,13 +3246,12 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
             st.metric(f"{window}일선 대비", f"{gap:+.1f}%" if gap is not None else "-")
             st.caption(_gap_interpretation(gap))
 
-    # ── RSI 요약 ──
+    # ── RSI 요약 (이격도 카드와 동일하게, 설명 문구를 지표 바로 아래에 붙임) ──
     st.markdown("##### RSI (14일)")
     rsi = ind.get("RSI14")
-    col_rsi, col_desc = st.columns([1, 3])
-    with col_rsi:
+    rsi_col, _, _, _ = st.columns(4)  # 이격도 카드와 같은 폭으로 맞춰 시각적 일관성 유지
+    with rsi_col:
         st.metric("RSI", f"{rsi:.1f}" if rsi is not None else "-")
-    with col_desc:
         st.caption(_rsi_interpretation(rsi))
 
 
