@@ -2241,7 +2241,7 @@ def main(spreadsheet_id: str):
     # 크게 바뀌는 위젯을 클릭하면, Streamlit이 화면을 완전히 새로 그리는 걸로 착각해
     # 첫 번째 탭으로 튕겨나가는 버그가 있다 (Streamlit 자체의 알려진 미해결 이슈).
     # session_state에 직접 선택된 탭을 저장하는 라디오 버튼으로 대체해 이 문제를 원천 차단한다.
-    MAIN_TABS = ["📈 통합 대시보드", "💼 보유 종목", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"]
+    MAIN_TABS = ["📈 통합 대시보드", "💼 보유 종목", "📐 기술적 분석", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"]
 
     selected_main_tab = st.radio(
         "메인 메뉴", MAIN_TABS, horizontal=True,
@@ -2254,10 +2254,12 @@ def main(spreadsheet_id: str):
     elif selected_main_tab == MAIN_TABS[1]:
         render_holdings(holdings_df, prices, nonstock_df)
     elif selected_main_tab == MAIN_TABS[2]:
-        render_trades(trade_df)
+        render_technical_analysis(holdings_df)
     elif selected_main_tab == MAIN_TABS[3]:
-        render_cashflow(trade_df, cashlog_df)
+        render_trades(trade_df)
     elif selected_main_tab == MAIN_TABS[4]:
+        render_cashflow(trade_df, cashlog_df)
+    elif selected_main_tab == MAIN_TABS[5]:
         render_data_mgmt(nonstock_df, cash_df)
 
 
@@ -3078,7 +3080,139 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
 
 # ============================================================
-# 탭3: 거래이력
+# 탭3: 기술적 분석
+# ============================================================
+@st.cache_data(ttl=86400)  # 일봉 기준 지표라 하루 한 번만 갱신해도 충분 (야후 API 부담도 줄임)
+def _fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
+    """기술적 분석용 과거 일봉 데이터 조회. 전일 종가 기준이며 실시간 시세가 아니다."""
+    try:
+        hist = yf.Ticker(ticker).history(period=period)
+        if hist.empty:
+            return pd.DataFrame()
+        hist = hist.reset_index()
+        return hist[["Date", "Close", "Volume"]]
+    except Exception as e:
+        logging.warning("과거 시세 조회 실패 [%s]: %s", ticker, e)
+        return pd.DataFrame()
+
+
+def _calc_technical_indicators(hist: pd.DataFrame) -> dict:
+    """이동평균·이격도·RSI(14)를 계산해서 반환. 매수/매도 신호는 만들지 않고,
+    수치와 통상적인 해석 기준만 함께 제공한다 — 최종 판단은 사용자 몫이라는 원칙."""
+    close = hist["Close"]
+    result = {"현재가": float(close.iloc[-1])}
+
+    for window in (5, 20, 60, 120):
+        if len(close) >= window:
+            ma = close.rolling(window).mean().iloc[-1]
+            result[f"MA{window}"] = float(ma)
+            result[f"이격도{window}"] = (result["현재가"] - ma) / ma * 100 if ma else None
+        else:
+            result[f"MA{window}"] = None
+            result[f"이격도{window}"] = None
+
+    # RSI(14) — 표준 공식(평균 상승폭/평균 하락폭 비율)
+    if len(close) >= 15:
+        delta = close.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / avg_loss.replace(0, pd.NA)
+        rsi = 100 - (100 / (1 + rs))
+        result["RSI14"] = float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else None
+    else:
+        result["RSI14"] = None
+
+    return result
+
+
+def _rsi_interpretation(rsi) -> str:
+    """RSI 수치의 통상적인 해석 기준만 담백하게 서술 (매수/매도 결론 없음)."""
+    if rsi is None:
+        return "데이터가 부족해 계산할 수 없습니다."
+    if rsi >= 70:
+        return "통상 70 이상은 과매수 구간으로 해석됩니다."
+    if rsi <= 30:
+        return "통상 30 이하는 과매도 구간으로 해석됩니다."
+    return "통상 30~70 사이는 중립 구간으로 해석됩니다."
+
+
+def _gap_interpretation(gap) -> str:
+    """이격도 수치의 통상적인 해석 기준만 담백하게 서술."""
+    if gap is None:
+        return "데이터가 부족해 계산할 수 없습니다."
+    if gap > 5:
+        return "이동평균보다 다소 높은 위치입니다."
+    if gap < -5:
+        return "이동평균보다 다소 낮은 위치입니다."
+    return "이동평균과 비슷한 수준입니다."
+
+
+def render_technical_analysis(holdings_df: pd.DataFrame):
+    st.markdown('<div class="section-title">기술적 분석</div>', unsafe_allow_html=True)
+    st.caption(
+        "⚠ 전일 종가 기준 일봉 데이터로 계산합니다(실시간 아님). "
+        "아래 수치는 매수·매도 신호가 아니라 통상적인 해석 기준을 참고용으로 제공하는 것이며, "
+        "투자 판단과 책임은 본인에게 있습니다."
+    )
+
+    if holdings_df.empty:
+        st.info("보유 종목이 없습니다.")
+        return
+
+    # 종목코드 기준으로 계좌 합산 (같은 종목을 여러 계좌에 나눠 갖고 있어도 하나로만 표시)
+    unique_codes = holdings_df[["종목코드", "종목명"]].drop_duplicates(subset="종목코드")
+    options = {f"{row['종목명']} ({row['종목코드']})": row["종목코드"] for _, row in unique_codes.iterrows()}
+
+    selected_label = st.selectbox("종목 선택", list(options.keys()), key="ta_ticker_select")
+    code = options[selected_label]
+    ticker = get_asset_ticker(code)
+
+    hist = _fetch_price_history(ticker)
+    if hist.empty or len(hist) < 6:
+        st.warning("이 종목은 과거 시세 데이터를 충분히 가져오지 못해 분석할 수 없습니다.")
+        return
+
+    ind = _calc_technical_indicators(hist)
+
+    # ── 차트: 종가 + 이동평균선 ──
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist["Date"], y=hist["Close"], name="종가", line=dict(width=2)))
+    for window, color in zip((5, 20, 60, 120), ("#f0a020", "#4a90d9", "#9b59b6", "#7f8c8d")):
+        ma_series = hist["Close"].rolling(window).mean()
+        fig.add_trace(go.Scatter(
+            x=hist["Date"], y=ma_series, name=f"{window}일 이동평균",
+            line=dict(width=1.2, color=color, dash="dot"),
+        ))
+    fig.update_layout(
+        height=380, margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        xaxis_title=None, yaxis_title=None,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    # ── 이격도 요약 ──
+    st.markdown("##### 이동평균 이격도")
+    gap_cols = st.columns(4)
+    for col, window in zip(gap_cols, (5, 20, 60, 120)):
+        gap = ind.get(f"이격도{window}")
+        with col:
+            st.metric(f"{window}일선 대비", f"{gap:+.1f}%" if gap is not None else "-")
+            st.caption(_gap_interpretation(gap))
+
+    # ── RSI 요약 ──
+    st.markdown("##### RSI (14일)")
+    rsi = ind.get("RSI14")
+    col_rsi, col_desc = st.columns([1, 3])
+    with col_rsi:
+        st.metric("RSI", f"{rsi:.1f}" if rsi is not None else "-")
+    with col_desc:
+        st.caption(_rsi_interpretation(rsi))
+
+
+# ============================================================
+# 탭4: 거래이력
 # ============================================================
 def render_trades(trade_df):
     st.markdown('<div class="section-title">거래이력</div>', unsafe_allow_html=True)
@@ -3146,7 +3280,7 @@ def render_trades(trade_df):
 
 
 # ============================================================
-# 탭4: 현금흐름 (거래이력 기반 자동 계산 — 별도 시트 없음)
+# 탭5: 현금흐름 (거래이력 기반 자동 계산 — 별도 시트 없음)
 # ============================================================
 def render_cashflow(trade_df, cashlog_df=None):
     st.markdown('<div class="section-title">자금흐름 추적</div>', unsafe_allow_html=True)
@@ -3348,7 +3482,7 @@ def _render_cashlog_section(cashlog_df):
 
 
 # ============================================================
-# 탭4: 데이터 관리
+# 탭6: 데이터 관리
 # ============================================================
 def render_data_mgmt(nonstock_df, cash_df):
     st.markdown('<div class="section-title">비주식자산 현황 (TDF · 현금성자산)</div>', unsafe_allow_html=True)
