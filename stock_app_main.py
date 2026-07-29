@@ -1917,6 +1917,29 @@ div[class*="st-key-admin_panel_wrap"] div[data-testid="stExpander"] summary {
 div[class*="st-key-admin_panel_wrap"] div[data-testid="stExpander"] summary:hover {
     color: #ffce54;
 }
+
+/* ── 기술적 분석: 종목 선택을 HTS 하단 탭처럼(동그라미 없이, 선택된 것만 밑줄) ── */
+div[class*="st-key-ta_ticker_tabs"] div[role="radiogroup"] {
+    gap: 0;
+    border-bottom: 1px solid var(--card-border);
+    flex-wrap: wrap;
+}
+div[class*="st-key-ta_ticker_tabs"] label {
+    margin: 0 !important;
+    padding: 0.4rem 0.85rem;
+    border-radius: 0;
+    cursor: pointer;
+}
+div[class*="st-key-ta_ticker_tabs"] label > div:first-child {
+    display: none;  /* 라디오 동그라미 숨김 — 탭처럼 보이도록 */
+}
+div[class*="st-key-ta_ticker_tabs"] label:has(input:checked) {
+    border-bottom: 2px solid #e35b5b;
+}
+div[class*="st-key-ta_ticker_tabs"] label:has(input:checked) p {
+    color: #e35b5b;
+    font-weight: 700;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -3084,12 +3107,20 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 # 탭3: 기술적 분석
 # ============================================================
 @st.cache_data(ttl=86400)  # 일봉 기준 지표라 하루 한 번만 갱신해도 충분 (야후 API 부담도 줄임)
-def _fetch_price_history(ticker: str, period: str = "1y") -> pd.DataFrame:
-    """기술적 분석용 과거 일봉 데이터 조회. 전일 종가 기준이며 실시간 시세가 아니다."""
+def _fetch_price_history(ticker: str, months_back: int | None) -> pd.DataFrame:
+    """기술적 분석용 과거 시세 조회. 전일 종가 기준이며 실시간 시세가 아니다.
+    months_back이 None이면 상장 이후 전체 기간을 가져오고, 숫자면 '오늘로부터 그만큼
+    전'을 시작일로 삼아 정확히 그 기간만 가져온다 (yfinance의 period="6mo" 같은
+    고정 프리셋이 아니라 start 날짜를 직접 계산해서, 7개월·38개월처럼 프리셋에 없는
+    임의 기간도 정확히 맞출 수 있다)."""
     try:
         # auto_adjust=False: 배당 등으로 과거 가격을 보정하지 않은 '원래 가격' 그대로 가져온다.
         # 보정된 가격을 쓰면 HTS/증권사 앱에서 보이는 숫자와 살짝 달라져 사용자가 혼란스러워한다.
-        hist = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+        if months_back is None:
+            hist = yf.Ticker(ticker).history(period="max", auto_adjust=False)
+        else:
+            start_date = (datetime.now(KST) - pd.DateOffset(months=months_back)).strftime("%Y-%m-%d")
+            hist = yf.Ticker(ticker).history(start=start_date, auto_adjust=False)
         if hist.empty:
             return pd.DataFrame()
         hist = hist.reset_index()
@@ -3165,10 +3196,11 @@ def _calc_period_high_low(hist: pd.DataFrame) -> dict:
 
 
 CANDLE_PERIOD_OPTIONS = {
-    "일봉": {"fetch_period": "1y", "resample": None, "unit": "일"},
-    "주봉": {"fetch_period": "3y", "resample": "W", "unit": "주"},
-    "월봉": {"fetch_period": "10y", "resample": "ME", "unit": "개월"},
-    "년봉": {"fetch_period": "max", "resample": "YE", "unit": "년"},
+    # months_back: HTS 화면을 실측해서 맞춘 값 (None=상장 이후 전체)
+    "일봉": {"months_back": 7,   "resample": None, "unit": "일"},
+    "주봉": {"months_back": 38,  "resample": "W",  "unit": "주"},   # 약 3년 2개월
+    "월봉": {"months_back": 144, "resample": "ME", "unit": "개월"},  # 약 12년
+    "년봉": {"months_back": None, "resample": "YE", "unit": "년"},  # 상장 이후 전체
 }
 
 def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -3214,7 +3246,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     period_cfg = CANDLE_PERIOD_OPTIONS[selected_period_name]
     unit = period_cfg["unit"]
 
-    hist = _fetch_price_history(ticker, period=period_cfg["fetch_period"])
+    hist = _fetch_price_history(ticker, months_back=period_cfg["months_back"])
     if hist.empty or len(hist) < 6:
         st.warning("이 종목은 과거 시세 데이터를 충분히 가져오지 못해 분석할 수 없습니다.")
         return
@@ -3238,6 +3270,8 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         name=selected_period_name, increasing_line_color="#e35b5b", decreasing_line_color="#4a90d9",
     ), row=1, col=1)
     for window, color in zip((5, 20, 60, 120), ("#f0a020", "#2ecc71", "#9b59b6", "#7f8c8d")):
+        if len(hist) < window:
+            continue  # 데이터가 그 기간만큼 없으면 빈 범례만 남기지 않고 아예 건너뜀
         ma_series = hist["Close"].rolling(window).mean()
         fig.add_trace(go.Scatter(
             x=hist["Date"], y=ma_series, name=f"{window}{unit} 이동평균",
@@ -3269,10 +3303,11 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     st.plotly_chart(fig, width="stretch")
 
     # ── 종목 선택 (HTS처럼 거래량 차트 바로 아래에 탭 형태로 배치) ──
-    st.radio(
-        "종목 선택", labels, horizontal=True,
-        key="ta_ticker_select", label_visibility="collapsed",
-    )
+    with st.container(key="ta_ticker_tabs"):
+        st.radio(
+            "종목 선택", labels, horizontal=True,
+            key="ta_ticker_select", label_visibility="collapsed",
+        )
 
     # ── 최고가/최저가 요약 (숫자 카드) ──
     hi_col, lo_col = st.columns(2)
