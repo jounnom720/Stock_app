@@ -1940,6 +1940,33 @@ div[class*="st-key-ta_ticker_tabs"] label:has(input:checked) p {
     color: #e35b5b;
     font-weight: 700;
 }
+
+/* ── 메인 메뉴도 같은 탭 스타일로 통일 (전체 앱 최상단 네비게이션이라 살짝 더 크게) ── */
+div[class*="st-key-main_menu_tabs"] div[role="radiogroup"] {
+    gap: 0;
+    border-bottom: 1px solid var(--card-border);
+    flex-wrap: wrap;
+    margin-bottom: 0.6rem;
+}
+div[class*="st-key-main_menu_tabs"] label {
+    margin: 0 !important;
+    padding: 0.55rem 1.1rem;
+    border-radius: 0;
+    cursor: pointer;
+}
+div[class*="st-key-main_menu_tabs"] label > div:first-child {
+    display: none;
+}
+div[class*="st-key-main_menu_tabs"] label p {
+    font-size: 1rem;
+}
+div[class*="st-key-main_menu_tabs"] label:has(input:checked) {
+    border-bottom: 2px solid #e35b5b;
+}
+div[class*="st-key-main_menu_tabs"] label:has(input:checked) p {
+    color: #e35b5b;
+    font-weight: 700;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -2267,10 +2294,11 @@ def main(spreadsheet_id: str):
     # session_state에 직접 선택된 탭을 저장하는 라디오 버튼으로 대체해 이 문제를 원천 차단한다.
     MAIN_TABS = ["📈 통합 대시보드", "💼 보유 종목", "📐 기술적 분석", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"]
 
-    selected_main_tab = st.radio(
-        "메인 메뉴", MAIN_TABS, horizontal=True,
-        key="active_main_tab", label_visibility="collapsed",
-    )
+    with st.container(key="main_menu_tabs"):
+        selected_main_tab = st.radio(
+            "메인 메뉴", MAIN_TABS, horizontal=True,
+            key="active_main_tab", label_visibility="collapsed",
+        )
     st.markdown("<div style='margin-top:-0.5rem'></div>", unsafe_allow_html=True)
 
     if selected_main_tab == MAIN_TABS[0]:
@@ -2341,15 +2369,17 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
         weighted_pct = (valid["당일등락률"] * valid["평가금액"]).sum() / valid["평가금액"].sum()
         weighted_color = color_pnl(weighted_pct)
         st.markdown(
-            f'<div style="display:flex;gap:0.6rem;align-items:baseline;'
-            f'margin-bottom:0.5rem">'
-            f'<span style="font-size:0.85rem;color:var(--text-dim)">보유종목 평가금액 합계</span>'
-            f'<span style="font-size:1.05rem;font-weight:700">{total_value:,.0f}원</span>'
+            f'<div style="display:flex;gap:0.7rem;margin-bottom:0.9rem;flex-wrap:wrap">'
+            f'<div style="background:var(--card-bg);border:1px solid var(--card-border);'
+            f'border-radius:12px;padding:0.8rem 1.1rem;flex:1;min-width:180px">'
+            f'<div style="font-size:0.82rem;color:var(--text-dim)">보유종목 평가금액 합계</div>'
+            f'<div style="font-size:1.3rem;font-weight:700;margin-top:0.15rem">{total_value:,.0f}원</div>'
             f'</div>'
-            f'<div style="display:flex;gap:0.6rem;align-items:baseline;'
-            f'margin-bottom:0.8rem">'
-            f'<span style="font-size:0.85rem;color:var(--text-dim)">평가금액 가중 당일 등락률</span>'
-            f'<span style="font-size:1.05rem;font-weight:700;color:{weighted_color}">{weighted_pct:+.2f}%</span>'
+            f'<div style="background:var(--card-bg);border:1px solid var(--card-border);'
+            f'border-radius:12px;padding:0.8rem 1.1rem;flex:1;min-width:180px">'
+            f'<div style="font-size:0.82rem;color:var(--text-dim)">평가금액 가중 당일 등락률</div>'
+            f'<div style="font-size:1.3rem;font-weight:700;margin-top:0.15rem;color:{weighted_color}">{weighted_pct:+.2f}%</div>'
+            f'</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -2560,6 +2590,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
         f'<div style="width:{tdf_pct_w:.1f}%;background:#1FBFA0"></div>'
         f'<div style="width:{cash_pct_w:.1f}%;background:#6B6F7A"></div>'
         f'</div>'
+        f'<div style="font-size:0.78rem;color:var(--text-dim2);margin-top:0.3rem">자산 구성 비율 (주식·TDF·현금 비중, 손익과는 무관)</div>'
         f'{breakdown_grid_html}'
         f'</div>'
     )
@@ -2688,8 +2719,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     with col_donut:
         fig_type = go.Figure(go.Pie(
             labels=_labels, values=_values,
-            hole=0.55, textinfo="label+percent",
+            hole=0.55, textinfo="percent", textposition="inside", insidetextorientation="radial",
             marker_colors=_colors,
+            hovertemplate="%{label}: %{value:,.0f}원 (%{percent})<extra></extra>",
         ))
         fig_type.update_layout(
             title="자산군별 비중", height=320,
@@ -2808,11 +2840,12 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             col_config = build_number_column_config(
                 table_df, money_cols=["통합원금", "통합평가", "손익"], pct_cols=["수익률"]
             )
-            st.dataframe(
-                styled_trend, width="stretch", hide_index=True,
-                column_config=col_config,
-                height=min(320, 50 + 40 * len(table_df)),
-            )
+            with st.expander("📋 월별 상세 표 보기 (정확한 금액·손익·수익률)"):
+                st.dataframe(
+                    styled_trend, width="stretch", hide_index=True,
+                    column_config=col_config,
+                    height=min(320, 50 + 40 * len(table_df)),
+                )
         except Exception as e:
             st.caption(f"추이 차트 오류: {e}")
 
