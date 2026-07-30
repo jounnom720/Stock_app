@@ -2073,7 +2073,7 @@ def render_admin_panel():
     col_admin, _ = st.columns([2, 1])  # 화면 전체 폭을 다 쓰지 않도록 2:1로 제한
     with col_admin:
         with st.container(key="admin_panel_wrap"):
-            with st.expander("🔧 관리자 메뉴", expanded=False):
+            with st.expander("🔧 관리자 메뉴", expanded=True):
                 st.caption("🔒 관리자 전용 · 지인 계정을 관리합니다")
 
                 # 이 메뉴가 열려있는 동안 모든 탭이 계정 목록을 공유해서 씀
@@ -2247,9 +2247,8 @@ def main(spreadsheet_id: str):
             st.query_params.clear()
             st.rerun()
 
-    # 관리자 메뉴 (본인 계정으로 로그인했을 때만 노출)
-    if st.session_state.get("is_admin"):
-        render_admin_panel()
+    # 관리자 메뉴는 더 이상 여기(최상단)에 두지 않고, 통합 대시보드 하단
+    # "개발자: H.W Jone" 옆으로 옮겼다 (render_dashboard 함수 참고).
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
@@ -2710,22 +2709,24 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
         etf_eval = 0
         stock_only_eval = 0
 
-    _colors = ["#7b1fa2", "#5c6bc0", "#0288d1", "#78909c"]
-    _labels = ["ETF", "국내주식", "TDF/펀드", "현금성자산"]
-    _values = [max(0, v) for v in [etf_eval, stock_only_eval, tdf_eval, cash_eval]]
+    # 큰 조각과 작은 조각이 번갈아 나오도록 순서 배열 — 작은 조각(TDF·현금성자산)끼리
+    # 붙어있으면 바깥으로 뽑은 라벨 선이 서로 겹치기 쉬워서, 양옆에 항상 큰 조각이 오도록 배치
+    _colors = ["#5c6bc0", "#78909c", "#7b1fa2", "#0288d1"]
+    _labels = ["국내주식", "현금성자산", "ETF", "TDF/펀드"]
+    _values = [max(0, v) for v in [stock_only_eval, cash_eval, etf_eval, tdf_eval]]
     _total_for_pct = sum(_values) or 1
 
     col_donut, col_table = st.columns([1, 1])
     with col_donut:
         fig_type = go.Figure(go.Pie(
             labels=_labels, values=_values,
-            hole=0.55, textinfo="percent", textposition="inside", insidetextorientation="radial",
-            marker_colors=_colors,
+            hole=0.55, textinfo="percent", textposition="auto", insidetextorientation="radial",
+            marker_colors=_colors, automargin=True,
             hovertemplate="%{label}: %{value:,.0f}원 (%{percent})<extra></extra>",
         ))
         fig_type.update_layout(
-            title="자산군별 비중", height=320,
-            margin=dict(t=40, b=10, l=10, r=10),
+            title="자산군별 비중", height=340,
+            margin=dict(t=40, b=30, l=40, r=40),
             showlegend=False,
             font=dict(size=14),
         )
@@ -2875,12 +2876,21 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
 
     # ── 개발자 정보 (통합 대시보드 맨 아래에만 표시) ──
     st.markdown("---")
-    col_dev, col_btn = st.columns([5, 1])
+    col_dev, col_btn, col_admin_entry = st.columns([4, 1, 1])
     with col_dev:
         st.caption(f"개발자: H.W Jone · {APP_VERSION}")
     with col_btn:
         if st.button("ℹ️ 앱 정보", key="dev_info_btn"):
             show_developer_info()
+    with col_admin_entry:
+        # 관리자 본인 계정으로 로그인했을 때만 이 버튼 자체가 렌더링된다 — 다른 사용자
+        # 화면에는 이 자리에 아무것도 나타나지 않는다 (코드상 아예 존재하지 않음).
+        if st.session_state.get("is_admin"):
+            if st.button("🔧 관리자", key="admin_entry_btn"):
+                st.session_state["show_admin_panel"] = not st.session_state.get("show_admin_panel", False)
+
+    if st.session_state.get("is_admin") and st.session_state.get("show_admin_panel"):
+        render_admin_panel()
 
 
 # ============================================================
