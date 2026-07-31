@@ -2013,6 +2013,24 @@ div[class*="st-key-main_menu_tabs"] label:has(input:checked) p {
     color: #e35b5b;
     font-weight: 700;
 }
+
+/* ── 메인 메뉴: 좁은 화면(모바일)에서는 각 항목 너비가 텍스트 길이에 따라 제각각이라
+   두 번째 줄로 넘어갈 때 줄(행)이 안 맞아 보였다. 640px 이하에서는 2열 격자로 고정해
+   모든 항목의 좌우 경계가 줄마다 나란히 맞도록 한다. ── */
+@media (max-width: 640px) {
+    div[class*="st-key-main_menu_tabs"] div[role="radiogroup"] {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0;
+    }
+    div[class*="st-key-main_menu_tabs"] label {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 0.6rem 0.4rem;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -3197,27 +3215,35 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 # ============================================================
 # 탭3: 기술적 분석
 # ============================================================
-@st.cache_data(ttl=86400)  # 일봉 기준 지표라 하루 한 번만 갱신해도 충분 (야후 API 부담도 줄임)
+@st.cache_data(ttl=86400)  # 일봉 기준 지표라 하루 한 번만 갱신해도 충분 (KRX 서버 부담도 줄임)
 def _fetch_price_history(ticker: str, months_back: int | None) -> pd.DataFrame:
-    """기술적 분석용 과거 시세 조회. 전일 종가 기준이며 실시간 시세가 아니다.
-    months_back이 None이면 상장 이후 전체 기간을 가져오고, 숫자면 '오늘로부터 그만큼
-    전'을 시작일로 삼아 정확히 그 기간만 가져온다 (yfinance의 period="6mo" 같은
-    고정 프리셋이 아니라 start 날짜를 직접 계산해서, 7개월·38개월처럼 프리셋에 없는
-    임의 기간도 정확히 맞출 수 있다)."""
+    """기술적 분석용 과거 시세 조회. KRX 원천 데이터(pykrx)로 조회하며, adjusted=True(기본값)로
+    수정주가를 사용한다.
+    [중요 수정] 예전에는 야후 파이낸스를 auto_adjust=False(수정 안 한 원래 가격)로 조회했다.
+    실시간 시세(get_prices)는 이미 야후의 국내 종목 갱신 지연 문제 때문에 pykrx로 전환했지만,
+    이 기술적 분석용 과거 시세 조회 함수는 그 전환에서 빠져 있었다. 그 결과 (1) 야후 시세 자체가
+    실제 거래소 가격과 달라지는 문제에 더해 (2) 액면분할·배당 등으로 수정주가가 필요한 구간에서
+    '수정 안 한' 야후 가격을 쓰다 보니, 캔들차트·이동평균·RSI·이격도·기간 최고가/최저가 등
+    이 화면의 모든 수치가 HTS(수정주가 기준으로 연속된 차트를 보여줌)와 크게 달라 보이는
+    근본 원인이었다. pykrx의 기본값인 수정주가(adjusted=True)로 통일해 HTS와 같은 기준으로 맞춘다."""
+    krx_code = ticker.split(".")[0]
     try:
-        # auto_adjust=False: 배당 등으로 과거 가격을 보정하지 않은 '원래 가격' 그대로 가져온다.
-        # 보정된 가격을 쓰면 HTS/증권사 앱에서 보이는 숫자와 살짝 달라져 사용자가 혼란스러워한다.
+        today = datetime.now(KST).strftime("%Y%m%d")
         if months_back is None:
-            hist = yf.Ticker(ticker).history(period="max", auto_adjust=False)
+            from_date = "19900101"  # 상장 이후 전체 (실제 상장일 이전 날짜를 넣어도 pykrx가 있는 만큼만 반환)
         else:
-            start_date = (datetime.now(KST) - pd.DateOffset(months=months_back)).strftime("%Y-%m-%d")
-            hist = yf.Ticker(ticker).history(start=start_date, auto_adjust=False)
-        if hist.empty:
+            from_date = (datetime.now(KST) - pd.DateOffset(months=months_back)).strftime("%Y%m%d")
+        df = krx_stock.get_market_ohlcv_by_date(from_date, today, krx_code)
+        if df is None or df.empty:
             return pd.DataFrame()
-        hist = hist.reset_index()
-        return hist[["Date", "Open", "High", "Low", "Close", "Volume"]]
+        df = df[df["종가"] > 0].copy()
+        df.index.name = "Date"
+        df = df.reset_index().rename(columns={
+            "시가": "Open", "고가": "High", "저가": "Low", "종가": "Close", "거래량": "Volume",
+        })
+        return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
     except Exception as e:
-        logging.warning("과거 시세 조회 실패 [%s]: %s", ticker, e)
+        logging.warning("과거 시세 조회 실패(KRX) [%s]: %s", krx_code, e)
         return pd.DataFrame()
 
 
