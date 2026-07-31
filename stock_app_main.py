@@ -1566,6 +1566,19 @@ st.markdown(f"""
 st.markdown("""
 <style>
 
+/* ── Streamlit 기본 상단 툴바(Fork·GitHub·⋮ 메뉴) 축소 ──
+   모바일 화면이 좁다 보니 이 기본 툴바가 화면에서 차지하는 비중이 상대적으로 커 보인다는
+   피드백이 있어, 높이를 줄이고 배경을 앱과 동일하게 맞춰 시각적으로 덜 두드러지게 했다.
+   완전히 숨기고 싶다면 이 블록의 visibility: hidden 줄의 주석(//)을 지우면 된다. */
+header[data-testid="stHeader"] {
+    height: 2.5rem;
+    background: transparent;
+}
+div[data-testid="stToolbar"] {
+    right: 0.5rem;
+}
+/* header[data-testid="stHeader"] { visibility: hidden; } */
+
 /* ── 히어로 카드: 총 원금→평가금액 한눈에 ── */
 .hero-card {
     background: var(--card-bg);
@@ -3441,14 +3454,43 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     ind = _calc_technical_indicators(hist)
     hi_lo = _calc_period_high_low(hist)
 
+    # ── 상승/하락 판정 기준: '전일 종가 대비' (국내 HTS 관행) ──
+    # [중요 수정] 기존에는 Plotly Candlestick 기본 방식대로 '당일 시가 대비 종가'로 양봉/음봉을
+    # 정했는데, 국내 HTS·증권사 앱은 그 날 시가가 얼마였든 상관없이 '전일 종가보다 오늘 종가가
+    # 높은가'로 빨간/파란 캔들을 정한다. 두 기준이 갈리는 날(예: 시가는 전일 종가보다 낮게
+    # 출발했지만 종가는 전일 종가보다 높게 마감)에는 색이 반대로 보였다. 캔들 몸통(시가·고가·
+    # 저가·종가 값 자체)은 그대로 두고, '어느 색으로 그릴지'만 전일 종가 대비 기준으로 바꾼다.
+    # 거래량 막대도 같은 기준을 쓰는 국내 HTS 관행에 맞춰 동일하게 적용한다.
+    prev_close = hist["Close"].shift(1)
+    is_up = hist["Close"] >= prev_close
+    if len(is_up) > 0:
+        # 첫 캔들은 비교할 전일 종가가 없으므로, 그 날의 시가 대비 종가로 대신 판정한다.
+        is_up.iloc[0] = hist["Close"].iloc[0] >= hist["Open"].iloc[0]
+
+    def _masked(series):
+        return series.where(is_up)
+
+    def _masked_inv(series):
+        return series.where(~is_up)
+
     # ── 차트: 캔들차트 + 이동평균선(위) + 거래량 막대(아래) ──
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.72, 0.28], vertical_spacing=0.03,
     )
+    # 상승(빨강)·하락(파랑) 구간을 두 개의 트레이스로 나눠 그린다. Plotly Candlestick은
+    # '시가 대비 종가'로만 색을 정하는 게 기본 동작이라, 전일 종가 대비 기준으로 바꾸려면
+    # 이렇게 날짜별로 마스킹한 두 트레이스로 쪼개는 방법이 필요하다(값이 없는 날은 자동으로 빈 칸 처리).
     fig.add_trace(go.Candlestick(
-        x=hist["Date"], open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
-        name=selected_period_name, increasing_line_color="#e35b5b", decreasing_line_color="#4a90d9",
+        x=hist["Date"], open=_masked(hist["Open"]), high=_masked(hist["High"]),
+        low=_masked(hist["Low"]), close=_masked(hist["Close"]),
+        name=selected_period_name, increasing_line_color="#e35b5b", decreasing_line_color="#e35b5b",
+    ), row=1, col=1)
+    fig.add_trace(go.Candlestick(
+        x=hist["Date"], open=_masked_inv(hist["Open"]), high=_masked_inv(hist["High"]),
+        low=_masked_inv(hist["Low"]), close=_masked_inv(hist["Close"]),
+        name=selected_period_name, increasing_line_color="#4a90d9", decreasing_line_color="#4a90d9",
+        showlegend=False,
     ), row=1, col=1)
     for window, color in zip((5, 20, 60, 120), ("#f0a020", "#2ecc71", "#9b59b6", "#7f8c8d")):
         if len(hist) < window:
@@ -3469,9 +3511,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         showarrow=True, arrowhead=1, yshift=-12, font=dict(size=11, color="#4a90d9"), row=1, col=1,
     )
 
-    volume_colors = [
-        "#e35b5b" if c >= o else "#4a90d9" for o, c in zip(hist["Open"], hist["Close"])
-    ]
+    volume_colors = ["#e35b5b" if up else "#4a90d9" for up in is_up]
     fig.add_trace(go.Bar(
         x=hist["Date"], y=hist["Volume"], name="거래량", marker_color=volume_colors, showlegend=False,
     ), row=2, col=1)
@@ -3844,10 +3884,10 @@ def render_data_mgmt(nonstock_df, cash_df):
         해당 열에는 white-space: nowrap을, 비고 열에는 최대 폭 제한(줄바꿈 허용)을 적용한다."""
         p = "padding:0.65rem 1.1rem;white-space:nowrap;"
         p_r = "padding:0.65rem 1.1rem;text-align:right;white-space:nowrap;"
-        p_note = "padding:0.65rem 1.1rem;max-width:220px;white-space:normal;word-break:break-all;"
+        p_note = "padding:0.65rem 1.1rem;width:220px;min-width:220px;max-width:220px;white-space:normal;word-break:break-word;overflow-wrap:break-word;"
         th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
         th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
-        th_note = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);max-width:220px;"
+        th_note = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);width:220px;min-width:220px;max-width:220px;"
         row_sep = "border-bottom:1px solid var(--overlay-05);"
 
         pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
