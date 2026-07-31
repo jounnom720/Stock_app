@@ -3811,11 +3811,15 @@ def render_data_mgmt(nonstock_df, cash_df):
     st.markdown(summary_html, unsafe_allow_html=True)
 
     def _render_nonstock_table(rows, show_pnl=False, total_eval=0):
-        """비주식자산 행을 카드로 감싼 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가, 하단에 합계행 표시."""
-        p = "padding:0.65rem 1.1rem;"
-        p_r = "padding:0.65rem 1.1rem;text-align:right;"
-        th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
-        th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
+        """비주식자산 행을 카드로 감싼 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가, 하단에 합계행 표시.
+        비고란이 길어져도 계좌·상품명·투자원금·평가금액·평가손익·반영일자 열은 항상 한 줄로 유지되도록
+        해당 열에는 white-space: nowrap을, 비고 열에는 최대 폭 제한(줄바꿈 허용)을 적용한다."""
+        p = "padding:0.65rem 1.1rem;white-space:nowrap;"
+        p_r = "padding:0.65rem 1.1rem;text-align:right;white-space:nowrap;"
+        p_note = "padding:0.65rem 1.1rem;max-width:220px;white-space:normal;word-break:break-all;"
+        th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
+        th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
+        th_note = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);max-width:220px;"
         row_sep = "border-bottom:1px solid var(--overlay-05);"
 
         pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
@@ -3830,7 +3834,7 @@ def render_data_mgmt(nonstock_df, cash_df):
             f"<th style='{th_r}'>평가금액</th>"
             f"{pnl_th}"
             f"<th style='{th_r}'>반영일자</th>"
-            f"<th style='{th_style}'>비고</th>"
+            f"<th style='{th_note}'>비고</th>"
             "</tr></thead><tbody>"
         )
 
@@ -3868,7 +3872,7 @@ def render_data_mgmt(nonstock_df, cash_df):
                 f"<td style='{p_r};font-weight:600;'>{eva_str}</td>"
                 f"{pnl_td}"
                 f"<td style='{p_r};color:var(--text-dim);font-size:0.88rem;'>{date_}</td>"
-                f"<td style='{p};color:var(--text-dim);font-size:0.88rem;'>{note}</td>"
+                f"<td style='{p_note};color:var(--text-dim);font-size:0.88rem;'>{note}</td>"
                 "</tr>"
             )
 
