@@ -8,7 +8,6 @@
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import gspread
@@ -1076,48 +1075,12 @@ def show_login():
 
         # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
         token = make_session_token(email)
+        if token:
+            st.query_params["t"] = token
 
         if created:
             st.success("🆕 개인 자산관리 시트를 새로 만들었습니다.")
-
-        # [v2.2 추가] 'Google 계정으로 로그인' 버튼(st.link_button)은 항상 새 탭(팝업)을 열기
-        # 때문에, 로그인 처리(위 코드)는 이 팝업 탭에서 일어난다. 그대로 두면 팝업 탭에는
-        # 로그인된 화면이, 원래 탭에는 여전히 로그인 버튼 화면이 남아 탭이 계속 쌓이는
-        # 문제가 있었다. 이를 막기 위해:
-        #   1) window.opener(=원래 탭)가 살아있으면, 그 탭의 주소를 세션 토큰이 담긴
-        #      URL로 바꿔 그쪽에서 자동으로 로그인되게 하고
-        #   2) 팝업 탭 자신은 window.close()로 닫는다.
-        # 팝업 차단 등으로 opener에 접근할 수 없는 예외적인 경우에는, 이 탭 자체를
-        # 로그인된 화면으로 전환하는 기존 방식으로 자동 대체(폴백)된다.
-        if token:
-            base_url = str(st.secrets["google_oauth"]["redirect_uri"]).rstrip("/")
-            target_url = f"{base_url}/?t={token}"
-            components.html(
-                f"""
-                <script>
-                    (function() {{
-                        try {{
-                            if (window.opener && !window.opener.closed) {{
-                                window.opener.location.href = "{target_url}";
-                                window.close();
-                                return;
-                            }}
-                        }} catch (e) {{
-                            // opener에 접근할 수 없는 경우(팝업 차단 등) 아래 폴백으로 진행
-                        }}
-                        // opener가 없거나 접근 불가 → 이 탭 자체를 로그인된 화면으로 전환
-                        window.top.location.href = "{target_url}";
-                    }})();
-                </script>
-                """,
-                height=0,
-            )
-            st.caption("✅ 로그인 완료! 이 탭은 잠시 후 자동으로 닫힙니다. (자동으로 닫히지 않으면 이 탭을 직접 닫고 원래 탭으로 돌아가주세요)")
-            st.stop()
-        else:
-            # 세션 토큰 생성에 실패한 경우(AUTH_SECRET_KEY 미설정 등)에는 자동 전환 없이
-            # 이 탭 자체를 로그인된 화면으로 바로 전환하는 기존 방식으로 동작한다.
-            st.rerun()
+        st.rerun()
 
     else:
         code_verifier, code_challenge = _generate_pkce_pair()
