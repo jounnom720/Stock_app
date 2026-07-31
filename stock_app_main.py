@@ -20,7 +20,8 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from cryptography.fernet import Fernet, InvalidToken
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from pykrx import stock as krx_stock
 from zoneinfo import ZoneInfo
 import logging
 import hmac
@@ -1110,18 +1111,52 @@ def show_login():
 # ============================================================
 # 실시간 시세 조회
 # ============================================================
+def _fetch_krx_stock_price(krx_code: str):
+    """개별 종목의 현재가를 한국거래소(KRX) 원천 데이터로 직접 조회.
+    야후 파이낸스의 국내 종목 일봉 데이터는 배치성으로 갱신되어, 캐시를 지우고 다시 요청해도
+    같은 값이 한동안 반복되는 문제가 있었다(코스피·코스닥 지수에서 먼저 발견되어 고쳤던 것과
+    동일한 유형의 문제). 개별 보유종목도 같은 방식(pykrx)으로 바꿔 이 문제를 근본적으로 피한다."""
+    try:
+        today = datetime.now(KST).strftime("%Y%m%d")
+        from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
+        df = krx_stock.get_market_ohlcv_by_date(from_date, today, krx_code)
+        df = df[df["종가"] > 0]
+        if not df.empty:
+            return float(df["종가"].iloc[-1])
+    except Exception as e:
+        logging.warning("KRX 종목 시세 조회 실패 [%s]: %s", krx_code, e)
+    return None
+
 @st.cache_data(ttl=60)
 def get_prices(tickers: tuple) -> dict[str, float]:
-    """yfinance로 현재가 조회. 일괄 조회 실패 시 종목별 개별 재시도.
+    """현재가 조회. 국내 종목(.KS/.KQ)은 KRX 원천 데이터(pykrx)를 우선 쓰고, 실패하거나
+    국내 종목이 아닌 티커만 야후 파이낸스로 조회한다.
     st.cache_data는 list를 해시할 수 없으므로 tuple로 받음.
     """
     if not tickers:
         return {}
     prices = {}
     ticker_list = list(tickers)
-    # 1차: 일괄 조회
+
+    # 1차: 국내 종목은 KRX 원천 데이터로 직접 조회 (가장 신뢰도 높음)
+    yf_fallback_needed = []
+    for t in ticker_list:
+        krx_code = None
+        if t.endswith(".KS") or t.endswith(".KQ"):
+            krx_code = t.rsplit(".", 1)[0]
+        if krx_code:
+            price = _fetch_krx_stock_price(krx_code)
+            if price is not None:
+                prices[t] = price
+                continue
+        yf_fallback_needed.append(t)
+
+    if not yf_fallback_needed:
+        return prices
+
+    # 2차: KRX 조회에 실패했거나 국내 종목이 아닌 티커는 야후에서 일괄 조회
     try:
-        ticker_str = " ".join(ticker_list)
+        ticker_str = " ".join(yf_fallback_needed)
         data = yf.download(ticker_str, period="5d", progress=False, auto_adjust=True, threads=False)
         if "Close" in data.columns:
             close = data["Close"].dropna(how="all")
@@ -1131,13 +1166,13 @@ def get_prices(tickers: tuple) -> dict[str, float]:
                     for t, p in latest.items():
                         if pd.notna(p):
                             prices[t] = float(p)
-                elif len(ticker_list) == 1 and pd.notna(latest):
-                    prices[ticker_list[0]] = float(latest)
+                elif len(yf_fallback_needed) == 1 and pd.notna(latest):
+                    prices[yf_fallback_needed[0]] = float(latest)
     except Exception as e:
         logging.warning("일괄 시세 조회 실패: %s", e)
 
-    # 2차: 누락된 종목 개별 재시도
-    missing = [t for t in ticker_list if t not in prices]
+    # 3차: 그래도 누락된 종목은 야후에서 개별 재시도
+    missing = [t for t in yf_fallback_needed if t not in prices]
     for t in missing:
         try:
             hist = yf.Ticker(t).history(period="5d")
