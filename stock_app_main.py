@@ -8,6 +8,7 @@
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import gspread
@@ -35,6 +36,12 @@ import secrets as pysecrets
 # ============================================================
 logging.basicConfig(level=logging.WARNING)
 KST = ZoneInfo("Asia/Seoul")
+
+# 모든 Plotly 차트에 공통 적용하는 설정: 오른쪽 위 모드바(카메라·확대·이동 등 아이콘 묶음)를
+# 완전히 숨긴다. 범례·주석(최고가·최저가 라벨 등)이 차트 오른쪽 위와 겹쳐 보이던 문제의
+# 근본 원인이 이 모드바였는데, 이 앱은 이미지 다운로드·확대 등 모드바 기능을 실제로 쓸 일이
+# 거의 없으므로 마진을 조정하는 대신 아예 숨겨서 겹침 문제를 근본적으로 없앤다.
+PLOTLY_CONFIG = {"displayModeBar": False}
 APP_VERSION = "v2.0.0"
 
 st.set_page_config(
@@ -1069,12 +1076,48 @@ def show_login():
 
         # 세션 연결이 끊겼다 재연결돼도 자동으로 로그인 상태를 복구하기 위한 토큰
         token = make_session_token(email)
-        if token:
-            st.query_params["t"] = token
 
         if created:
             st.success("🆕 개인 자산관리 시트를 새로 만들었습니다.")
-        st.rerun()
+
+        # [v2.2 추가] 'Google 계정으로 로그인' 버튼(st.link_button)은 항상 새 탭(팝업)을 열기
+        # 때문에, 로그인 처리(위 코드)는 이 팝업 탭에서 일어난다. 그대로 두면 팝업 탭에는
+        # 로그인된 화면이, 원래 탭에는 여전히 로그인 버튼 화면이 남아 탭이 계속 쌓이는
+        # 문제가 있었다. 이를 막기 위해:
+        #   1) window.opener(=원래 탭)가 살아있으면, 그 탭의 주소를 세션 토큰이 담긴
+        #      URL로 바꿔 그쪽에서 자동으로 로그인되게 하고
+        #   2) 팝업 탭 자신은 window.close()로 닫는다.
+        # 팝업 차단 등으로 opener에 접근할 수 없는 예외적인 경우에는, 이 탭 자체를
+        # 로그인된 화면으로 전환하는 기존 방식으로 자동 대체(폴백)된다.
+        if token:
+            base_url = str(st.secrets["google_oauth"]["redirect_uri"]).rstrip("/")
+            target_url = f"{base_url}/?t={token}"
+            components.html(
+                f"""
+                <script>
+                    (function() {{
+                        try {{
+                            if (window.opener && !window.opener.closed) {{
+                                window.opener.location.href = "{target_url}";
+                                window.close();
+                                return;
+                            }}
+                        }} catch (e) {{
+                            // opener에 접근할 수 없는 경우(팝업 차단 등) 아래 폴백으로 진행
+                        }}
+                        // opener가 없거나 접근 불가 → 이 탭 자체를 로그인된 화면으로 전환
+                        window.top.location.href = "{target_url}";
+                    }})();
+                </script>
+                """,
+                height=0,
+            )
+            st.caption("✅ 로그인 완료! 이 탭은 잠시 후 자동으로 닫힙니다. (자동으로 닫히지 않으면 이 탭을 직접 닫고 원래 탭으로 돌아가주세요)")
+            st.stop()
+        else:
+            # 세션 토큰 생성에 실패한 경우(AUTH_SECRET_KEY 미설정 등)에는 자동 전환 없이
+            # 이 탭 자체를 로그인된 화면으로 바로 전환하는 기존 방식으로 동작한다.
+            st.rerun()
 
     else:
         code_verifier, code_challenge = _generate_pkce_pair()
@@ -1770,6 +1813,9 @@ st.markdown("""
     color: var(--text-dim);
 }
 
+/* ── 보유 종목 화면: 계좌 필터 카드 / 보기 방식 토글 사이 여백 ── */
+.ui-gap-md { height: 1.1rem; }
+
 .section-title {
     font-size: 1.25rem;
     font-weight: 700;
@@ -2449,7 +2495,7 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     else:
         # 순위 리스트: 당일등락률 내림차순 정렬 (네이버페이 증권 '외국인 매매 상위' 랭킹 UI 참고)
         ranked = grouped.dropna(subset=["당일등락률"]).sort_values("당일등락률", ascending=False).reset_index(drop=True)
@@ -2765,7 +2811,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             showlegend=False,
             font=dict(size=14),
         )
-        st.plotly_chart(fig_type, width="stretch")
+        st.plotly_chart(fig_type, width="stretch", config=PLOTLY_CONFIG)
 
     with col_table:
         st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
@@ -2854,7 +2900,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
                 bargap=0.5,
                 hovermode="x unified",
             )
-            st.plotly_chart(fig_trend, width="stretch")
+            st.plotly_chart(fig_trend, width="stretch", config=PLOTLY_CONFIG)
 
             # ── 상세 표: 월별 정확한 금액 · 손익 · 수익률 ──
             table_df = mdf[["년월_표시", "통합원금", "통합평가"]].copy()
@@ -2962,6 +3008,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
     # 계좌별 필터
     계좌목록 = ["전체"] + sorted(holdings_df["계좌"].unique().tolist())
     선택계좌 = st.selectbox("계좌 필터", 계좌목록, key="holding_account_filter")
+    st.markdown('<div class="ui-gap-md"></div>', unsafe_allow_html=True)
     if 선택계좌 != "전체":
         display_df = holdings_df[holdings_df["계좌"] == 선택계좌]
     else:
@@ -3045,6 +3092,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
         return f"color: {color}; font-weight: 600"
 
+    st.markdown('<div class="ui-gap-md"></div>', unsafe_allow_html=True)
     보기방식 = st.radio("보기 방식", ["카드형", "표"], horizontal=True, key="holding_view_mode")
 
     _acct_order = sorted(holdings_df["계좌"].unique().tolist()) if not holdings_df.empty else []
@@ -3144,7 +3192,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 ),
                 font=dict(size=12),
             )
-            st.plotly_chart(fig_donut, width="stretch")
+            st.plotly_chart(fig_donut, width="stretch", config=PLOTLY_CONFIG)
 
         with ch2:
             st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
@@ -3178,7 +3226,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 yaxis=dict(tickfont=dict(size=12)),
                 font=dict(size=12),
             )
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
 
 # ============================================================
@@ -3261,6 +3309,60 @@ def _gap_interpretation(gap) -> str:
     return "이동평균과 비슷한 수준입니다."
 
 
+def _generate_ta_comment(hist: pd.DataFrame, ind: dict, hi_lo: dict, unit: str) -> list[str]:
+    """수치를 있는 그대로 서술하는 객관적 코멘트 목록을 만든다.
+    원칙: (1) '사라'/'팔아라' 같은 매수·매도 결론은 절대 내리지 않는다.
+    (2) 존재하는 수치(이동평균 배열, 이격도, RSI, 거래량, 고점·저점 대비 위치)만 사실 그대로
+    서술한다. (3) 데이터가 부족한 지표는 문장 자체를 생략한다(억지로 채우지 않음)."""
+    comments = []
+    price = ind.get("현재가")
+
+    # 1) 이동평균 배열 상태 — '정배열/역배열'은 시장에서 통용되는 객관적 용어(추세의 방향성을
+    #    나타내는 관찰 사실)이며, 매수/매도 판단이 아니라 현재 배열 상태에 대한 서술이다.
+    mas = [ind.get(f"MA{w}") for w in (5, 20, 60, 120)]
+    if all(m is not None for m in mas):
+        if mas[0] > mas[1] > mas[2] > mas[3]:
+            comments.append(f"{5}{unit}선부터 {120}{unit}선까지 순서대로 배열된 '정배열' 상태입니다(단기 이동평균이 장기 이동평균보다 위).")
+        elif mas[0] < mas[1] < mas[2] < mas[3]:
+            comments.append(f"{5}{unit}선부터 {120}{unit}선까지 순서대로 배열된 '역배열' 상태입니다(단기 이동평균이 장기 이동평균보다 아래).")
+        else:
+            comments.append("이동평균선들이 뒤섞여 있어 뚜렷한 정배열·역배열 상태는 아닙니다.")
+
+    # 2) RSI 구간
+    rsi = ind.get("RSI14")
+    if rsi is not None:
+        zone = "과매수" if rsi >= 70 else "과매도" if rsi <= 30 else "중립"
+        comments.append(f"RSI(14)는 {rsi:.1f}로 통상적 기준상 {zone} 구간에 해당합니다.")
+
+    # 3) 최고가·최저가 대비 현재 위치
+    if price is not None and hi_lo.get("최고가") and hi_lo.get("최저가"):
+        from_high = (price - hi_lo["최고가"]) / hi_lo["최고가"] * 100
+        from_low = (price - hi_lo["최저가"]) / hi_lo["최저가"] * 100
+        comments.append(f"현재가는 조회 기간 내 최고가 대비 {from_high:+.1f}%, 최저가 대비 {from_low:+.1f}% 지점입니다.")
+
+    # 4) 최근 거래량 추세 — 최근 5구간 평균과 그 직전 20구간 평균을 비교 (데이터가 충분할 때만)
+    if "Volume" in hist.columns and len(hist) >= 25:
+        recent_vol = hist["Volume"].iloc[-5:].mean()
+        prior_vol = hist["Volume"].iloc[-25:-5].mean()
+        if prior_vol:
+            vol_chg = (recent_vol - prior_vol) / prior_vol * 100
+            if abs(vol_chg) >= 20:
+                direction = "증가" if vol_chg > 0 else "감소"
+                comments.append(f"최근 거래량은 직전 대비 {direction}했습니다({vol_chg:+.0f}%).")
+            else:
+                comments.append("최근 거래량은 직전과 비슷한 수준입니다.")
+
+    # 5) 최근 등락률 (최대 20구간, 데이터가 그보다 짧으면 있는 만큼만)
+    n = min(20, len(hist) - 1)
+    if n >= 1:
+        past_price = float(hist["Close"].iloc[-1 - n])
+        if past_price:
+            chg = (price - past_price) / past_price * 100
+            comments.append(f"최근 {n}{unit} 동안 {chg:+.1f}% 변동했습니다.")
+
+    return comments
+
+
 def _calc_period_high_low(hist: pd.DataFrame) -> dict:
     """조회 기간(현재 1년) 중 최고가·최저가와 그 날짜를 계산."""
     idx_high = hist["High"].idxmax()
@@ -3304,7 +3406,17 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         return
 
     # 종목코드 기준으로 계좌 합산 (같은 종목을 여러 계좌에 나눠 갖고 있어도 하나로만 표시)
-    unique_codes = holdings_df[["종목코드", "종목명"]].drop_duplicates(subset="종목코드")
+    # 정렬 순서는 '보유 종목 상세' 화면과 동일하게: ETF 먼저, 그다음 주식 — 각 그룹 내에서는
+    # 계좌를 합산한 투자원금(매입금액) 총액이 큰 순서.
+    unique_codes = holdings_df[["종목코드", "종목명"]].drop_duplicates(subset="종목코드").copy()
+    _cost_by_code = holdings_df.groupby("종목코드")["매입금액"].sum()
+    unique_codes["_매입금액총액"] = unique_codes["종목코드"].map(_cost_by_code)
+    unique_codes["_type_rank"] = unique_codes.apply(
+        lambda r: 0 if get_asset_type(r["종목코드"], r["종목명"]) == "ETF" else 1, axis=1
+    )
+    unique_codes = unique_codes.sort_values(
+        ["_type_rank", "_매입금액총액"], ascending=[True, False]
+    )
     options = {f"{row['종목명']} ({row['종목코드']})": row["종목코드"] for _, row in unique_codes.iterrows()}
     labels = list(options.keys())
 
@@ -3378,7 +3490,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         xaxis_rangeslider_visible=False,
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
     # ── 종목 선택 (HTS처럼 거래량 차트 바로 아래에 탭 형태로 배치) ──
     with st.container(key="ta_ticker_tabs"):
@@ -3410,6 +3522,23 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
     with rsi_col:
         st.metric("RSI", f"{rsi:.1f}" if rsi is not None else "-")
         st.caption(_rsi_interpretation(rsi))
+
+    # ── 분석 코멘트 (수치를 있는 그대로 서술, 매수·매도 결론 없음) ──
+    st.markdown("##### 분석 코멘트")
+    comments = _generate_ta_comment(hist, ind, hi_lo, unit)
+    if comments:
+        comment_html = "".join(f"<li>{c}</li>" for c in comments)
+        st.markdown(
+            f"""
+            <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
+                <ul style="margin:0;padding-left:1.1rem;line-height:1.7;">{comment_html}</ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption("위 코멘트는 수치를 있는 그대로 서술한 것이며, 매수·매도 의견이 아닙니다.")
+    else:
+        st.caption("코멘트를 생성할 만큼 데이터가 충분하지 않습니다.")
 
 
 # ============================================================
