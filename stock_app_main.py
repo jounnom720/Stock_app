@@ -1931,7 +1931,9 @@ st.markdown("""
     background: var(--card-bg);
     border: 1px solid var(--card-border);
     border-radius: 14px;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
 }
 .mgmt-warn-card {
     background: var(--overlay-03);
