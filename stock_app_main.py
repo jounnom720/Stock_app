@@ -3367,30 +3367,12 @@ def _calc_period_high_low(hist: pd.DataFrame) -> dict:
 
 
 CANDLE_PERIOD_OPTIONS = {
-    # months_back: 이동평균(MA5~120)이 정확히 계산되려면 그만큼의 과거 데이터가 미리 있어야 하므로
-    # 넉넉히 불러오는 조회 범위다 (예: 월봉 MA120 = 120개월치 필요 → 144개월 조회).
-    # 화면에 '기본으로 보여주는' 범위는 이것과 별개로 visible_unit/visible_n이 따로 정한다.
-    # (HTS도 같은 방식 — 내부적으로는 긴 이력을 들고 있다가 화면 기본 확대 범위만 최근 구간으로 보여주고,
-    # 사용자가 드래그해서 왼쪽으로 더 넓게 볼 수 있게 한다.)
-    "일봉": {"months_back": 7,   "resample": None, "unit": "일",   "visible_unit": "count",  "visible_n": 5},
-    "주봉": {"months_back": 38,  "resample": "W",  "unit": "주",   "visible_unit": "months", "visible_n": 5},
-    "월봉": {"months_back": 144, "resample": "ME", "unit": "개월", "visible_unit": "months", "visible_n": 12},
-    "년봉": {"months_back": None, "resample": "YE", "unit": "년",  "visible_unit": "all",    "visible_n": None},
+    # months_back: HTS 화면을 실측해서 맞춘 값 (None=상장 이후 전체)
+    "일봉": {"months_back": 7,   "resample": None, "unit": "일"},
+    "주봉": {"months_back": 38,  "resample": "W",  "unit": "주"},   # 약 3년 2개월
+    "월봉": {"months_back": 144, "resample": "ME", "unit": "개월"},  # 약 12년
+    "년봉": {"months_back": None, "resample": "YE", "unit": "년"},  # 상장 이후 전체
 }
-
-
-def _visible_window(hist: pd.DataFrame, cfg: dict):
-    """차트에 기본으로 보여줄 구간(시작일, 종료일)을 계산. hist 자체는 그대로 두고
-    x축 확대 범위만 좁혀서, MA 계산에 필요한 과거 데이터는 유지하면서 화면엔 최근 구간만 보여준다."""
-    last_date = hist["Date"].iloc[-1]
-    if cfg["visible_unit"] == "count":
-        n = cfg["visible_n"]
-        start = hist["Date"].iloc[-n] if len(hist) >= n else hist["Date"].iloc[0]
-    elif cfg["visible_unit"] == "months":
-        start = last_date - pd.DateOffset(months=cfg["visible_n"])
-    else:  # "all"
-        start = hist["Date"].iloc[0]
-    return start, last_date
 
 def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
     """일봉 데이터를 주봉/월봉/년봉으로 리샘플링. 시가는 기간의 첫 값, 고가/저가는 최대/최소,
@@ -3457,14 +3439,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
             return
 
     ind = _calc_technical_indicators(hist)
-
-    # 화면에 기본으로 보여줄 구간 (일봉=최근 5영업일, 주봉=최근 5개월, 월봉=최근 12개월, 년봉=전체)
-    vis_start, vis_end = _visible_window(hist, period_cfg)
-    visible_hist = hist[hist["Date"] >= vis_start]
-    if visible_hist.empty:
-        visible_hist = hist
-    # '기간 내 최고가/최저가'는 화면에 보이는 구간 기준으로 계산해야 사용자가 보는 범위와 일치한다.
-    hi_lo = _calc_period_high_low(visible_hist)
+    hi_lo = _calc_period_high_low(hist)
 
     # ── 상승/하락 판정 기준: '전일 종가 대비' (국내 HTS 관행) ──
     # [중요 수정] 기존에는 Plotly Candlestick 기본 방식대로 '당일 시가 대비 종가'로 양봉/음봉을
@@ -3533,11 +3508,6 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         xaxis_rangeslider_visible=False,
     )
-    # 기본 확대 범위를 최근 구간으로 좁힌다. MA 계산에 쓰인 과거 데이터는 그대로 남아있으므로
-    # 사용자가 차트를 왼쪽으로 드래그하면 더 이전 구간도 볼 수 있다 (데이터를 지운 게 아니라 확대 위치만 조정).
-    _pad = {"count": pd.Timedelta(hours=18), "months": pd.Timedelta(days=4), "all": pd.Timedelta(days=15)}
-    _pad_val = _pad[period_cfg["visible_unit"]]
-    fig.update_xaxes(range=[vis_start - _pad_val, vis_end + _pad_val])
     st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
     # ── 종목 선택 (HTS처럼 거래량 차트 바로 아래에 탭 형태로 배치) ──
