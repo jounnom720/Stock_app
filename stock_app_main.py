@@ -2371,7 +2371,7 @@ def main(spreadsheet_id: str):
     elif selected_main_tab == MAIN_TABS[1]:
         render_holdings(holdings_df, prices, nonstock_df)
     elif selected_main_tab == MAIN_TABS[2]:
-        render_technical_analysis(holdings_df)
+        render_technical_analysis(holdings_df, trade_df)
     elif selected_main_tab == MAIN_TABS[3]:
         render_trades(trade_df)
     elif selected_main_tab == MAIN_TABS[4]:
@@ -3376,6 +3376,40 @@ CANDLE_PERIOD_OPTIONS = {
     "년봉": {"months_back": None, "resample": "YE", "unit": "년"},  # 상장 이후 전체
 }
 
+def _avg_cost_series(trade_df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """특정 종목코드의 '평균매입단가가 매매 시점마다 어떻게 바뀌었는지' 시계열로 반환.
+    여러 계좌에 나눠 보유해도 전체를 합산한 하나의 평균단가로 계산한다(_replay_trade_ledger는
+    계좌별로 따로 관리하는데, 기술적분석 화면은 종목 단위 차트라 계좌 구분 없이 합산이 맞다).
+    전량 매도로 보유수량이 0이 되면 그 시점부터는 평균단가를 표시하지 않는다(청산 후 다시
+    매수하면 그 시점의 매수가부터 새로 시작 — 옛 평균단가와 섞이면 안 되므로)."""
+    if trade_df.empty:
+        return pd.DataFrame(columns=["Date", "평균단가"])
+    df = trade_df[trade_df["종목코드"].astype(str).str.strip() == str(code).strip()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["Date", "평균단가"])
+    df["_dt"] = pd.to_datetime(df["거래일자"], errors="coerce")
+    df = df.dropna(subset=["_dt"]).sort_values("_dt")
+
+    qty_held = 0
+    avg_cost = 0.0
+    points = []
+    for _, row in df.iterrows():
+        qty = int(_safe_num(row.get("거래수량", 0)))
+        price = _safe_num(row.get("거래단가", 0))
+        구분 = str(row.get("거래구분", "")).strip()
+        if 구분 == "매수":
+            new_qty = qty_held + qty
+            avg_cost = (avg_cost * qty_held + price * qty) / new_qty if new_qty else price
+            qty_held = new_qty
+        elif 구분 == "매도":
+            qty_held = max(0, qty_held - qty)
+            if qty_held == 0:
+                avg_cost = 0.0
+        points.append({"Date": row["_dt"], "평균단가": avg_cost if qty_held > 0 else None})
+
+    return pd.DataFrame(points)
+
+
 def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
     """일봉 데이터를 주봉/월봉/년봉으로 리샘플링. 시가는 기간의 첫 값, 고가/저가는 최대/최소,
     종가는 기간의 마지막 값, 거래량은 합계로 집계한다 (증권사 HTS와 동일한 표준 방식)."""
@@ -3386,7 +3420,7 @@ def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
     return agg.reset_index()
 
 
-def render_technical_analysis(holdings_df: pd.DataFrame):
+def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame):
     st.markdown('<div class="section-title">기술적 분석</div>', unsafe_allow_html=True)
     st.caption(
         "⚠ 전일 종가 기준으로 계산합니다(실시간 아님). "
@@ -3489,6 +3523,22 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
             x=hist["Date"], y=ma_series, name=f"{window}{unit} 이동평균",
             line=dict(width=1.2, color=color, dash="dot"),
         ), row=1, col=1)
+
+    # ── 내 평균단가 추세선 (매매 시점마다 계단식으로 변동) ──
+    # 매매 시마다 값이 바뀌는 계단형 선이라 line_shape='hv'(수평→수직)를 쓴다. 이동평균선보다
+    # 굵고 뚜렷한 색으로 그려서 '내 매입 단가 대비 지금 시세가 얼마나 차이나는지'가 한눈에
+    # 보이게 한다. 계좌를 나눠 보유해도 전체 합산 평균단가 하나로 표시한다.
+    avg_series = _avg_cost_series(trade_df, code).dropna(subset=["평균단가"])
+    if not avg_series.empty:
+        merged_avg = pd.merge_asof(
+            hist[["Date"]].sort_values("Date"), avg_series.sort_values("Date"),
+            on="Date", direction="backward",
+        )
+        if merged_avg["평균단가"].notna().any():
+            fig.add_trace(go.Scatter(
+                x=merged_avg["Date"], y=merged_avg["평균단가"], name="내 평균단가",
+                mode="lines", line=dict(width=3, color="#ffd166", shape="hv"),
+            ), row=1, col=1)
 
     # 기간 내 최고가/최저가 라벨
     fig.add_annotation(
