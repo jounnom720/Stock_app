@@ -1118,10 +1118,12 @@ def show_login():
 # 실시간 시세 조회
 # ============================================================
 def _fetch_krx_stock_price(krx_code: str):
-    """개별 종목의 현재가를 한국거래소(KRX) 원천 데이터로 직접 조회.
-    야후 파이낸스의 국내 종목 일봉 데이터는 배치성으로 갱신되어, 캐시를 지우고 다시 요청해도
-    같은 값이 한동안 반복되는 문제가 있었다(코스피·코스닥 지수에서 먼저 발견되어 고쳤던 것과
-    동일한 유형의 문제). 개별 보유종목도 같은 방식(pykrx)으로 바꿔 이 문제를 근본적으로 피한다."""
+    """개별 종목의 현재가를 pykrx로 조회 (adjusted=True 기본값 사용).
+    [정정] 주석에 'KRX 원천 데이터로 직접 조회'라고 되어 있었는데 정확하지 않다. pykrx는
+    adjusted=True(수정주가, 우리가 쓰는 기본값)일 때 실제로는 KRX가 아니라 네이버페이 증권
+    데이터를 가져온다 (adjusted=False로 호출해야 KRX 원천에서 직접 가져온다). 네이버 시세도
+    신뢰도가 높고 실시간성이 좋아 야후 대비 문제(배치성 갱신 지연)는 해결되지만, '한국거래소
+    원천'이라는 표현 자체는 부정확했다."""
     try:
         today = datetime.now(KST).strftime("%Y%m%d")
         from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
@@ -3217,8 +3219,8 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 # ============================================================
 @st.cache_data(ttl=86400)  # 일봉 기준 지표라 하루 한 번만 갱신해도 충분 (KRX 서버 부담도 줄임)
 def _fetch_price_history(ticker: str, months_back: int | None) -> pd.DataFrame:
-    """기술적 분석용 과거 시세 조회. KRX 원천 데이터(pykrx)로 조회하며, adjusted=True(기본값)로
-    수정주가를 사용한다.
+    """기술적 분석용 과거 시세 조회. pykrx로 조회하며, adjusted=True(기본값)로 수정주가를
+    사용한다 (실제 데이터 출처는 네이버페이 증권 — 위 _fetch_krx_stock_price 주석 참고).
     [중요 수정] 예전에는 야후 파이낸스를 auto_adjust=False(수정 안 한 원래 가격)로 조회했다.
     실시간 시세(get_prices)는 이미 야후의 국내 종목 갱신 지연 문제 때문에 pykrx로 전환했지만,
     이 기술적 분석용 과거 시세 조회 함수는 그 전환에서 빠져 있었다. 그 결과 (1) 야후 시세 자체가
@@ -3507,7 +3509,13 @@ def render_technical_analysis(holdings_df: pd.DataFrame):
         height=520, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         xaxis_rangeslider_visible=False,
+        dragmode=False,  # 드래그해서 확대하는 동작 자체를 끈다 (모바일 스와이프가 확대로 오인되는 문제 방지)
     )
+    # x축·y축 모두 확대·축소·드래그 불가로 고정. 기간은 위의 일봉/주봉/월봉/년봉 버튼으로만 바꾸는
+    # 구조라 차트 안에서 직접 확대할 일이 없고, 모드바(리셋 버튼 포함)를 이미 숨긴 상태라 실수로
+    # 확대되면 되돌릴 방법이 없었다. 아예 확대 자체를 막아 순수 조회용 차트로 만든다.
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
     st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
     # ── 종목 선택 (HTS처럼 거래량 차트 바로 아래에 탭 형태로 배치) ──
