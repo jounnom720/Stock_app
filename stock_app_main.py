@@ -1568,6 +1568,17 @@ st.markdown(f"""
 st.markdown("""
 <style>
 
+/* ── 한글 줄바꿈 전역 규칙 ──
+   기본 CSS 줄바꿈은 한글을 '음절 단위'로 아무 데서나 끊기 때문에(예: "보이거나"가 "보"/
+   "이거나"로 쪼개짐), 캐시 초기화 안내문처럼 폭이 좁은 박스에서 특히 부자연스러웠다.
+   word-break: keep-all로 '어절(띄어쓰기) 단위'로만 줄바꿈되게 하고, overflow-wrap:
+   break-word로 URL처럼 정말 끊어야 하는 긴 텍스트는 예외적으로 처리한다. 숫자 칸처럼
+   이미 white-space: nowrap이 걸린 곳은 이 규칙과 무관하게 계속 한 줄로 유지된다. */
+* {
+    word-break: keep-all;
+    overflow-wrap: break-word;
+}
+
 /* ── 히어로 카드: 총 원금→평가금액 한눈에 ── */
 .hero-card {
     background: var(--card-bg);
