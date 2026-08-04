@@ -1581,6 +1581,11 @@ st.markdown("""
     color: var(--text-dim);
     margin-bottom: 0.3rem;
 }
+.hero-label .cost-emph {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-main, #f0f0f0);
+}
 .hero-row {
     display: flex;
     align-items: baseline;
@@ -2645,7 +2650,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
 
     hero_html = (
         f'<div class="hero-card">'
-        f'<div class="hero-label">총 투자원금 {fmt_money_full(total_cost)} → 통합 평가금액</div>'
+        f'<div class="hero-label">총 투자원금 <span class="cost-emph">{fmt_money_full(total_cost)}</span> → 통합 평가금액</div>'
         f'<div class="hero-row">'
         f'<div class="hero-value">{fmt_money_full(total_eval)}</div>'
         f'<div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money_full(total_pnl)} ({fmt_pct(total_pct)})</div>'
@@ -2858,6 +2863,10 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
                     return s[:7]
                 return s
             mdf["년월_표시"] = mdf["년월"].apply(normalize_yearmonth)
+            # [수정] 시트에 저장된 순서 그대로 쓰다 보니(수동 스냅샷을 나중에 끼워넣는 등) 차트가
+            # 7월-6월-8월처럼 뒤섞여 보이는 문제가 있었다. 추이 차트는 시간순(오름차순)으로
+            # 왼쪽→오른쪽이 과거→최근이 되어야 자연스러우므로 명시적으로 정렬한다.
+            mdf = mdf.sort_values("년월_표시")
 
             # ── 차트: 막대·선에는 텍스트 라벨을 넣지 않는다 (정확한 금액은 마우스오버 툴팁 또는 아래 표로 확인).
             # 이전 버전은 막대(평가금액)와 선(원금) 라벨이 서로 겹쳐 보이는 문제가 있었는데,
@@ -3538,6 +3547,9 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
             fig.add_trace(go.Scatter(
                 x=merged_avg["Date"], y=merged_avg["평균단가"], name="내 평균단가",
                 mode="lines", line=dict(width=3, color="#ffd166", shape="hv"),
+                # 기본 hover는 y축 단위표시(k 등)를 그대로 물려받아 "83.93392k"처럼 나오고
+                # 날짜·금액 구분도 없었다. 날짜와 "OOO원"(천단위 콤마) 형식을 명시로 고정한다.
+                hovertemplate="%{x|%Y-%m-%d}<br>내 평균단가: %{y:,.0f}원<extra></extra>",
             ), row=1, col=1)
 
     # 기간 내 최고가/최저가 라벨
@@ -4043,7 +4055,7 @@ def render_data_mgmt(nonstock_df, cash_df):
     warn_html = (
         '<div class="mgmt-warn-card">'
         '<div class="mgmt-warn-text">'
-        '<b>실시간 시세와 구글시트 데이터를 모두 지우고 새로 불러옵니다.</b><br>'
+        '<b>실시간 시세와 구글시트 데이터를 모두 지우고 새로 불러옵니다.</b> '
         '숫자가 이상하게 보이거나 방금 구글시트에 입력한 내용이 반영되지 않을 때 눌러주세요.'
         '</div></div>'
     )
