@@ -1581,11 +1581,21 @@ st.markdown("""
 
 /* ── 가로모드(랜드스케이프)에서 좌우에 여백이 남던 문제 ──
    layout="wide"로 설정해도 Streamlit 버전에 따라 콘텐츠 영역에 자체적인 최대 폭 제한이
-   남아있는 경우가 있어서, 가로로 눕히면 화면 좌우로 빈 공간이 생겼다. 메인 콘텐츠 영역을
-   화면 폭 100%까지 쓰도록 강제로 넓힌다 (두 클래스명을 모두 지정한 건 Streamlit 버전에 따라
-   내부 클래스명이 바뀌어도 계속 적용되게 하기 위함). */
-[data-testid="stMainBlockContainer"], .block-container {
+   남아있는 경우가 있어서, 가로로 눕히면 화면 좌우로 빈 공간이 생겼다. block-container만
+   넓혀서는 안 없어져서, 그 바깥의 상위 레이어(html/body, stApp, AppViewContainer)까지
+   전부 폭 100%로 강제한다. 클래스명이 버전마다 달라질 수 있어 여러 선택자를 동시에 지정. */
+html, body,
+[data-testid="stApp"],
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="stMainBlockContainer"],
+.block-container {
     max-width: 100% !important;
+    width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
+[data-testid="stMainBlockContainer"], .block-container {
     padding-left: 1.4rem !important;
     padding-right: 1.4rem !important;
 }
