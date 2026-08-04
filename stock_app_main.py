@@ -3582,13 +3582,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
         height=520, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         xaxis_rangeslider_visible=False,
-        dragmode=False,  # 드래그해서 확대하는 동작 자체를 끈다 (모바일 스와이프가 확대로 오인되는 문제 방지)
     )
-    # x축·y축 모두 확대·축소·드래그 불가로 고정. 기간은 위의 일봉/주봉/월봉/년봉 버튼으로만 바꾸는
-    # 구조라 차트 안에서 직접 확대할 일이 없고, 모드바(리셋 버튼 포함)를 이미 숨긴 상태라 실수로
-    # 확대되면 되돌릴 방법이 없었다. 아예 확대 자체를 막아 순수 조회용 차트로 만든다.
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
     st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
     # ── 종목 선택 (HTS처럼 거래량 차트 바로 아래에 탭 형태로 배치) ──
@@ -3946,94 +3940,67 @@ def render_data_mgmt(nonstock_df, cash_df):
     )
     st.markdown(summary_html, unsafe_allow_html=True)
 
+    def _style_nonstock_pnl(v):
+        try:
+            f = float(v)
+        except Exception:
+            return ""
+        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
+        return f"color: {color}; font-weight: 600"
+
     def _render_nonstock_table(rows, show_pnl=False, total_eval=0):
-        """비주식자산 행을 카드로 감싼 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가, 하단에 합계행 표시.
-        [수정] 이전에는 비고란만 px로 폭을 고정(220px)하고 나머지 열은 auto 레이아웃에 맡겼더니,
-        브라우저가 남는 공간을 계좌·상품명·투자원금 등 짧은 내용의 열에까지 억지로 늘려버려서
-        내용량에 비해 앞쪽 칸들이 불필요하게 넓어 보였다. table-layout:fixed + colgroup 비율
-        지정으로 바꿔서, 짧은 내용의 열은 좁게, 비고란은 표 전체 폭에 비례해 넉넉하게 배분한다.
-        (min-width는 그대로 둬서, 화면이 좁으면 지난번 넣어둔 가로 스크롤로 자연스럽게 대응한다.)"""
-        p = "padding:0.65rem 1.1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-        p_r = "padding:0.65rem 1.1rem;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-        p_note = "padding:0.65rem 1.1rem;white-space:normal;word-break:break-word;overflow-wrap:break-word;"
-        th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
-        th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
-        th_note = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
-        row_sep = "border-bottom:1px solid var(--overlay-05);"
-
-        # 열 폭 비율(%): 평가손익 열이 있고 없고에 따라 두 세트로 나눔 (합계 100%)
-        if show_pnl:
-            col_widths = [9, 14, 11, 11, 13, 9, 33]  # 계좌·상품명·투자원금·평가금액·평가손익·반영일자·비고
-        else:
-            col_widths = [10, 16, 13, 13, 10, 38]     # 계좌·상품명·투자원금·평가금액·반영일자·비고
-        colgroup_html = "<colgroup>" + "".join(f"<col style='width:{w}%'>" for w in col_widths) + "</colgroup>"
-
-        pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
-        _acct_order_ns = sorted(rows["계좌"].astype(str).str.strip().unique().tolist()) if not rows.empty else []
-        html = (
-            '<div class="mgmt-table-card">'
-            "<table style='width:100%;min-width:800px;table-layout:fixed;border-collapse:collapse;font-size:0.92rem;'>"
-            f"{colgroup_html}"
-            "<thead><tr>"
-            f"<th style='{th_style}'>계좌</th>"
-            f"<th style='{th_style}'>상품명</th>"
-            f"<th style='{th_r}'>투자원금</th>"
-            f"<th style='{th_r}'>평가금액</th>"
-            f"{pnl_th}"
-            f"<th style='{th_r}'>반영일자</th>"
-            f"<th style='{th_note}'>비고</th>"
-            "</tr></thead><tbody>"
-        )
-
+        """비주식자산 행을 표로 렌더링.
+        [전면 개편] 이전에는 이 표만 직접 만든 HTML 테이블이라, 앱의 다른 표들(보유종목·
+        거래이력·현금흐름 등)이 다 쓰는 st.dataframe과 다르게 동작했다 — 모바일에서 숫자가
+        잘려 보이는 문제, 다운로드·검색·전체화면 버튼이 없는 문제가 전부 이 차이에서 비롯됐다.
+        이제 다른 표들과 완전히 같은 방식(st.dataframe + column_config)으로 통일해서, 모바일
+        가로 스크롤·숨은 컬럼 보기·다운로드·검색·전체화면이 다른 표들과 동일하게 제공된다."""
+        acct_rows = []
+        total_cost = 0.0
         for _, row in rows.iterrows():
             acct = str(row.get("계좌", "")).strip()
             name = str(row.get("상품명", "")).strip()
             cost = _safe_float(row.get("원금", 0))
-            eva  = _safe_float(row.get("평가금액", 0))
-            pnl  = eva - cost
-            date_ = str(row.get("반영일자", "")).strip()
-            note = str(row.get("비고", "")).strip()
+            eva = _safe_float(row.get("평가금액", 0))
+            pnl = eva - cost
+            total_cost += cost
+            entry = {
+                "계좌": acct, "상품명": name,
+                "투자원금": int(cost), "평가금액": int(eva),
+            }
+            if show_pnl:
+                entry["평가손익"] = int(pnl)
+                entry["수익률"] = round(pnl / cost * 100, 2) if cost else 0.0
+            entry["반영일자"] = str(row.get("반영일자", "")).strip()
+            entry["비고"] = str(row.get("비고", "")).strip()
+            acct_rows.append(entry)
 
-            badge_bg, badge_color = get_account_color(acct, _acct_order_ns)
-            badge_html = (
-                f'<span style="background:{badge_bg};color:{badge_color};'
-                f'font-size:0.75rem;padding:2px 8px;border-radius:4px;'
-                f'margin-right:6px;white-space:nowrap;">{acct}</span>'
-            )
+        # 합계 행 (비고·반영일자는 비워둠)
+        total_row = {"계좌": "합계", "상품명": "", "투자원금": int(total_cost), "평가금액": int(total_eval)}
+        if show_pnl:
+            total_pnl = total_eval - total_cost
+            total_row["평가손익"] = int(total_pnl)
+            total_row["수익률"] = round(total_pnl / total_cost * 100, 2) if total_cost else 0.0
+        total_row["반영일자"] = ""
+        total_row["비고"] = ""
+        acct_rows.append(total_row)
 
-            pnl_color = color_pnl(pnl)
-            pnl_td = (
-                f"<td style='{p_r}color:{pnl_color};font-weight:600;'>"
-                f"{fmt_money_full(pnl)} ({fmt_pct(pnl / cost * 100 if cost else 0)})"
-                f"</td>"
-            ) if show_pnl else ""
+        table_df = pd.DataFrame(acct_rows)
+        money_cols = ["투자원금", "평가금액"] + (["평가손익"] if show_pnl else [])
+        pct_cols = ["수익률"] if show_pnl else []
+        col_config = build_number_column_config(table_df, money_cols=money_cols, pct_cols=pct_cols)
 
-            cost_str = fmt_money_full(cost) if cost else "-"
-            eva_str  = fmt_money_full(eva)  if eva  else "-"
+        styled = table_df.style.map(
+            _style_nonstock_pnl, subset=["평가손익", "수익률"] if show_pnl else []
+        ) if show_pnl else table_df
 
-            html += (
-                f"<tr style='{row_sep}'>"
-                f"<td style='{p}'>{badge_html}</td>"
-                f"<td style='{p};font-weight:600;'>{name}</td>"
-                f"<td style='{p_r}'>{cost_str}</td>"
-                f"<td style='{p_r};font-weight:600;'>{eva_str}</td>"
-                f"{pnl_td}"
-                f"<td style='{p_r};color:var(--text-dim);font-size:0.88rem;'>{date_}</td>"
-                f"<td style='{p_note};color:var(--text-dim);font-size:0.88rem;'>{note}</td>"
-                "</tr>"
-            )
-
-        # 합계행 (계좌+상품명+투자원금=3열 라벨, 평가금액 합계 1열, 나머지는 빈칸)
-        trail_colspan = 3 if show_pnl else 2
-        html += (
-            "<tr style='background:var(--overlay-03);'>"
-            f"<td colspan='3' style='{p};font-weight:700;color:var(--text-dim);'>합계</td>"
-            f"<td style='{p_r};font-weight:700;'>{fmt_money_full(total_eval)}</td>"
-            f"<td colspan='{trail_colspan}' style='{p};'></td>"
-            "</tr>"
+        st.dataframe(
+            styled,
+            width="stretch",
+            hide_index=True,
+            column_config=col_config,
+            height=min(400, 50 + 45 * len(table_df)),
         )
-        html += "</tbody></table></div>"
-        st.markdown(html, unsafe_allow_html=True)
 
     if not nonstock_df.empty:
         if not tdf_rows.empty:
