@@ -3948,21 +3948,32 @@ def render_data_mgmt(nonstock_df, cash_df):
 
     def _render_nonstock_table(rows, show_pnl=False, total_eval=0):
         """비주식자산 행을 카드로 감싼 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가, 하단에 합계행 표시.
-        비고란이 길어져도 계좌·상품명·투자원금·평가금액·평가손익·반영일자 열은 항상 한 줄로 유지되도록
-        해당 열에는 white-space: nowrap을, 비고 열에는 최대 폭 제한(줄바꿈 허용)을 적용한다."""
-        p = "padding:0.65rem 1.1rem;white-space:nowrap;"
-        p_r = "padding:0.65rem 1.1rem;text-align:right;white-space:nowrap;"
-        p_note = "padding:0.65rem 1.1rem;width:220px;min-width:220px;max-width:220px;white-space:normal;word-break:break-word;overflow-wrap:break-word;"
+        [수정] 이전에는 비고란만 px로 폭을 고정(220px)하고 나머지 열은 auto 레이아웃에 맡겼더니,
+        브라우저가 남는 공간을 계좌·상품명·투자원금 등 짧은 내용의 열에까지 억지로 늘려버려서
+        내용량에 비해 앞쪽 칸들이 불필요하게 넓어 보였다. table-layout:fixed + colgroup 비율
+        지정으로 바꿔서, 짧은 내용의 열은 좁게, 비고란은 표 전체 폭에 비례해 넉넉하게 배분한다.
+        (min-width는 그대로 둬서, 화면이 좁으면 지난번 넣어둔 가로 스크롤로 자연스럽게 대응한다.)"""
+        p = "padding:0.65rem 1.1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+        p_r = "padding:0.65rem 1.1rem;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+        p_note = "padding:0.65rem 1.1rem;white-space:normal;word-break:break-word;overflow-wrap:break-word;"
         th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
         th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);white-space:nowrap;"
-        th_note = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);width:220px;min-width:220px;max-width:220px;"
+        th_note = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
         row_sep = "border-bottom:1px solid var(--overlay-05);"
+
+        # 열 폭 비율(%): 평가손익 열이 있고 없고에 따라 두 세트로 나눔 (합계 100%)
+        if show_pnl:
+            col_widths = [9, 14, 11, 11, 13, 9, 33]  # 계좌·상품명·투자원금·평가금액·평가손익·반영일자·비고
+        else:
+            col_widths = [10, 16, 13, 13, 10, 38]     # 계좌·상품명·투자원금·평가금액·반영일자·비고
+        colgroup_html = "<colgroup>" + "".join(f"<col style='width:{w}%'>" for w in col_widths) + "</colgroup>"
 
         pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
         _acct_order_ns = sorted(rows["계좌"].astype(str).str.strip().unique().tolist()) if not rows.empty else []
         html = (
             '<div class="mgmt-table-card">'
-            "<table style='width:100%;border-collapse:collapse;font-size:0.92rem;'>"
+            "<table style='width:100%;min-width:800px;table-layout:fixed;border-collapse:collapse;font-size:0.92rem;'>"
+            f"{colgroup_html}"
             "<thead><tr>"
             f"<th style='{th_style}'>계좌</th>"
             f"<th style='{th_style}'>상품명</th>"
