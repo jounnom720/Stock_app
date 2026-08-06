@@ -2881,20 +2881,26 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     st.markdown('<div class="section-title">자산 구성</div>', unsafe_allow_html=True)
 
     # 계좌가 아닌 실제 자산 유형(ETF/주식/TDF/현금) 기준으로 집계 — 한 계좌 안에 ETF와 주식이
-    # 함께 있어도(예: 미래에셋 계좌에 ETF+주식 혼재) 정확히 분리되도록 get_asset_type()으로 분류
+    # 함께 있어도(예: 미래에셋 계좌에 ETF+주식 혼재) 정확히 분리되도록 get_asset_type()으로 분류.
+    # 주식은 다시 get_asset_market()으로 국내/해외를 나눠, 해외 종목이 "국내주식"에
+    # 잘못 합산되지 않도록 한다 (해외 주식 지원 이후 발견된 분류 누락 수정 — 2026-08).
     if not holdings_df.empty:
         _type_series = holdings_df.apply(lambda r: get_asset_type(r["종목코드"], r["종목명"]), axis=1)
+        _market_series = holdings_df["종목코드"].apply(get_asset_market)
         etf_eval = int(holdings_df.loc[_type_series == "ETF", "평가금액"].sum())
-        stock_only_eval = int(holdings_df.loc[_type_series == "주식", "평가금액"].sum())
+        _stock_mask = _type_series == "주식"
+        domestic_stock_eval = int(holdings_df.loc[_stock_mask & (_market_series == "KR"), "평가금액"].sum())
+        overseas_stock_eval = int(holdings_df.loc[_stock_mask & (_market_series == "US"), "평가금액"].sum())
     else:
         etf_eval = 0
-        stock_only_eval = 0
+        domestic_stock_eval = 0
+        overseas_stock_eval = 0
 
     # 큰 조각과 작은 조각이 번갈아 나오도록 순서 배열 — 작은 조각(TDF·현금성자산)끼리
     # 붙어있으면 바깥으로 뽑은 라벨 선이 서로 겹치기 쉬워서, 양옆에 항상 큰 조각이 오도록 배치
-    _colors = ["#5c6bc0", "#78909c", "#7b1fa2", "#0288d1"]
-    _labels = ["국내주식", "현금성자산", "ETF", "TDF/펀드"]
-    _values = [max(0, v) for v in [stock_only_eval, cash_eval, etf_eval, tdf_eval]]
+    _colors = ["#5c6bc0", "#78909c", "#7b1fa2", "#0288d1", "#ff7043"]
+    _labels = ["국내주식", "현금성자산", "ETF", "TDF/펀드", "해외주식"]
+    _values = [max(0, v) for v in [domestic_stock_eval, cash_eval, etf_eval, tdf_eval, overseas_stock_eval]]
     _total_for_pct = sum(_values) or 1
 
     col_donut, col_table = st.columns([1, 1])
@@ -3938,24 +3944,30 @@ def render_cashflow(trade_df, cashlog_df=None):
         ev_amount = ev["금액"]
         pnl = ev["손익"]
 
-        # 매도일 이후 같은 계좌의 매수 내역
-        후속매수 = trade_sorted[
+        # 매도일 이후 같은 계좌의 매수 내역 — 건수 제한 없이 전부 조회.
+        # 예전에는 .head(5)로 5건까지만 표시해서, 6번째 이후 매수(예: 애플)가
+        # 화면에서 통째로 사라지는 문제가 있었음 (2026-08 발견). 지금은 앞 5건만
+        # 카드 안에 바로 보여주고, 나머지는 "더 보기" 접기(expander)로 전부 표시한다.
+        후속매수_전체 = trade_sorted[
             (trade_sorted["거래일자_dt"] >= ev_date) &
             (trade_sorted["운용사"] == ev_account) &
             (trade_sorted["거래구분"] == "매수")
-        ].head(5)
+        ]
+        표시건수 = 5
+        후속매수_표시 = 후속매수_전체.head(표시건수)
+        후속매수_나머지 = 후속매수_전체.iloc[표시건수:]
 
-        if 후속매수.empty:
+        def _buy_item_html(buy):
+            buy_amt = int(buy["거래수량"]) * float(buy["거래단가"])
+            return (
+                f'<div class="sell-follow-item">↳ {_safe_date_str(buy["거래일자_dt"])} · '
+                f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
+            )
+
+        if 후속매수_표시.empty:
             buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 추가 매수 없음 · 매도금은 예수금에 합산 보관 중</div>'
         else:
-            items = []
-            for _, buy in 후속매수.iterrows():
-                buy_amt = int(buy["거래수량"]) * float(buy["거래단가"])
-                items.append(
-                    f'<div class="sell-follow-item">↳ {_safe_date_str(buy["거래일자_dt"])} · '
-                    f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
-                )
-            buy_html = "".join(items)
+            buy_html = "".join(_buy_item_html(buy) for _, buy in 후속매수_표시.iterrows())
 
         _acct_order_ev = sorted(trade_sorted["운용사"].unique().tolist())
         _badge_bg, _badge_fg = get_account_color(ev_account, _acct_order_ev)
@@ -3975,6 +3987,12 @@ def render_cashflow(trade_df, cashlog_df=None):
             '</div>',
             unsafe_allow_html=True
         )
+
+        # 5건을 넘는 매수 내역은 접기(expander)로 전부 표시 — 데이터 누락 없이 화면만 압축
+        if not 후속매수_나머지.empty:
+            with st.expander(f"↳ 이후 매수 {len(후속매수_나머지)}건 더 보기", expanded=False):
+                more_html = "".join(_buy_item_html(buy) for _, buy in 후속매수_나머지.iterrows())
+                st.markdown(more_html, unsafe_allow_html=True)
 
     if not events:
         st.info("매도 내역이 없습니다.")
