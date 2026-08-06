@@ -1164,8 +1164,7 @@ def get_usd_krw_rate() -> float | None:
     """1달러당 원화 환율 조회 (야후파이낸스 'KRW=X' 티커, 1시간 캐시).
     해외(미국) 종목의 시세·매입금액을 원화로 환산할 때 쓰는 단일 환율 소스 —
     이 앱 안 모든 해외 종목 관련 계산이 이 함수 하나만 거쳐가므로 화면마다 다른
-    환율이 적용될 일이 없다. 조회 실패 시 None을 반환하며, 호출부에서 실패 시
-    원래 통화(달러) 그대로 표시하도록 처리한다 (조용히 틀린 값을 만들지 않기 위함)."""
+    환율이 적용될 일이 없다. 조회 실패 시 None을 반환한다."""
     try:
         hist = yf.Ticker("KRW=X").history(period="5d")
         if not hist.empty:
@@ -1174,14 +1173,25 @@ def get_usd_krw_rate() -> float | None:
         logging.warning("환율 조회 실패: %s", e)
     return None
 
+# 환율 조회가 실패했을 때 쓰는 비상용 근사 환율. [중요] 예전에는 조회 실패 시 환산을 아예
+# 안 하고 원래(달러) 값을 그대로 반환했는데, 그러면 화면에는 "1,555원"처럼 그럴듯한 원화
+# 금액처럼 보이면서 실제로는 달러 숫자 그대로라 사용자가 알아채기 어려운 훨씬 더 위험한
+# 오류였다(실제로 이렇게 발생해 확인됨 — 2026-08). 실시간 조회가 실패해도 최소한 자릿수
+# (스케일)는 맞는 금액이 보이도록, 대략적인 환율로라도 반드시 환산한다. 실제 환율과 크게
+# 벌어지면 이 상수를 갱신할 것.
+FALLBACK_USD_KRW_RATE = 1380
+
+def get_usd_krw_rate_safe() -> float:
+    """get_usd_krw_rate()가 실패(None)해도 항상 쓸 수 있는 환율값을 반환한다
+    (실시간 조회 성공 시 그 값, 실패 시 FALLBACK_USD_KRW_RATE)."""
+    return get_usd_krw_rate() or FALLBACK_USD_KRW_RATE
+
 def _to_krw_if_foreign(ticker: str, price: float) -> float:
-    """국내 종목(.KS/.KQ) 티커는 그대로, 해외 종목은 현재 환율로 원화 환산해서 반환.
-    환율 조회에 실패하면 원래 값을 그대로 반환한다(달러 금액이 원화인 것처럼 표시되는
-    조용한 오류보다는, 최소한 숫자가 그대로 보존되는 쪽이 사용자가 이상함을 눈치채기 쉽다)."""
+    """국내 종목(.KS/.KQ) 티커는 그대로, 해외 종목은 환율로 원화 환산해서 반환
+    (환율 실시간 조회 실패 시 비상용 근사 환율 사용 — 위 get_usd_krw_rate_safe 참고)."""
     if ticker.endswith(".KS") or ticker.endswith(".KQ"):
         return price
-    rate = get_usd_krw_rate()
-    return price * rate if rate else price
+    return price * get_usd_krw_rate_safe()
 
 @st.cache_data(ttl=60)
 def get_prices(tickers: tuple) -> dict[str, float]:
@@ -1466,9 +1476,7 @@ def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
         avg = h["평균단가"]
         qty = h["보유수량"]
         if avg and get_asset_market(code) == "US":
-            rate = get_usd_krw_rate()
-            if rate:
-                avg = avg * rate
+            avg = avg * get_usd_krw_rate_safe()
         rows.append({
             "종목코드": code,
             "종목명": h["종목명"],
@@ -1502,12 +1510,11 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
         평균매입단가 = ev["평균매입단가"]
         매도단가 = ev["매도단가"]
         if get_asset_market(ev["종목코드"]) == "US":
-            rate = get_usd_krw_rate()
-            if rate:
-                매도금액 *= rate
-                매입금액 *= rate
-                평균매입단가 *= rate
-                매도단가 *= rate
+            rate = get_usd_krw_rate_safe()
+            매도금액 *= rate
+            매입금액 *= rate
+            평균매입단가 *= rate
+            매도단가 *= rate
         실현손익 = 매도금액 - 매입금액
         realized_rows.append({
             "거래일자": ev["거래일자"], "계좌": ev["계좌"], "종목코드": ev["종목코드"], "종목명": ev["종목명"],
@@ -3373,10 +3380,9 @@ def _fetch_price_history_foreign(ticker: str, months_back: int | None) -> pd.Dat
         # 날짜 컬럼과 같은 형식(tz-naive)으로 맞춘다.
         if isinstance(hist["Date"].dtype, pd.DatetimeTZDtype):
             hist["Date"] = hist["Date"].dt.tz_localize(None)
-        rate = get_usd_krw_rate()
-        if rate:
-            for col in ("Open", "High", "Low", "Close"):
-                hist[col] = hist[col] * rate
+        rate = get_usd_krw_rate_safe()
+        for col in ("Open", "High", "Low", "Close"):
+            hist[col] = hist[col] * rate
         return hist[["Date", "Open", "High", "Low", "Close", "Volume"]]
     except Exception as e:
         logging.warning("과거 시세 조회 실패(해외) [%s]: %s", ticker, e)
@@ -3545,9 +3551,7 @@ def _avg_cost_series(trade_df: pd.DataFrame, code: str) -> pd.DataFrame:
     # 해외(미국) 종목은 거래단가가 달러로 입력되므로, 캔들차트(이미 원화 환산됨)와 같은
     # 기준으로 맞추기 위해 평균단가도 현재 환율로 원화 환산한다. (해외 주식 지원 — 2026-08 추가)
     if not result.empty and get_asset_market(code) == "US":
-        rate = get_usd_krw_rate()
-        if rate:
-            result["평균단가"] = result["평균단가"] * rate
+        result["평균단가"] = result["평균단가"] * get_usd_krw_rate_safe()
     return result
 
 
