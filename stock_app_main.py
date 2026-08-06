@@ -332,8 +332,14 @@ def _apply_column_formatting(sh) -> list:
         for i, col_name in enumerate(header):
             kind = rules.get(str(col_name).strip(), "text")
             if kind in ("money", "number"):
+                # [수정] 기존 패턴 "#,##0"은 소수점을 아예 허용하지 않아, 해외(미국) 종목의
+                # 거래단가처럼 센트 단위가 있는 값(예: 230.5)이 서식 통일을 누르는 순간
+                # 231로 반올림되어 실제 매수 단가가 조용히 바뀌는 문제가 있었다. "#,##0.##"은
+                # 정수는 그대로("277,000") 보여주면서, 소수점이 있는 값만 그 소수 자릿수를
+                # 그대로 보여준다("230.5") — 국내(KRW, 항상 정수)와 해외(USD, 소수 가능) 값
+                # 둘 다 값 손실 없이 표시할 수 있는 단일 패턴이라 컬럼별로 나눌 필요가 없다.
                 cell_format = {
-                    "numberFormat": {"type": "NUMBER", "pattern": "#,##0"},
+                    "numberFormat": {"type": "NUMBER", "pattern": "#,##0.##"},
                     "horizontalAlignment": "RIGHT",
                     "textFormat": {**BASE_FONT, "bold": False},
                 }
