@@ -3684,14 +3684,16 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
         merge_dates = pd.concat([hist[["Date"]], avg_series[["Date"]]]).drop_duplicates().sort_values("Date")
         merged_avg = pd.merge_asof(merge_dates, avg_series, on="Date", direction="backward")
         if merged_avg["평균단가"].notna().any():
+            # markers는 유효 구간이 점 1개뿐일 때만 켠다(막 매수 직후라 선을 그을 다음 점이
+            # 없는 경우). 거래가 여러 번이라 이미 선으로 이어지는 종목까지 점을 다 찍으면
+            # 원래의 깔끔한 계단선 모양을 해치므로, 꼭 필요한 경우로 한정한다.
+            valid_points = merged_avg["평균단가"].notna().sum()
+            marker_size = 6 if valid_points == 1 else 0
             fig.add_trace(go.Scatter(
                 x=merged_avg["Date"], y=merged_avg["평균단가"], name="내 평균단가",
-                # mode="lines"만 쓰면, 유효 구간이 점 1개뿐인 경우(막 매수 직후) 선을 그릴 다음
-                # 점이 없어 아예 안 보이는 문제가 있었다. markers를 같이 켜서 점이 하나뿐이어도
-                # 최소한 점 하나는 찍히도록 한다.
                 mode="lines+markers",
                 line=dict(width=3, color="#ffd166", shape="hv"),
-                marker=dict(size=6, color="#ffd166"),
+                marker=dict(size=marker_size, color="#ffd166"),
                 hovertemplate="%{x|%Y-%m-%d}<br>내 평균단가: %{y:,.0f}원<extra></extra>",
             ), row=1, col=1)
 
