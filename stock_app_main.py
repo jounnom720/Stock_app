@@ -1512,6 +1512,17 @@ def color_pnl(v) -> str:
         return "#8a8d96"
     return "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "#8a8d96"
 
+def style_pnl_cell(v) -> str:
+    """st.dataframe의 Styler.map에 넘기는 손익 셀 색상 문자열 (양수=빨강, 음수=파랑).
+    거래이력·보유종목·매도이력·TDF펀드 표 등 여러 곳에 똑같은 함수가 각각 복사돼 있던 것을
+    하나로 통합했다 (동작은 기존과 동일, 코드만 정리)."""
+    try:
+        f = float(v)
+    except Exception:
+        return ""
+    color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
+    return f"color: {color}; font-weight: 600"
+
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
 
@@ -1655,13 +1666,6 @@ html, body,
     color: var(--text-dim);
     flex-wrap: wrap;
 }
-.hero-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    margin-right: 4px;
-}
 
 /* ── 자산 구성 요약 카드: 컬러 스트라이프 + 아이콘 배지 (제안 3 확정판) ── */
 .asset-breakdown-grid {
@@ -1764,8 +1768,6 @@ html, body,
     font-weight: 600;
     margin-bottom: 0.5rem;
 }
-.badge-irp  { background: rgba(83,74,183,0.22);  color: #AFA9EC; }
-.badge-mira { background: rgba(29,158,117,0.22); color: #5DCAA5; }
 .acct-value { font-size: 1.9rem; font-weight: 700; line-height: 1.2; }
 .acct-pnl   { font-size: 1.1rem; font-weight: 600; }
 
@@ -1884,8 +1886,6 @@ html, body,
     padding: 0.12rem 0.5rem;
     border-radius: 6px;
 }
-.holding-acct-irp { background: rgba(59,130,246,0.16); color: #7fb2f5; }
-.holding-acct-mira { background: rgba(29,158,117,0.16); color: #4ecb9a; }
 .holding-name {
     font-size: 1.08rem;
     font-weight: 700;
@@ -1971,14 +1971,6 @@ html, body,
     font-size: 1rem;
     font-weight: 700;
     margin: 1.7rem 0 0.7rem;
-}
-.mgmt-table-card {
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: 14px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    -webkit-overflow-scrolling: touch;
 }
 .mgmt-warn-card {
     background: var(--overlay-03);
@@ -2649,9 +2641,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     render_holdings_treemap(holdings_df)
 
     s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
-    stock_eval, stock_cost, stock_pnl, stock_pct = s["stock_eval"], s["stock_cost"], s["stock_pnl"], s["stock_pct"]
-    tdf_eval, tdf_cost, tdf_pnl, tdf_pct = s["tdf_eval"], s["tdf_cost"], s["tdf_pnl"], s["tdf_pct"]
-    cash_eval, cash_pct_of_total = s["cash_eval"], s["cash_pct_of_total"]
+    stock_eval, stock_cost, stock_pct = s["stock_eval"], s["stock_cost"], s["stock_pct"]
+    tdf_eval, tdf_cost, tdf_pct = s["tdf_eval"], s["tdf_cost"], s["tdf_pct"]
+    cash_eval = s["cash_eval"]
     total_eval, total_cost, total_pnl, total_pct = s["total_eval"], s["total_cost"], s["total_pnl"], s["total_pct"]
     realized_total, grand_total_pnl = s["realized_total"], s["grand_total_pnl"]
 
@@ -2942,15 +2934,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             )
             table_df = table_df.rename(columns={"년월_표시": "년월"}).sort_values("년월", ascending=False)
 
-            def _style_trend_pnl(v):
-                try:
-                    f = float(v)
-                except Exception:
-                    return ""
-                color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
-                return f"color: {color}; font-weight: 600"
-
-            styled_trend = table_df.style.map(_style_trend_pnl, subset=["손익", "수익률"])
+            styled_trend = table_df.style.map(style_pnl_cell, subset=["손익", "수익률"])
             col_config = build_number_column_config(
                 table_df, money_cols=["통합원금", "통합평가", "손익"], pct_cols=["수익률"]
             )
@@ -3116,14 +3100,6 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
     table_df = pd.DataFrame(table_rows)
 
-    def _style_holding_pnl(v):
-        try:
-            f = float(v)
-        except Exception:
-            return ""
-        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
-        return f"color: {color}; font-weight: 600"
-
     st.markdown('<div class="ui-gap-md"></div>', unsafe_allow_html=True)
     보기방식 = st.radio("보기 방식", ["카드형", "표"], horizontal=True, key="holding_view_mode")
 
@@ -3158,7 +3134,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
             """, unsafe_allow_html=True)
     else:
         show_cols = ["구분", "종목명", "계좌", "수량", "평단", "현재가", "투자원금", "평가금액", "손익", "수익률"]
-        styled_table = table_df[show_cols].style.map(_style_holding_pnl, subset=["손익", "수익률"])
+        styled_table = table_df[show_cols].style.map(style_pnl_cell, subset=["손익", "수익률"])
 
         col_config = {
             "수량": st.column_config.NumberColumn("수량", format="localized"),
@@ -3781,19 +3757,11 @@ def render_cashflow(trade_df, cashlog_df=None):
     display_realized = realized_df.sort_values("거래일자", ascending=False).copy()
     display_realized["거래일자"] = display_realized["거래일자"].dt.strftime("%Y-%m-%d")
 
-    def _style_pnl(v):
-        try:
-            f = float(v)
-        except Exception:
-            return ""
-        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
-        return f"color: {color}; font-weight: 600"
-
     styled = display_realized.style
     if hasattr(styled, "map"):
-        styled = styled.map(_style_pnl, subset=["실현손익"])
+        styled = styled.map(style_pnl_cell, subset=["실현손익"])
     else:
-        styled = styled.applymap(_style_pnl, subset=["실현손익"])
+        styled = styled.applymap(style_pnl_cell, subset=["실현손익"])
     col_config = build_number_column_config(
         display_realized,
         money_cols=["매도단가", "평균매입단가", "매도금액", "매입금액", "실현손익"],
@@ -3967,14 +3935,6 @@ def render_data_mgmt(nonstock_df, cash_df):
     )
     st.markdown(summary_html, unsafe_allow_html=True)
 
-    def _style_nonstock_pnl(v):
-        try:
-            f = float(v)
-        except Exception:
-            return ""
-        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
-        return f"color: {color}; font-weight: 600"
-
     def _render_nonstock_table(rows, show_pnl=False, total_eval=0):
         """비주식자산 행을 표로 렌더링.
         [전면 개편] 이전에는 이 표만 직접 만든 HTML 테이블이라, 앱의 다른 표들(보유종목·
@@ -4018,7 +3978,7 @@ def render_data_mgmt(nonstock_df, cash_df):
         col_config = build_number_column_config(table_df, money_cols=money_cols, pct_cols=pct_cols)
 
         styled = table_df.style.map(
-            _style_nonstock_pnl, subset=["평가손익", "수익률"] if show_pnl else []
+            style_pnl_cell, subset=["평가손익", "수익률"] if show_pnl else []
         ) if show_pnl else table_df
 
         st.dataframe(
