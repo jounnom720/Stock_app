@@ -3367,6 +3367,12 @@ def _fetch_price_history_foreign(ticker: str, months_back: int | None) -> pd.Dat
         if hist.empty:
             return pd.DataFrame()
         hist = hist.reset_index()
+        # 야후파이낸스가 반환하는 날짜는 미국 동부 시간대 정보(tz-aware)가 붙어 있는데,
+        # 구글시트에서 읽어온 거래일자(tz 정보 없음)나 국내 종목의 pykrx 날짜(역시 tz 없음)와
+        # 형(dtype)이 달라 merge_asof에서 병합 오류가 났었다. 시간대 정보를 제거해 다른 모든
+        # 날짜 컬럼과 같은 형식(tz-naive)으로 맞춘다.
+        if isinstance(hist["Date"].dtype, pd.DatetimeTZDtype):
+            hist["Date"] = hist["Date"].dt.tz_localize(None)
         rate = get_usd_krw_rate()
         if rate:
             for col in ("Open", "High", "Low", "Close"):
