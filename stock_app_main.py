@@ -9,6 +9,7 @@
 
 import streamlit as st
 import pandas as pd
+import re
 import numpy as np
 import gspread
 import yfinance as yf
@@ -86,16 +87,33 @@ ETF_BRAND_PREFIXES = (
     "KOSEF", "PLUS", "RISE", "WOORI", "마이다스", "히어로즈", "TIMEFOLIO",
 )
 
+def get_asset_market(code: str) -> str:
+    """종목코드로 국내(KR)/해외(US) 시장을 판별.
+    ASSET_MASTER에 등록된 종목은 등록된 market 값을 따르고, 미등록 종목은 코드 형태로
+    추정한다: 국내 종목코드는 숫자 6자리이거나 숫자+영문 혼합 6자리(예: 0148J0) 규칙을
+    따르므로, 이 규칙에 안 맞고 영문자로만 이루어진 코드(예: AAPL, MSFT)는 해외(미국)
+    종목으로 판단한다. (해외 주식 지원 — 2026-08 추가)"""
+    code = str(code).strip().upper()
+    meta = ASSET_MASTER.get(code)
+    if meta:
+        return "US" if meta.get("market") == "US" else "KR"
+    if re.fullmatch(r"[A-Z]{1,5}", code):
+        return "US"
+    return "KR"
+
 def get_asset_ticker(code: str) -> str:
-    """ASSET_MASTER에 등록된 종목은 등록된 티커를, 미등록 종목코드는 KRX 6자리 코드 규칙에 따라
-    자동으로 야후파이낸스 티커(코드.KS)를 생성해 반환. 신규 사용자가 보유한 임의의 종목코드도
-    별도 등록 없이 실시간 시세 조회가 되도록 하기 위함."""
+    """ASSET_MASTER에 등록된 종목은 등록된 티커를, 미등록 종목코드는 시장 판별 결과에 따라
+    국내는 KRX 6자리 코드 규칙으로(코드.KS), 해외(미국)는 코드 그대로(접미사 없음) 티커를
+    생성해 반환한다. 신규 사용자가 보유한 임의의 종목코드도 별도 등록 없이 실시간 시세
+    조회가 되도록 하기 위함."""
     code = str(code).strip()
     if not code:
         return ""
     meta = ASSET_MASTER.get(code)
     if meta:
         return meta["ticker"]
+    if get_asset_market(code) == "US":
+        return code.upper()
     return f"{code}.KS"
 
 def get_asset_type(code: str, name: str = "") -> str:
@@ -1135,10 +1153,37 @@ def _fetch_krx_stock_price(krx_code: str):
         logging.warning("KRX 종목 시세 조회 실패 [%s]: %s", krx_code, e)
     return None
 
+@st.cache_data(ttl=3600)
+def get_usd_krw_rate() -> float | None:
+    """1달러당 원화 환율 조회 (야후파이낸스 'KRW=X' 티커, 1시간 캐시).
+    해외(미국) 종목의 시세·매입금액을 원화로 환산할 때 쓰는 단일 환율 소스 —
+    이 앱 안 모든 해외 종목 관련 계산이 이 함수 하나만 거쳐가므로 화면마다 다른
+    환율이 적용될 일이 없다. 조회 실패 시 None을 반환하며, 호출부에서 실패 시
+    원래 통화(달러) 그대로 표시하도록 처리한다 (조용히 틀린 값을 만들지 않기 위함)."""
+    try:
+        hist = yf.Ticker("KRW=X").history(period="5d")
+        if not hist.empty:
+            return float(hist["Close"].dropna().iloc[-1])
+    except Exception as e:
+        logging.warning("환율 조회 실패: %s", e)
+    return None
+
+def _to_krw_if_foreign(ticker: str, price: float) -> float:
+    """국내 종목(.KS/.KQ) 티커는 그대로, 해외 종목은 현재 환율로 원화 환산해서 반환.
+    환율 조회에 실패하면 원래 값을 그대로 반환한다(달러 금액이 원화인 것처럼 표시되는
+    조용한 오류보다는, 최소한 숫자가 그대로 보존되는 쪽이 사용자가 이상함을 눈치채기 쉽다)."""
+    if ticker.endswith(".KS") or ticker.endswith(".KQ"):
+        return price
+    rate = get_usd_krw_rate()
+    return price * rate if rate else price
+
 @st.cache_data(ttl=60)
 def get_prices(tickers: tuple) -> dict[str, float]:
     """현재가 조회. 국내 종목(.KS/.KQ)은 KRX 원천 데이터(pykrx)를 우선 쓰고, 실패하거나
-    국내 종목이 아닌 티커만 야후 파이낸스로 조회한다.
+    국내 종목이 아닌 티커만 야후 파이낸스로 조회한다. 해외(미국) 종목은 야후에서 받은
+    달러 가격을 현재 환율로 원화 환산해서 저장한다 — 이 함수를 거쳐 나온 값은 항상 원화
+    기준이므로, 이 값을 쓰는 다른 모든 화면(대시보드·보유종목 등)은 통화를 신경 쓸 필요가
+    없다 (해외 주식 지원 — 2026-08 추가).
     st.cache_data는 list를 해시할 수 없으므로 tuple로 받음.
     """
     if not tickers:
@@ -1173,9 +1218,9 @@ def get_prices(tickers: tuple) -> dict[str, float]:
                 if hasattr(latest, "items"):
                     for t, p in latest.items():
                         if pd.notna(p):
-                            prices[t] = float(p)
+                            prices[t] = _to_krw_if_foreign(t, float(p))
                 elif len(yf_fallback_needed) == 1 and pd.notna(latest):
-                    prices[yf_fallback_needed[0]] = float(latest)
+                    prices[yf_fallback_needed[0]] = _to_krw_if_foreign(yf_fallback_needed[0], float(latest))
     except Exception as e:
         logging.warning("일괄 시세 조회 실패: %s", e)
 
@@ -1185,7 +1230,7 @@ def get_prices(tickers: tuple) -> dict[str, float]:
         try:
             hist = yf.Ticker(t).history(period="5d")
             if not hist.empty:
-                prices[t] = float(hist["Close"].dropna().iloc[-1])
+                prices[t] = _to_krw_if_foreign(t, float(hist["Close"].dropna().iloc[-1]))
         except Exception as e:
             logging.warning("개별 시세 조회 실패 [%s]: %s", t, e)
 
@@ -1403,13 +1448,21 @@ def _replay_trade_ledger(trade_df: pd.DataFrame):
 # 보유 종목 계산
 # ============================================================
 def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
-    """거래이력으로 현재 보유 종목과 평균단가 계산. (_replay_trade_ledger 공유 로직 사용)"""
+    """거래이력으로 현재 보유 종목과 평균단가 계산. (_replay_trade_ledger 공유 로직 사용)
+    해외(미국) 종목은 거래이력에 입력된 원래 통화(달러) 그대로 평균단가를 계산한 뒤,
+    이 시점에 현재 환율로 원화 환산한다 — 그래야 이후 모든 계산(투자원금 합계, 평가금액,
+    수익률 등)이 국내 종목과 완전히 동일한 방식(전부 원화)으로 흘러간다. (해외 주식 지원
+    — 2026-08 추가)"""
     _, final_state = _replay_trade_ledger(trade_df)
 
     rows = []
     for (account, code), h in final_state.items():
         avg = h["평균단가"]
         qty = h["보유수량"]
+        if avg and get_asset_market(code) == "US":
+            rate = get_usd_krw_rate()
+            if rate:
+                avg = avg * rate
         rows.append({
             "종목코드": code,
             "종목명": h["종목명"],
@@ -1428,6 +1481,11 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
     """매도 건별 실현손익을 평균매입가법으로 계산하는 단일 함수.
     주식/ETF 전체가 이 함수 하나만 거쳐가므로 화면마다 다른 숫자가 나올 수 없다.
     (_replay_trade_ledger 공유 로직 사용)
+    해외(미국) 종목은 매도단가·평균매입단가 모두 원래 통화(달러) 그대로 계산한 뒤, 그
+    결과값(매도금액·매입금액)을 현재 환율로 원화 환산한다. 정확히는 매도 시점 환율을
+    써야 하지만, 이 앱은 과거 환율 데이터를 따로 저장하지 않으므로 현재 환율로 일괄
+    환산하는 방식을 쓴다 — 보유 종목 평가와 같은 기준이라 적어도 화면끼리는 일관된다.
+    (해외 주식 지원 — 2026-08 추가)
     """
     sell_events, _ = _replay_trade_ledger(trade_df)
 
@@ -1435,10 +1493,19 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
     for ev in sell_events:
         매도금액 = ev["effective_qty"] * ev["매도단가"]
         매입금액 = ev["effective_qty"] * ev["평균매입단가"]
+        평균매입단가 = ev["평균매입단가"]
+        매도단가 = ev["매도단가"]
+        if get_asset_market(ev["종목코드"]) == "US":
+            rate = get_usd_krw_rate()
+            if rate:
+                매도금액 *= rate
+                매입금액 *= rate
+                평균매입단가 *= rate
+                매도단가 *= rate
         실현손익 = 매도금액 - 매입금액
         realized_rows.append({
             "거래일자": ev["거래일자"], "계좌": ev["계좌"], "종목코드": ev["종목코드"], "종목명": ev["종목명"],
-            "매도수량": ev["매도수량"], "매도단가": ev["매도단가"], "평균매입단가": round(ev["평균매입단가"]),
+            "매도수량": ev["매도수량"], "매도단가": round(매도단가), "평균매입단가": round(평균매입단가),
             "매도금액": round(매도금액), "매입금액": round(매입금액),
             "실현손익": round(실현손익),
         })
@@ -3082,6 +3149,8 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         has_price = row.get("시세반영", False)
         current_price = row.get("현재가", None)
         type_label = get_asset_type(code, row["종목명"])
+        if get_asset_market(code) == "US":
+            type_label += " 🌐"
         cur_val = current_price if has_price else row["평균단가"]
 
         table_rows.append({
@@ -3250,7 +3319,11 @@ def _fetch_price_history(ticker: str, months_back: int | None) -> pd.DataFrame:
     실제 거래소 가격과 달라지는 문제에 더해 (2) 액면분할·배당 등으로 수정주가가 필요한 구간에서
     '수정 안 한' 야후 가격을 쓰다 보니, 캔들차트·이동평균·RSI·이격도·기간 최고가/최저가 등
     이 화면의 모든 수치가 HTS(수정주가 기준으로 연속된 차트를 보여줌)와 크게 달라 보이는
-    근본 원인이었다. pykrx의 기본값인 수정주가(adjusted=True)로 통일해 HTS와 같은 기준으로 맞춘다."""
+    근본 원인이었다. pykrx의 기본값인 수정주가(adjusted=True)로 통일해 HTS와 같은 기준으로 맞춘다.
+    [해외 주식 지원 — 2026-08 추가] pykrx는 국내(KRX) 종목만 다루므로, .KS/.KQ가 아닌 해외
+    티커는 별도 함수(_fetch_price_history_foreign)로 분기한다."""
+    if not (ticker.endswith(".KS") or ticker.endswith(".KQ")):
+        return _fetch_price_history_foreign(ticker, months_back)
     krx_code = ticker.split(".")[0]
     try:
         today = datetime.now(KST).strftime("%Y%m%d")
@@ -3269,6 +3342,32 @@ def _fetch_price_history(ticker: str, months_back: int | None) -> pd.DataFrame:
         return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
     except Exception as e:
         logging.warning("과거 시세 조회 실패(KRX) [%s]: %s", krx_code, e)
+        return pd.DataFrame()
+
+
+def _fetch_price_history_foreign(ticker: str, months_back: int | None) -> pd.DataFrame:
+    """해외(미국) 종목의 과거 시세 조회. pykrx는 국내 거래소만 다루므로 이 경우엔 야후
+    파이낸스에서 달러 기준 OHLC를 받아, 현재 환율로 원화 환산해서 반환한다. 정확히는
+    그날그날의 환율을 적용해야 맞지만, 이 앱은 과거 환율을 별도로 저장하지 않으므로 조회
+    시점의 환율을 차트 전체 구간에 일괄 적용하는 방식을 쓴다 — 그래프의 등락 모양(추세)은
+    달러 기준 원본과 동일하고, 세로축의 절대 원화 스케일만 '오늘 환율 기준'이라는 점을
+    참고할 것. (해외 주식 지원 — 2026-08 추가)"""
+    try:
+        if months_back is None:
+            hist = yf.Ticker(ticker).history(period="max", auto_adjust=True)
+        else:
+            start_date = (datetime.now(KST) - pd.DateOffset(months=months_back)).strftime("%Y-%m-%d")
+            hist = yf.Ticker(ticker).history(start=start_date, auto_adjust=True)
+        if hist.empty:
+            return pd.DataFrame()
+        hist = hist.reset_index()
+        rate = get_usd_krw_rate()
+        if rate:
+            for col in ("Open", "High", "Low", "Close"):
+                hist[col] = hist[col] * rate
+        return hist[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    except Exception as e:
+        logging.warning("과거 시세 조회 실패(해외) [%s]: %s", ticker, e)
         return pd.DataFrame()
 
 
@@ -3430,7 +3529,14 @@ def _avg_cost_series(trade_df: pd.DataFrame, code: str) -> pd.DataFrame:
                 avg_cost = 0.0
         points.append({"Date": row["_dt"], "평균단가": avg_cost if qty_held > 0 else None})
 
-    return pd.DataFrame(points)
+    result = pd.DataFrame(points)
+    # 해외(미국) 종목은 거래단가가 달러로 입력되므로, 캔들차트(이미 원화 환산됨)와 같은
+    # 기준으로 맞추기 위해 평균단가도 현재 환율로 원화 환산한다. (해외 주식 지원 — 2026-08 추가)
+    if not result.empty and get_asset_market(code) == "US":
+        rate = get_usd_krw_rate()
+        if rate:
+            result["평균단가"] = result["평균단가"] * rate
+    return result
 
 
 def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -3478,6 +3584,9 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
     selected_label = st.session_state["ta_ticker_select"]
     code = options[selected_label]
     ticker = get_asset_ticker(code)
+
+    if get_asset_market(code) == "US":
+        st.caption("🌐 해외(미국) 종목입니다. 달러 시세를 오늘 환율로 원화 환산해서 보여줍니다 (실시간 환율 아님, 캐시 기준 최대 1시간 이내).")
 
     period_names = list(CANDLE_PERIOD_OPTIONS.keys())
     selected_period_name = st.radio(
@@ -3642,6 +3751,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
 # ============================================================
 def render_trades(trade_df):
     st.markdown('<div class="section-title">거래이력</div>', unsafe_allow_html=True)
+    st.caption("🌐 해외(미국) 종목의 거래단가·거래금액은 구글시트에 입력하신 원래 통화(달러) 그대로 표시됩니다. 원화 환산 금액은 '보유 종목'·'통합 대시보드' 화면에서 확인하세요.")
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
