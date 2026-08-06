@@ -3684,16 +3684,18 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
         merge_dates = pd.concat([hist[["Date"]], avg_series[["Date"]]]).drop_duplicates().sort_values("Date")
         merged_avg = pd.merge_asof(merge_dates, avg_series, on="Date", direction="backward")
         if merged_avg["평균단가"].notna().any():
-            # markers는 유효 구간이 점 1개뿐일 때만 켠다(막 매수 직후라 선을 그을 다음 점이
-            # 없는 경우). 거래가 여러 번이라 이미 선으로 이어지는 종목까지 점을 다 찍으면
-            # 원래의 깔끔한 계단선 모양을 해치므로, 꼭 필요한 경우로 한정한다.
+            # [재수정] marker size를 0으로 줄이는 방식이 기대와 달리 점을 완전히 숨기지
+            # 못했다(실제 배포에서 확인됨). size 조절 대신 mode 문자열 자체를 바꿔 아예
+            # markers를 포함시키지 않는 방식으로 확실하게 처리한다. 유효 구간이 점 1개뿐일
+            # 때(막 매수 직후, 선을 그을 다음 점이 없음)만 "lines+markers"를 쓰고, 거래가
+            # 여러 번이라 이미 선으로 이어지는 종목은 "lines"만 써서 점이 아예 안 생기게 한다.
             valid_points = merged_avg["평균단가"].notna().sum()
-            marker_size = 6 if valid_points == 1 else 0
+            trace_mode = "lines+markers" if valid_points == 1 else "lines"
             fig.add_trace(go.Scatter(
                 x=merged_avg["Date"], y=merged_avg["평균단가"], name="내 평균단가",
-                mode="lines+markers",
+                mode=trace_mode,
                 line=dict(width=3, color="#ffd166", shape="hv"),
-                marker=dict(size=marker_size, color="#ffd166"),
+                marker=dict(size=6, color="#ffd166"),
                 hovertemplate="%{x|%Y-%m-%d}<br>내 평균단가: %{y:,.0f}원<extra></extra>",
             ), row=1, col=1)
 
