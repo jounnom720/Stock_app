@@ -3674,16 +3674,24 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
     # 보이게 한다. 계좌를 나눠 보유해도 전체 합산 평균단가 하나로 표시한다.
     avg_series = _avg_cost_series(trade_df, code).dropna(subset=["평균단가"])
     if not avg_series.empty:
-        merged_avg = pd.merge_asof(
-            hist[["Date"]].sort_values("Date"), avg_series.sort_values("Date"),
-            on="Date", direction="backward",
-        )
+        avg_series = avg_series.sort_values("Date")
+        # [수정] 기존에는 hist(캔들)의 날짜에만 평균단가를 끼워맞췄는데, 오늘 막 매수한 종목은
+        # 매수일이 아직 캔들 데이터의 마지막 날짜보다 더 최근일 수 있다(예: 장 마감 반영 전).
+        # 이 경우 hist 쪽엔 매수일과 같거나 그 이후인 날짜가 하나도 없어서 병합 결과가 전부
+        # 빈 값이 되어 선 자체가 통째로 안 보였다. hist 날짜에 avg_series 자신의 날짜(매수일)도
+        # 더해서 병합 기준으로 삼으면, 캔들이 아직 없는 시점이라도 매수 시점 자체는 반드시
+        # 하나의 기준점으로 포함된다.
+        merge_dates = pd.concat([hist[["Date"]], avg_series[["Date"]]]).drop_duplicates().sort_values("Date")
+        merged_avg = pd.merge_asof(merge_dates, avg_series, on="Date", direction="backward")
         if merged_avg["평균단가"].notna().any():
             fig.add_trace(go.Scatter(
                 x=merged_avg["Date"], y=merged_avg["평균단가"], name="내 평균단가",
-                mode="lines", line=dict(width=3, color="#ffd166", shape="hv"),
-                # 기본 hover는 y축 단위표시(k 등)를 그대로 물려받아 "83.93392k"처럼 나오고
-                # 날짜·금액 구분도 없었다. 날짜와 "OOO원"(천단위 콤마) 형식을 명시로 고정한다.
+                # mode="lines"만 쓰면, 유효 구간이 점 1개뿐인 경우(막 매수 직후) 선을 그릴 다음
+                # 점이 없어 아예 안 보이는 문제가 있었다. markers를 같이 켜서 점이 하나뿐이어도
+                # 최소한 점 하나는 찍히도록 한다.
+                mode="lines+markers",
+                line=dict(width=3, color="#ffd166", shape="hv"),
+                marker=dict(size=6, color="#ffd166"),
                 hovertemplate="%{x|%Y-%m-%d}<br>내 평균단가: %{y:,.0f}원<extra></extra>",
             ), row=1, col=1)
 
