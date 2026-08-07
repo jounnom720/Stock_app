@@ -331,15 +331,65 @@ def _apply_column_formatting(sh) -> list:
 
         for i, col_name in enumerate(header):
             kind = rules.get(str(col_name).strip(), "text")
+
+            # [수정] "거래이력" 시트의 "거래단가" 컬럼만 예외적으로 소수점이 있을 수 있다
+            # (해외 종목 원화 미환산 원본 달러 가격, 예: 230.5). 그 외 모든 금액 컬럼은
+            # 항상 원화 정수이므로, 구글시트 공식 문서에 나온 대로 "소수점을 서식에 넣으면
+            # 정수여도 마침표(.)가 항상 그려진다"는 규칙(developers.google.com/sheets/guides/formats)
+            # 때문에 전체 시트에 소수점 서식을 걸면 정수 칸에도 죄다 "320,000."처럼 마침표만
+            # 남는 문제가 생긴다. 그래서 "거래단가" 컬럼만 종목코드로 국내/해외를 나눠 행 단위로
+            # 서식을 다르게 걸고, 나머지 금액 컬럼은 전부 소수점 없는 정수 서식으로 되돌린다.
+            # (2026-08 발견·수정)
+            if sheet_name == "거래이력" and col_name == "거래단가":
+                try:
+                    code_col_idx = header.index("종목코드")
+                except ValueError:
+                    code_col_idx = None
+                all_values = ws.get_all_values()
+                data_rows = all_values[1:]
+
+                groups = []  # (market, start_idx, end_idx) — data_rows 기준 0-based, 연속 구간 묶음
+                cur_market, cur_start = None, None
+                for idx, row in enumerate(data_rows):
+                    code = row[code_col_idx] if code_col_idx is not None and code_col_idx < len(row) else ""
+                    market = "US" if code and get_asset_market(code) == "US" else "KR"
+                    if market != cur_market:
+                        if cur_market is not None:
+                            groups.append((cur_market, cur_start, idx - 1))
+                        cur_market, cur_start = market, idx
+                if cur_market is not None:
+                    groups.append((cur_market, cur_start, len(data_rows) - 1))
+                # 아직 값이 없는 여유 행(last_row까지)도 국내(정수) 서식을 미리 걸어둬서,
+                # 새로 입력될 국내 거래도 계속 마침표 없이 표시되도록 한다
+                if len(data_rows) < (last_row - 1):
+                    groups.append(("KR", len(data_rows), last_row - 2))
+
+                for market, s, e in groups:
+                    pattern = "#,##0.##" if market == "US" else "#,##0"
+                    requests.append({
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": 1 + s, "endRowIndex": 1 + e + 1,
+                                "startColumnIndex": i, "endColumnIndex": i + 1,
+                            },
+                            "cell": {"userEnteredFormat": {
+                                "numberFormat": {"type": "NUMBER", "pattern": pattern},
+                                "horizontalAlignment": "RIGHT",
+                                "textFormat": {**BASE_FONT, "bold": False},
+                            }},
+                            "fields": "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)",
+                        }
+                    })
+                continue  # 이 컬럼은 위에서 이미 처리했으므로 아래 공통 분기는 건너뜀
+
             if kind in ("money", "number"):
-                # [수정] 기존 패턴 "#,##0"은 소수점을 아예 허용하지 않아, 해외(미국) 종목의
-                # 거래단가처럼 센트 단위가 있는 값(예: 230.5)이 서식 통일을 누르는 순간
-                # 231로 반올림되어 실제 매수 단가가 조용히 바뀌는 문제가 있었다. "#,##0.##"은
-                # 정수는 그대로("277,000") 보여주면서, 소수점이 있는 값만 그 소수 자릿수를
-                # 그대로 보여준다("230.5") — 국내(KRW, 항상 정수)와 해외(USD, 소수 가능) 값
-                # 둘 다 값 손실 없이 표시할 수 있는 단일 패턴이라 컬럼별로 나눌 필요가 없다.
+                # 이 컬럼들은 예외(위의 거래단가) 없이 전부 원화 정수라서, 소수점 자체를
+                # 서식에 넣지 않는다 — "#,##0.##"처럼 소수점을 넣으면 값이 정수여도
+                # 구글시트가 마침표(.)를 항상 그려버리는 문제(공식 문서에 명시된 동작)를
+                # 원천적으로 피하기 위함.
                 cell_format = {
-                    "numberFormat": {"type": "NUMBER", "pattern": "#,##0.##"},
+                    "numberFormat": {"type": "NUMBER", "pattern": "#,##0"},
                     "horizontalAlignment": "RIGHT",
                     "textFormat": {**BASE_FONT, "bold": False},
                 }
