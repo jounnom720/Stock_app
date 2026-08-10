@@ -9,7 +9,6 @@
 
 import streamlit as st
 import pandas as pd
-import re
 import numpy as np
 import gspread
 import yfinance as yf
@@ -36,12 +35,6 @@ import secrets as pysecrets
 # ============================================================
 logging.basicConfig(level=logging.WARNING)
 KST = ZoneInfo("Asia/Seoul")
-
-# 모든 Plotly 차트에 공통 적용하는 설정: 오른쪽 위 모드바(카메라·확대·이동 등 아이콘 묶음)를
-# 완전히 숨긴다. 범례·주석(최고가·최저가 라벨 등)이 차트 오른쪽 위와 겹쳐 보이던 문제의
-# 근본 원인이 이 모드바였는데, 이 앱은 이미지 다운로드·확대 등 모드바 기능을 실제로 쓸 일이
-# 거의 없으므로 마진을 조정하는 대신 아예 숨겨서 겹침 문제를 근본적으로 없앤다.
-PLOTLY_CONFIG = {"displayModeBar": False}
 APP_VERSION = "v2.0.0"
 
 st.set_page_config(
@@ -87,33 +80,16 @@ ETF_BRAND_PREFIXES = (
     "KOSEF", "PLUS", "RISE", "WOORI", "마이다스", "히어로즈", "TIMEFOLIO",
 )
 
-def get_asset_market(code: str) -> str:
-    """종목코드로 국내(KR)/해외(US) 시장을 판별.
-    ASSET_MASTER에 등록된 종목은 등록된 market 값을 따르고, 미등록 종목은 코드 형태로
-    추정한다: 국내 종목코드는 숫자 6자리이거나 숫자+영문 혼합 6자리(예: 0148J0) 규칙을
-    따르므로, 이 규칙에 안 맞고 영문자로만 이루어진 코드(예: AAPL, MSFT)는 해외(미국)
-    종목으로 판단한다. (해외 주식 지원 — 2026-08 추가)"""
-    code = str(code).strip().upper()
-    meta = ASSET_MASTER.get(code)
-    if meta:
-        return "US" if meta.get("market") == "US" else "KR"
-    if re.fullmatch(r"[A-Z]{1,5}", code):
-        return "US"
-    return "KR"
-
 def get_asset_ticker(code: str) -> str:
-    """ASSET_MASTER에 등록된 종목은 등록된 티커를, 미등록 종목코드는 시장 판별 결과에 따라
-    국내는 KRX 6자리 코드 규칙으로(코드.KS), 해외(미국)는 코드 그대로(접미사 없음) 티커를
-    생성해 반환한다. 신규 사용자가 보유한 임의의 종목코드도 별도 등록 없이 실시간 시세
-    조회가 되도록 하기 위함."""
+    """ASSET_MASTER에 등록된 종목은 등록된 티커를, 미등록 종목코드는 KRX 6자리 코드 규칙에 따라
+    자동으로 야후파이낸스 티커(코드.KS)를 생성해 반환. 신규 사용자가 보유한 임의의 종목코드도
+    별도 등록 없이 실시간 시세 조회가 되도록 하기 위함."""
     code = str(code).strip()
     if not code:
         return ""
     meta = ASSET_MASTER.get(code)
     if meta:
         return meta["ticker"]
-    if get_asset_market(code) == "US":
-        return code.upper()
     return f"{code}.KS"
 
 def get_asset_type(code: str, name: str = "") -> str:
@@ -331,63 +307,7 @@ def _apply_column_formatting(sh) -> list:
 
         for i, col_name in enumerate(header):
             kind = rules.get(str(col_name).strip(), "text")
-
-            # [수정] "거래이력" 시트의 "거래단가" 컬럼만 예외적으로 소수점이 있을 수 있다
-            # (해외 종목 원화 미환산 원본 달러 가격, 예: 230.5). 그 외 모든 금액 컬럼은
-            # 항상 원화 정수이므로, 구글시트 공식 문서에 나온 대로 "소수점을 서식에 넣으면
-            # 정수여도 마침표(.)가 항상 그려진다"는 규칙(developers.google.com/sheets/guides/formats)
-            # 때문에 전체 시트에 소수점 서식을 걸면 정수 칸에도 죄다 "320,000."처럼 마침표만
-            # 남는 문제가 생긴다. 그래서 "거래단가" 컬럼만 종목코드로 국내/해외를 나눠 행 단위로
-            # 서식을 다르게 걸고, 나머지 금액 컬럼은 전부 소수점 없는 정수 서식으로 되돌린다.
-            # (2026-08 발견·수정)
-            if sheet_name == "거래이력" and col_name == "거래단가":
-                try:
-                    code_col_idx = header.index("종목코드")
-                except ValueError:
-                    code_col_idx = None
-                all_values = ws.get_all_values()
-                data_rows = all_values[1:]
-
-                groups = []  # (market, start_idx, end_idx) — data_rows 기준 0-based, 연속 구간 묶음
-                cur_market, cur_start = None, None
-                for idx, row in enumerate(data_rows):
-                    code = row[code_col_idx] if code_col_idx is not None and code_col_idx < len(row) else ""
-                    market = "US" if code and get_asset_market(code) == "US" else "KR"
-                    if market != cur_market:
-                        if cur_market is not None:
-                            groups.append((cur_market, cur_start, idx - 1))
-                        cur_market, cur_start = market, idx
-                if cur_market is not None:
-                    groups.append((cur_market, cur_start, len(data_rows) - 1))
-                # 아직 값이 없는 여유 행(last_row까지)도 국내(정수) 서식을 미리 걸어둬서,
-                # 새로 입력될 국내 거래도 계속 마침표 없이 표시되도록 한다
-                if len(data_rows) < (last_row - 1):
-                    groups.append(("KR", len(data_rows), last_row - 2))
-
-                for market, s, e in groups:
-                    pattern = "#,##0.##" if market == "US" else "#,##0"
-                    requests.append({
-                        "repeatCell": {
-                            "range": {
-                                "sheetId": sheet_id,
-                                "startRowIndex": 1 + s, "endRowIndex": 1 + e + 1,
-                                "startColumnIndex": i, "endColumnIndex": i + 1,
-                            },
-                            "cell": {"userEnteredFormat": {
-                                "numberFormat": {"type": "NUMBER", "pattern": pattern},
-                                "horizontalAlignment": "RIGHT",
-                                "textFormat": {**BASE_FONT, "bold": False},
-                            }},
-                            "fields": "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)",
-                        }
-                    })
-                continue  # 이 컬럼은 위에서 이미 처리했으므로 아래 공통 분기는 건너뜀
-
             if kind in ("money", "number"):
-                # 이 컬럼들은 예외(위의 거래단가) 없이 전부 원화 정수라서, 소수점 자체를
-                # 서식에 넣지 않는다 — "#,##0.##"처럼 소수점을 넣으면 값이 정수여도
-                # 구글시트가 마침표(.)를 항상 그려버리는 문제(공식 문서에 명시된 동작)를
-                # 원천적으로 피하기 위함.
                 cell_format = {
                     "numberFormat": {"type": "NUMBER", "pattern": "#,##0"},
                     "horizontalAlignment": "RIGHT",
@@ -1192,12 +1112,10 @@ def show_login():
 # 실시간 시세 조회
 # ============================================================
 def _fetch_krx_stock_price(krx_code: str):
-    """개별 종목의 현재가를 pykrx로 조회 (adjusted=True 기본값 사용).
-    [정정] 주석에 'KRX 원천 데이터로 직접 조회'라고 되어 있었는데 정확하지 않다. pykrx는
-    adjusted=True(수정주가, 우리가 쓰는 기본값)일 때 실제로는 KRX가 아니라 네이버페이 증권
-    데이터를 가져온다 (adjusted=False로 호출해야 KRX 원천에서 직접 가져온다). 네이버 시세도
-    신뢰도가 높고 실시간성이 좋아 야후 대비 문제(배치성 갱신 지연)는 해결되지만, '한국거래소
-    원천'이라는 표현 자체는 부정확했다."""
+    """개별 종목의 현재가를 한국거래소(KRX) 원천 데이터로 직접 조회.
+    야후 파이낸스의 국내 종목 일봉 데이터는 배치성으로 갱신되어, 캐시를 지우고 다시 요청해도
+    같은 값이 한동안 반복되는 문제가 있었다(코스피·코스닥 지수에서 먼저 발견되어 고쳤던 것과
+    동일한 유형의 문제). 개별 보유종목도 같은 방식(pykrx)으로 바꿔 이 문제를 근본적으로 피한다."""
     try:
         today = datetime.now(KST).strftime("%Y%m%d")
         from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
@@ -1209,47 +1127,10 @@ def _fetch_krx_stock_price(krx_code: str):
         logging.warning("KRX 종목 시세 조회 실패 [%s]: %s", krx_code, e)
     return None
 
-@st.cache_data(ttl=3600)
-def get_usd_krw_rate() -> float | None:
-    """1달러당 원화 환율 조회 (야후파이낸스 'KRW=X' 티커, 1시간 캐시).
-    해외(미국) 종목의 시세·매입금액을 원화로 환산할 때 쓰는 단일 환율 소스 —
-    이 앱 안 모든 해외 종목 관련 계산이 이 함수 하나만 거쳐가므로 화면마다 다른
-    환율이 적용될 일이 없다. 조회 실패 시 None을 반환한다."""
-    try:
-        hist = yf.Ticker("KRW=X").history(period="5d")
-        if not hist.empty:
-            return float(hist["Close"].dropna().iloc[-1])
-    except Exception as e:
-        logging.warning("환율 조회 실패: %s", e)
-    return None
-
-# 환율 조회가 실패했을 때 쓰는 비상용 근사 환율. [중요] 예전에는 조회 실패 시 환산을 아예
-# 안 하고 원래(달러) 값을 그대로 반환했는데, 그러면 화면에는 "1,555원"처럼 그럴듯한 원화
-# 금액처럼 보이면서 실제로는 달러 숫자 그대로라 사용자가 알아채기 어려운 훨씬 더 위험한
-# 오류였다(실제로 이렇게 발생해 확인됨 — 2026-08). 실시간 조회가 실패해도 최소한 자릿수
-# (스케일)는 맞는 금액이 보이도록, 대략적인 환율로라도 반드시 환산한다. 실제 환율과 크게
-# 벌어지면 이 상수를 갱신할 것.
-FALLBACK_USD_KRW_RATE = 1380
-
-def get_usd_krw_rate_safe() -> float:
-    """get_usd_krw_rate()가 실패(None)해도 항상 쓸 수 있는 환율값을 반환한다
-    (실시간 조회 성공 시 그 값, 실패 시 FALLBACK_USD_KRW_RATE)."""
-    return get_usd_krw_rate() or FALLBACK_USD_KRW_RATE
-
-def _to_krw_if_foreign(ticker: str, price: float) -> float:
-    """국내 종목(.KS/.KQ) 티커는 그대로, 해외 종목은 환율로 원화 환산해서 반환
-    (환율 실시간 조회 실패 시 비상용 근사 환율 사용 — 위 get_usd_krw_rate_safe 참고)."""
-    if ticker.endswith(".KS") or ticker.endswith(".KQ"):
-        return price
-    return price * get_usd_krw_rate_safe()
-
 @st.cache_data(ttl=60)
 def get_prices(tickers: tuple) -> dict[str, float]:
     """현재가 조회. 국내 종목(.KS/.KQ)은 KRX 원천 데이터(pykrx)를 우선 쓰고, 실패하거나
-    국내 종목이 아닌 티커만 야후 파이낸스로 조회한다. 해외(미국) 종목은 야후에서 받은
-    달러 가격을 현재 환율로 원화 환산해서 저장한다 — 이 함수를 거쳐 나온 값은 항상 원화
-    기준이므로, 이 값을 쓰는 다른 모든 화면(대시보드·보유종목 등)은 통화를 신경 쓸 필요가
-    없다 (해외 주식 지원 — 2026-08 추가).
+    국내 종목이 아닌 티커만 야후 파이낸스로 조회한다.
     st.cache_data는 list를 해시할 수 없으므로 tuple로 받음.
     """
     if not tickers:
@@ -1284,9 +1165,9 @@ def get_prices(tickers: tuple) -> dict[str, float]:
                 if hasattr(latest, "items"):
                     for t, p in latest.items():
                         if pd.notna(p):
-                            prices[t] = _to_krw_if_foreign(t, float(p))
+                            prices[t] = float(p)
                 elif len(yf_fallback_needed) == 1 and pd.notna(latest):
-                    prices[yf_fallback_needed[0]] = _to_krw_if_foreign(yf_fallback_needed[0], float(latest))
+                    prices[yf_fallback_needed[0]] = float(latest)
     except Exception as e:
         logging.warning("일괄 시세 조회 실패: %s", e)
 
@@ -1296,9 +1177,15 @@ def get_prices(tickers: tuple) -> dict[str, float]:
         try:
             hist = yf.Ticker(t).history(period="5d")
             if not hist.empty:
-                prices[t] = _to_krw_if_foreign(t, float(hist["Close"].dropna().iloc[-1]))
+                prices[t] = float(hist["Close"].dropna().iloc[-1])
         except Exception as e:
             logging.warning("개별 시세 조회 실패 [%s]: %s", t, e)
+
+    # [2026-08-10 추가] 카드형/표 등 화면을 전환(rerun)할 때마다 캐시(ttl=60초) 만료 여부에 따라
+    # 시세가 조금씩 다르게 보이는 것을 사용자가 "버그"로 오해하지 않도록, 실제로 시세를 새로
+    # 조회한 시각을 기록해둔다. st.cache_data는 캐시가 살아있는 동안(60초 이내)에는 이 함수
+    # 본문 자체를 재실행하지 않으므로, 이 줄은 "진짜로 새로 조회했을 때"만 갱신된다.
+    st.session_state["prices_fetched_at"] = now_kst()
 
     return prices
 
@@ -1514,19 +1401,13 @@ def _replay_trade_ledger(trade_df: pd.DataFrame):
 # 보유 종목 계산
 # ============================================================
 def calc_holdings(trade_df: pd.DataFrame) -> pd.DataFrame:
-    """거래이력으로 현재 보유 종목과 평균단가 계산. (_replay_trade_ledger 공유 로직 사용)
-    해외(미국) 종목은 거래이력에 입력된 원래 통화(달러) 그대로 평균단가를 계산한 뒤,
-    이 시점에 현재 환율로 원화 환산한다 — 그래야 이후 모든 계산(투자원금 합계, 평가금액,
-    수익률 등)이 국내 종목과 완전히 동일한 방식(전부 원화)으로 흘러간다. (해외 주식 지원
-    — 2026-08 추가)"""
+    """거래이력으로 현재 보유 종목과 평균단가 계산. (_replay_trade_ledger 공유 로직 사용)"""
     _, final_state = _replay_trade_ledger(trade_df)
 
     rows = []
     for (account, code), h in final_state.items():
         avg = h["평균단가"]
         qty = h["보유수량"]
-        if avg and get_asset_market(code) == "US":
-            avg = avg * get_usd_krw_rate_safe()
         rows.append({
             "종목코드": code,
             "종목명": h["종목명"],
@@ -1545,11 +1426,6 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
     """매도 건별 실현손익을 평균매입가법으로 계산하는 단일 함수.
     주식/ETF 전체가 이 함수 하나만 거쳐가므로 화면마다 다른 숫자가 나올 수 없다.
     (_replay_trade_ledger 공유 로직 사용)
-    해외(미국) 종목은 매도단가·평균매입단가 모두 원래 통화(달러) 그대로 계산한 뒤, 그
-    결과값(매도금액·매입금액)을 현재 환율로 원화 환산한다. 정확히는 매도 시점 환율을
-    써야 하지만, 이 앱은 과거 환율 데이터를 따로 저장하지 않으므로 현재 환율로 일괄
-    환산하는 방식을 쓴다 — 보유 종목 평가와 같은 기준이라 적어도 화면끼리는 일관된다.
-    (해외 주식 지원 — 2026-08 추가)
     """
     sell_events, _ = _replay_trade_ledger(trade_df)
 
@@ -1557,18 +1433,10 @@ def calc_realized_pnl(trade_df: pd.DataFrame) -> pd.DataFrame:
     for ev in sell_events:
         매도금액 = ev["effective_qty"] * ev["매도단가"]
         매입금액 = ev["effective_qty"] * ev["평균매입단가"]
-        평균매입단가 = ev["평균매입단가"]
-        매도단가 = ev["매도단가"]
-        if get_asset_market(ev["종목코드"]) == "US":
-            rate = get_usd_krw_rate_safe()
-            매도금액 *= rate
-            매입금액 *= rate
-            평균매입단가 *= rate
-            매도단가 *= rate
         실현손익 = 매도금액 - 매입금액
         realized_rows.append({
             "거래일자": ev["거래일자"], "계좌": ev["계좌"], "종목코드": ev["종목코드"], "종목명": ev["종목명"],
-            "매도수량": ev["매도수량"], "매도단가": round(매도단가), "평균매입단가": round(평균매입단가),
+            "매도수량": ev["매도수량"], "매도단가": ev["매도단가"], "평균매입단가": round(ev["평균매입단가"]),
             "매도금액": round(매도금액), "매입금액": round(매입금액),
             "실현손익": round(실현손익),
         })
@@ -1642,17 +1510,6 @@ def color_pnl(v) -> str:
         return "#8a8d96"
     return "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "#8a8d96"
 
-def style_pnl_cell(v) -> str:
-    """st.dataframe의 Styler.map에 넘기는 손익 셀 색상 문자열 (양수=빨강, 음수=파랑).
-    거래이력·보유종목·매도이력·TDF펀드 표 등 여러 곳에 똑같은 함수가 각각 복사돼 있던 것을
-    하나로 통합했다 (동작은 기존과 동일, 코드만 정리)."""
-    try:
-        f = float(v)
-    except Exception:
-        return ""
-    color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
-    return f"color: {color}; font-weight: 600"
-
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
 
@@ -1709,44 +1566,6 @@ st.markdown(f"""
 st.markdown("""
 <style>
 
-/* ── 한글 줄바꿈 전역 규칙 ──
-   기본 CSS 줄바꿈은 한글을 '음절 단위'로 아무 데서나 끊기 때문에(예: "보이거나"가 "보"/
-   "이거나"로 쪼개짐), 캐시 초기화 안내문처럼 폭이 좁은 박스에서 특히 부자연스러웠다.
-   word-break: keep-all로 '어절(띄어쓰기) 단위'로만 줄바꿈되게 하고, overflow-wrap:
-   break-word로 URL처럼 정말 끊어야 하는 긴 텍스트는 예외적으로 처리한다. 숫자 칸처럼
-   이미 white-space: nowrap이 걸린 곳은 이 규칙과 무관하게 계속 한 줄로 유지된다. */
-* {
-    word-break: keep-all;
-    overflow-wrap: break-word;
-}
-
-/* ── 가로모드(랜드스케이프)에서 좌우에 여백이 남던 문제 ──
-   layout="wide"로 설정해도 Streamlit 버전에 따라 콘텐츠 영역에 자체적인 최대 폭 제한이
-   남아있는 경우가 있어서, 가로로 눕히면 화면 좌우로 빈 공간이 생겼다. block-container만
-   넓혀서는 안 없어져서, 그 바깥의 상위 레이어(html/body, stApp, AppViewContainer)까지
-   전부 폭 100%로 강제한다. 클래스명이 버전마다 달라질 수 있어 여러 선택자를 동시에 지정. */
-html, body,
-[data-testid="stApp"],
-[data-testid="stAppViewContainer"],
-[data-testid="stMain"],
-[data-testid="stMainBlockContainer"],
-.block-container {
-    max-width: 100% !important;
-    width: 100% !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-}
-[data-testid="stMainBlockContainer"], .block-container {
-    padding-left: 1.4rem !important;
-    padding-right: 1.4rem !important;
-}
-@media (max-width: 700px) {
-    [data-testid="stMainBlockContainer"], .block-container {
-        padding-left: 0.8rem !important;
-        padding-right: 0.8rem !important;
-    }
-}
-
 /* ── 히어로 카드: 총 원금→평가금액 한눈에 ── */
 .hero-card {
     background: var(--card-bg);
@@ -1759,11 +1578,6 @@ html, body,
     font-size: 0.95rem;
     color: var(--text-dim);
     margin-bottom: 0.3rem;
-}
-.hero-label .cost-emph {
-    font-size: 1.15rem;
-    font-weight: 700;
-    color: var(--text-main, #f0f0f0);
 }
 .hero-row {
     display: flex;
@@ -1795,6 +1609,13 @@ html, body,
     font-size: 0.92rem;
     color: var(--text-dim);
     flex-wrap: wrap;
+}
+.hero-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
 }
 
 /* ── 자산 구성 요약 카드: 컬러 스트라이프 + 아이콘 배지 (제안 3 확정판) ── */
@@ -1898,6 +1719,8 @@ html, body,
     font-weight: 600;
     margin-bottom: 0.5rem;
 }
+.badge-irp  { background: rgba(83,74,183,0.22);  color: #AFA9EC; }
+.badge-mira { background: rgba(29,158,117,0.22); color: #5DCAA5; }
 .acct-value { font-size: 1.9rem; font-weight: 700; line-height: 1.2; }
 .acct-pnl   { font-size: 1.1rem; font-weight: 600; }
 
@@ -1952,9 +1775,6 @@ html, body,
     font-size: 0.95rem;
     color: var(--text-dim);
 }
-
-/* ── 보유 종목 화면: 계좌 필터 카드 / 보기 방식 토글 사이 여백 ── */
-.ui-gap-md { height: 1.1rem; }
 
 .section-title {
     font-size: 1.25rem;
@@ -2016,6 +1836,8 @@ html, body,
     padding: 0.12rem 0.5rem;
     border-radius: 6px;
 }
+.holding-acct-irp { background: rgba(59,130,246,0.16); color: #7fb2f5; }
+.holding-acct-mira { background: rgba(29,158,117,0.16); color: #4ecb9a; }
 .holding-name {
     font-size: 1.08rem;
     font-weight: 700;
@@ -2102,6 +1924,12 @@ html, body,
     font-weight: 700;
     margin: 1.7rem 0 0.7rem;
 }
+.mgmt-table-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    overflow: hidden;
+}
 .mgmt-warn-card {
     background: var(--overlay-03);
     border: 1px solid var(--card-border);
@@ -2179,24 +2007,6 @@ div[class*="st-key-main_menu_tabs"] label:has(input:checked) {
 div[class*="st-key-main_menu_tabs"] label:has(input:checked) p {
     color: #e35b5b;
     font-weight: 700;
-}
-
-/* ── 메인 메뉴: 좁은 화면(모바일)에서는 각 항목 너비가 텍스트 길이에 따라 제각각이라
-   두 번째 줄로 넘어갈 때 줄(행)이 안 맞아 보였다. 640px 이하에서는 2열 격자로 고정해
-   모든 항목의 좌우 경계가 줄마다 나란히 맞도록 한다. ── */
-@media (max-width: 640px) {
-    div[class*="st-key-main_menu_tabs"] div[role="radiogroup"] {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0;
-    }
-    div[class*="st-key-main_menu_tabs"] label {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        padding: 0.6rem 0.4rem;
-    }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -2536,7 +2346,7 @@ def main(spreadsheet_id: str):
     elif selected_main_tab == MAIN_TABS[1]:
         render_holdings(holdings_df, prices, nonstock_df)
     elif selected_main_tab == MAIN_TABS[2]:
-        render_technical_analysis(holdings_df, trade_df)
+        render_technical_analysis(holdings_df)
     elif selected_main_tab == MAIN_TABS[3]:
         render_trades(trade_df)
     elif selected_main_tab == MAIN_TABS[4]:
@@ -2645,7 +2455,7 @@ def render_holdings_treemap(holdings_df: pd.DataFrame):
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
         )
-        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        st.plotly_chart(fig, width="stretch")
     else:
         # 순위 리스트: 당일등락률 내림차순 정렬 (네이버페이 증권 '외국인 매매 상위' 랭킹 UI 참고)
         ranked = grouped.dropna(subset=["당일등락률"]).sort_values("당일등락률", ascending=False).reset_index(drop=True)
@@ -2771,9 +2581,9 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     render_holdings_treemap(holdings_df)
 
     s = calc_asset_summary(holdings_df, nonstock_df, trade_df=trade_df, transfer_df=transfer_df)
-    stock_eval, stock_cost, stock_pct = s["stock_eval"], s["stock_cost"], s["stock_pct"]
-    tdf_eval, tdf_cost, tdf_pct = s["tdf_eval"], s["tdf_cost"], s["tdf_pct"]
-    cash_eval = s["cash_eval"]
+    stock_eval, stock_cost, stock_pnl, stock_pct = s["stock_eval"], s["stock_cost"], s["stock_pnl"], s["stock_pct"]
+    tdf_eval, tdf_cost, tdf_pnl, tdf_pct = s["tdf_eval"], s["tdf_cost"], s["tdf_pnl"], s["tdf_pct"]
+    cash_eval, cash_pct_of_total = s["cash_eval"], s["cash_pct_of_total"]
     total_eval, total_cost, total_pnl, total_pct = s["total_eval"], s["total_cost"], s["total_pnl"], s["total_pct"]
     realized_total, grand_total_pnl = s["realized_total"], s["grand_total_pnl"]
 
@@ -2810,7 +2620,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
 
     hero_html = (
         f'<div class="hero-card">'
-        f'<div class="hero-label">총 투자원금 <span class="cost-emph">{fmt_money_full(total_cost)}</span> → 통합 평가금액</div>'
+        f'<div class="hero-label">총 투자원금 {fmt_money_full(total_cost)} → 통합 평가금액</div>'
         f'<div class="hero-row">'
         f'<div class="hero-value">{fmt_money_full(total_eval)}</div>'
         f'<div class="hero-pnl" style="color:{color_pnl(total_pnl)}">{fmt_money_full(total_pnl)} ({fmt_pct(total_pct)})</div>'
@@ -2931,26 +2741,20 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
     st.markdown('<div class="section-title">자산 구성</div>', unsafe_allow_html=True)
 
     # 계좌가 아닌 실제 자산 유형(ETF/주식/TDF/현금) 기준으로 집계 — 한 계좌 안에 ETF와 주식이
-    # 함께 있어도(예: 미래에셋 계좌에 ETF+주식 혼재) 정확히 분리되도록 get_asset_type()으로 분류.
-    # 주식은 다시 get_asset_market()으로 국내/해외를 나눠, 해외 종목이 "국내주식"에
-    # 잘못 합산되지 않도록 한다 (해외 주식 지원 이후 발견된 분류 누락 수정 — 2026-08).
+    # 함께 있어도(예: 미래에셋 계좌에 ETF+주식 혼재) 정확히 분리되도록 get_asset_type()으로 분류
     if not holdings_df.empty:
         _type_series = holdings_df.apply(lambda r: get_asset_type(r["종목코드"], r["종목명"]), axis=1)
-        _market_series = holdings_df["종목코드"].apply(get_asset_market)
         etf_eval = int(holdings_df.loc[_type_series == "ETF", "평가금액"].sum())
-        _stock_mask = _type_series == "주식"
-        domestic_stock_eval = int(holdings_df.loc[_stock_mask & (_market_series == "KR"), "평가금액"].sum())
-        overseas_stock_eval = int(holdings_df.loc[_stock_mask & (_market_series == "US"), "평가금액"].sum())
+        stock_only_eval = int(holdings_df.loc[_type_series == "주식", "평가금액"].sum())
     else:
         etf_eval = 0
-        domestic_stock_eval = 0
-        overseas_stock_eval = 0
+        stock_only_eval = 0
 
     # 큰 조각과 작은 조각이 번갈아 나오도록 순서 배열 — 작은 조각(TDF·현금성자산)끼리
     # 붙어있으면 바깥으로 뽑은 라벨 선이 서로 겹치기 쉬워서, 양옆에 항상 큰 조각이 오도록 배치
-    _colors = ["#5c6bc0", "#78909c", "#7b1fa2", "#0288d1", "#ff7043"]
-    _labels = ["국내주식", "현금성자산", "ETF", "TDF/펀드", "해외주식"]
-    _values = [max(0, v) for v in [domestic_stock_eval, cash_eval, etf_eval, tdf_eval, overseas_stock_eval]]
+    _colors = ["#5c6bc0", "#78909c", "#7b1fa2", "#0288d1"]
+    _labels = ["국내주식", "현금성자산", "ETF", "TDF/펀드"]
+    _values = [max(0, v) for v in [stock_only_eval, cash_eval, etf_eval, tdf_eval]]
     _total_for_pct = sum(_values) or 1
 
     col_donut, col_table = st.columns([1, 1])
@@ -2967,7 +2771,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             showlegend=False,
             font=dict(size=14),
         )
-        st.plotly_chart(fig_type, width="stretch", config=PLOTLY_CONFIG)
+        st.plotly_chart(fig_type, width="stretch")
 
     with col_table:
         st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
@@ -3029,10 +2833,6 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
                     return s[:7]
                 return s
             mdf["년월_표시"] = mdf["년월"].apply(normalize_yearmonth)
-            # [수정] 시트에 저장된 순서 그대로 쓰다 보니(수동 스냅샷을 나중에 끼워넣는 등) 차트가
-            # 7월-6월-8월처럼 뒤섞여 보이는 문제가 있었다. 추이 차트는 시간순(오름차순)으로
-            # 왼쪽→오른쪽이 과거→최근이 되어야 자연스러우므로 명시적으로 정렬한다.
-            mdf = mdf.sort_values("년월_표시")
 
             # ── 차트: 막대·선에는 텍스트 라벨을 넣지 않는다 (정확한 금액은 마우스오버 툴팁 또는 아래 표로 확인).
             # 이전 버전은 막대(평가금액)와 선(원금) 라벨이 서로 겹쳐 보이는 문제가 있었는데,
@@ -3060,7 +2860,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
                 bargap=0.5,
                 hovermode="x unified",
             )
-            st.plotly_chart(fig_trend, width="stretch", config=PLOTLY_CONFIG)
+            st.plotly_chart(fig_trend, width="stretch")
 
             # ── 상세 표: 월별 정확한 금액 · 손익 · 수익률 ──
             table_df = mdf[["년월_표시", "통합원금", "통합평가"]].copy()
@@ -3070,7 +2870,15 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
             )
             table_df = table_df.rename(columns={"년월_표시": "년월"}).sort_values("년월", ascending=False)
 
-            styled_trend = table_df.style.map(style_pnl_cell, subset=["손익", "수익률"])
+            def _style_trend_pnl(v):
+                try:
+                    f = float(v)
+                except Exception:
+                    return ""
+                color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
+                return f"color: {color}; font-weight: 600"
+
+            styled_trend = table_df.style.map(_style_trend_pnl, subset=["손익", "수익률"])
             col_config = build_number_column_config(
                 table_df, money_cols=["통합원금", "통합평가", "손익"], pct_cols=["수익률"]
             )
@@ -3155,12 +2963,18 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
     시세반영수 = holdings_df["시세반영"].sum() if "시세반영" in holdings_df.columns else 0
     전체수 = len(holdings_df)
-    st.caption(f"총 {전체수}종목 · 실시간 시세 반영 {시세반영수}종목")
+    # [2026-08-10 추가] 시세 조회는 60초 캐시(ttl=60)를 쓰기 때문에, "카드형 ↔ 표" 보기 방식을
+    # 전환하는 것만으로도 그사이 캐시가 만료되면 현재가가 미세하게 달라질 수 있다. 이걸 버그로
+    # 오해하지 않도록 "이 시세가 언제 조회된 값인지"를 화면에 명시한다.
+    시세기준시각 = st.session_state.get("prices_fetched_at")
+    if 시세기준시각:
+        st.caption(f"총 {전체수}종목 · 실시간 시세 반영 {시세반영수}종목 · 시세 기준 {시세기준시각}")
+    else:
+        st.caption(f"총 {전체수}종목 · 실시간 시세 반영 {시세반영수}종목")
 
     # 계좌별 필터
     계좌목록 = ["전체"] + sorted(holdings_df["계좌"].unique().tolist())
     선택계좌 = st.selectbox("계좌 필터", 계좌목록, key="holding_account_filter")
-    st.markdown('<div class="ui-gap-md"></div>', unsafe_allow_html=True)
     if 선택계좌 != "전체":
         display_df = holdings_df[holdings_df["계좌"] == 선택계좌]
     else:
@@ -3218,8 +3032,6 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
         has_price = row.get("시세반영", False)
         current_price = row.get("현재가", None)
         type_label = get_asset_type(code, row["종목명"])
-        if get_asset_market(code) == "US":
-            type_label += " 🌐"
         cur_val = current_price if has_price else row["평균단가"]
 
         table_rows.append({
@@ -3238,7 +3050,14 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
     table_df = pd.DataFrame(table_rows)
 
-    st.markdown('<div class="ui-gap-md"></div>', unsafe_allow_html=True)
+    def _style_holding_pnl(v):
+        try:
+            f = float(v)
+        except Exception:
+            return ""
+        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
+        return f"color: {color}; font-weight: 600"
+
     보기방식 = st.radio("보기 방식", ["카드형", "표"], horizontal=True, key="holding_view_mode")
 
     _acct_order = sorted(holdings_df["계좌"].unique().tolist()) if not holdings_df.empty else []
@@ -3272,7 +3091,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
             """, unsafe_allow_html=True)
     else:
         show_cols = ["구분", "종목명", "계좌", "수량", "평단", "현재가", "투자원금", "평가금액", "손익", "수익률"]
-        styled_table = table_df[show_cols].style.map(style_pnl_cell, subset=["손익", "수익률"])
+        styled_table = table_df[show_cols].style.map(_style_holding_pnl, subset=["손익", "수익률"])
 
         col_config = {
             "수량": st.column_config.NumberColumn("수량", format="localized"),
@@ -3338,7 +3157,7 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 ),
                 font=dict(size=12),
             )
-            st.plotly_chart(fig_donut, width="stretch", config=PLOTLY_CONFIG)
+            st.plotly_chart(fig_donut, width="stretch")
 
         with ch2:
             st.markdown('<div class="section-title">종목별 수익률</div>', unsafe_allow_html=True)
@@ -3372,76 +3191,33 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
                 yaxis=dict(tickfont=dict(size=12)),
                 font=dict(size=12),
             )
-            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+            st.plotly_chart(fig, width="stretch")
 
 
 # ============================================================
 # 탭3: 기술적 분석
 # ============================================================
-@st.cache_data(ttl=86400)  # 일봉 기준 지표라 하루 한 번만 갱신해도 충분 (KRX 서버 부담도 줄임)
+@st.cache_data(ttl=86400)  # 일봉 기준 지표라 하루 한 번만 갱신해도 충분 (야후 API 부담도 줄임)
 def _fetch_price_history(ticker: str, months_back: int | None) -> pd.DataFrame:
-    """기술적 분석용 과거 시세 조회. pykrx로 조회하며, adjusted=True(기본값)로 수정주가를
-    사용한다 (실제 데이터 출처는 네이버페이 증권 — 위 _fetch_krx_stock_price 주석 참고).
-    [중요 수정] 예전에는 야후 파이낸스를 auto_adjust=False(수정 안 한 원래 가격)로 조회했다.
-    실시간 시세(get_prices)는 이미 야후의 국내 종목 갱신 지연 문제 때문에 pykrx로 전환했지만,
-    이 기술적 분석용 과거 시세 조회 함수는 그 전환에서 빠져 있었다. 그 결과 (1) 야후 시세 자체가
-    실제 거래소 가격과 달라지는 문제에 더해 (2) 액면분할·배당 등으로 수정주가가 필요한 구간에서
-    '수정 안 한' 야후 가격을 쓰다 보니, 캔들차트·이동평균·RSI·이격도·기간 최고가/최저가 등
-    이 화면의 모든 수치가 HTS(수정주가 기준으로 연속된 차트를 보여줌)와 크게 달라 보이는
-    근본 원인이었다. pykrx의 기본값인 수정주가(adjusted=True)로 통일해 HTS와 같은 기준으로 맞춘다.
-    [해외 주식 지원 — 2026-08 추가] pykrx는 국내(KRX) 종목만 다루므로, .KS/.KQ가 아닌 해외
-    티커는 별도 함수(_fetch_price_history_foreign)로 분기한다."""
-    if not (ticker.endswith(".KS") or ticker.endswith(".KQ")):
-        return _fetch_price_history_foreign(ticker, months_back)
-    krx_code = ticker.split(".")[0]
+    """기술적 분석용 과거 시세 조회. 전일 종가 기준이며 실시간 시세가 아니다.
+    months_back이 None이면 상장 이후 전체 기간을 가져오고, 숫자면 '오늘로부터 그만큼
+    전'을 시작일로 삼아 정확히 그 기간만 가져온다 (yfinance의 period="6mo" 같은
+    고정 프리셋이 아니라 start 날짜를 직접 계산해서, 7개월·38개월처럼 프리셋에 없는
+    임의 기간도 정확히 맞출 수 있다)."""
     try:
-        today = datetime.now(KST).strftime("%Y%m%d")
+        # auto_adjust=False: 배당 등으로 과거 가격을 보정하지 않은 '원래 가격' 그대로 가져온다.
+        # 보정된 가격을 쓰면 HTS/증권사 앱에서 보이는 숫자와 살짝 달라져 사용자가 혼란스러워한다.
         if months_back is None:
-            from_date = "19900101"  # 상장 이후 전체 (실제 상장일 이전 날짜를 넣어도 pykrx가 있는 만큼만 반환)
-        else:
-            from_date = (datetime.now(KST) - pd.DateOffset(months=months_back)).strftime("%Y%m%d")
-        df = krx_stock.get_market_ohlcv_by_date(from_date, today, krx_code)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        df = df[df["종가"] > 0].copy()
-        df.index.name = "Date"
-        df = df.reset_index().rename(columns={
-            "시가": "Open", "고가": "High", "저가": "Low", "종가": "Close", "거래량": "Volume",
-        })
-        return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
-    except Exception as e:
-        logging.warning("과거 시세 조회 실패(KRX) [%s]: %s", krx_code, e)
-        return pd.DataFrame()
-
-
-def _fetch_price_history_foreign(ticker: str, months_back: int | None) -> pd.DataFrame:
-    """해외(미국) 종목의 과거 시세 조회. pykrx는 국내 거래소만 다루므로 이 경우엔 야후
-    파이낸스에서 달러 기준 OHLC를 받아, 현재 환율로 원화 환산해서 반환한다. 정확히는
-    그날그날의 환율을 적용해야 맞지만, 이 앱은 과거 환율을 별도로 저장하지 않으므로 조회
-    시점의 환율을 차트 전체 구간에 일괄 적용하는 방식을 쓴다 — 그래프의 등락 모양(추세)은
-    달러 기준 원본과 동일하고, 세로축의 절대 원화 스케일만 '오늘 환율 기준'이라는 점을
-    참고할 것. (해외 주식 지원 — 2026-08 추가)"""
-    try:
-        if months_back is None:
-            hist = yf.Ticker(ticker).history(period="max", auto_adjust=True)
+            hist = yf.Ticker(ticker).history(period="max", auto_adjust=False)
         else:
             start_date = (datetime.now(KST) - pd.DateOffset(months=months_back)).strftime("%Y-%m-%d")
-            hist = yf.Ticker(ticker).history(start=start_date, auto_adjust=True)
+            hist = yf.Ticker(ticker).history(start=start_date, auto_adjust=False)
         if hist.empty:
             return pd.DataFrame()
         hist = hist.reset_index()
-        # 야후파이낸스가 반환하는 날짜는 미국 동부 시간대 정보(tz-aware)가 붙어 있는데,
-        # 구글시트에서 읽어온 거래일자(tz 정보 없음)나 국내 종목의 pykrx 날짜(역시 tz 없음)와
-        # 형(dtype)이 달라 merge_asof에서 병합 오류가 났었다. 시간대 정보를 제거해 다른 모든
-        # 날짜 컬럼과 같은 형식(tz-naive)으로 맞춘다.
-        if isinstance(hist["Date"].dtype, pd.DatetimeTZDtype):
-            hist["Date"] = hist["Date"].dt.tz_localize(None)
-        rate = get_usd_krw_rate_safe()
-        for col in ("Open", "High", "Low", "Close"):
-            hist[col] = hist[col] * rate
         return hist[["Date", "Open", "High", "Low", "Close", "Volume"]]
     except Exception as e:
-        logging.warning("과거 시세 조회 실패(해외) [%s]: %s", ticker, e)
+        logging.warning("과거 시세 조회 실패 [%s]: %s", ticker, e)
         return pd.DataFrame()
 
 
@@ -3498,60 +3274,6 @@ def _gap_interpretation(gap) -> str:
     return "이동평균과 비슷한 수준입니다."
 
 
-def _generate_ta_comment(hist: pd.DataFrame, ind: dict, hi_lo: dict, unit: str) -> list[str]:
-    """수치를 있는 그대로 서술하는 객관적 코멘트 목록을 만든다.
-    원칙: (1) '사라'/'팔아라' 같은 매수·매도 결론은 절대 내리지 않는다.
-    (2) 존재하는 수치(이동평균 배열, 이격도, RSI, 거래량, 고점·저점 대비 위치)만 사실 그대로
-    서술한다. (3) 데이터가 부족한 지표는 문장 자체를 생략한다(억지로 채우지 않음)."""
-    comments = []
-    price = ind.get("현재가")
-
-    # 1) 이동평균 배열 상태 — '정배열/역배열'은 시장에서 통용되는 객관적 용어(추세의 방향성을
-    #    나타내는 관찰 사실)이며, 매수/매도 판단이 아니라 현재 배열 상태에 대한 서술이다.
-    mas = [ind.get(f"MA{w}") for w in (5, 20, 60, 120)]
-    if all(m is not None for m in mas):
-        if mas[0] > mas[1] > mas[2] > mas[3]:
-            comments.append(f"{5}{unit}선부터 {120}{unit}선까지 순서대로 배열된 '정배열' 상태입니다(단기 이동평균이 장기 이동평균보다 위).")
-        elif mas[0] < mas[1] < mas[2] < mas[3]:
-            comments.append(f"{5}{unit}선부터 {120}{unit}선까지 순서대로 배열된 '역배열' 상태입니다(단기 이동평균이 장기 이동평균보다 아래).")
-        else:
-            comments.append("이동평균선들이 뒤섞여 있어 뚜렷한 정배열·역배열 상태는 아닙니다.")
-
-    # 2) RSI 구간
-    rsi = ind.get("RSI14")
-    if rsi is not None:
-        zone = "과매수" if rsi >= 70 else "과매도" if rsi <= 30 else "중립"
-        comments.append(f"RSI(14)는 {rsi:.1f}로 통상적 기준상 {zone} 구간에 해당합니다.")
-
-    # 3) 최고가·최저가 대비 현재 위치
-    if price is not None and hi_lo.get("최고가") and hi_lo.get("최저가"):
-        from_high = (price - hi_lo["최고가"]) / hi_lo["최고가"] * 100
-        from_low = (price - hi_lo["최저가"]) / hi_lo["최저가"] * 100
-        comments.append(f"현재가는 조회 기간 내 최고가 대비 {from_high:+.1f}%, 최저가 대비 {from_low:+.1f}% 지점입니다.")
-
-    # 4) 최근 거래량 추세 — 최근 5구간 평균과 그 직전 20구간 평균을 비교 (데이터가 충분할 때만)
-    if "Volume" in hist.columns and len(hist) >= 25:
-        recent_vol = hist["Volume"].iloc[-5:].mean()
-        prior_vol = hist["Volume"].iloc[-25:-5].mean()
-        if prior_vol:
-            vol_chg = (recent_vol - prior_vol) / prior_vol * 100
-            if abs(vol_chg) >= 20:
-                direction = "증가" if vol_chg > 0 else "감소"
-                comments.append(f"최근 거래량은 직전 대비 {direction}했습니다({vol_chg:+.0f}%).")
-            else:
-                comments.append("최근 거래량은 직전과 비슷한 수준입니다.")
-
-    # 5) 최근 등락률 (최대 20구간, 데이터가 그보다 짧으면 있는 만큼만)
-    n = min(20, len(hist) - 1)
-    if n >= 1:
-        past_price = float(hist["Close"].iloc[-1 - n])
-        if past_price:
-            chg = (price - past_price) / past_price * 100
-            comments.append(f"최근 {n}{unit} 동안 {chg:+.1f}% 변동했습니다.")
-
-    return comments
-
-
 def _calc_period_high_low(hist: pd.DataFrame) -> dict:
     """조회 기간(현재 1년) 중 최고가·최저가와 그 날짜를 계산."""
     idx_high = hist["High"].idxmax()
@@ -3572,45 +3294,6 @@ CANDLE_PERIOD_OPTIONS = {
     "년봉": {"months_back": None, "resample": "YE", "unit": "년"},  # 상장 이후 전체
 }
 
-def _avg_cost_series(trade_df: pd.DataFrame, code: str) -> pd.DataFrame:
-    """특정 종목코드의 '평균매입단가가 매매 시점마다 어떻게 바뀌었는지' 시계열로 반환.
-    여러 계좌에 나눠 보유해도 전체를 합산한 하나의 평균단가로 계산한다(_replay_trade_ledger는
-    계좌별로 따로 관리하는데, 기술적분석 화면은 종목 단위 차트라 계좌 구분 없이 합산이 맞다).
-    전량 매도로 보유수량이 0이 되면 그 시점부터는 평균단가를 표시하지 않는다(청산 후 다시
-    매수하면 그 시점의 매수가부터 새로 시작 — 옛 평균단가와 섞이면 안 되므로)."""
-    if trade_df.empty:
-        return pd.DataFrame(columns=["Date", "평균단가"])
-    df = trade_df[trade_df["종목코드"].astype(str).str.strip() == str(code).strip()].copy()
-    if df.empty:
-        return pd.DataFrame(columns=["Date", "평균단가"])
-    df["_dt"] = pd.to_datetime(df["거래일자"], errors="coerce")
-    df = df.dropna(subset=["_dt"]).sort_values("_dt")
-
-    qty_held = 0
-    avg_cost = 0.0
-    points = []
-    for _, row in df.iterrows():
-        qty = int(_safe_num(row.get("거래수량", 0)))
-        price = _safe_num(row.get("거래단가", 0))
-        구분 = str(row.get("거래구분", "")).strip()
-        if 구분 == "매수":
-            new_qty = qty_held + qty
-            avg_cost = (avg_cost * qty_held + price * qty) / new_qty if new_qty else price
-            qty_held = new_qty
-        elif 구분 == "매도":
-            qty_held = max(0, qty_held - qty)
-            if qty_held == 0:
-                avg_cost = 0.0
-        points.append({"Date": row["_dt"], "평균단가": avg_cost if qty_held > 0 else None})
-
-    result = pd.DataFrame(points)
-    # 해외(미국) 종목은 거래단가가 달러로 입력되므로, 캔들차트(이미 원화 환산됨)와 같은
-    # 기준으로 맞추기 위해 평균단가도 현재 환율로 원화 환산한다. (해외 주식 지원 — 2026-08 추가)
-    if not result.empty and get_asset_market(code) == "US":
-        result["평균단가"] = result["평균단가"] * get_usd_krw_rate_safe()
-    return result
-
-
 def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
     """일봉 데이터를 주봉/월봉/년봉으로 리샘플링. 시가는 기간의 첫 값, 고가/저가는 최대/최소,
     종가는 기간의 마지막 값, 거래량은 합계로 집계한다 (증권사 HTS와 동일한 표준 방식)."""
@@ -3621,7 +3304,7 @@ def _resample_ohlcv(hist: pd.DataFrame, rule: str) -> pd.DataFrame:
     return agg.reset_index()
 
 
-def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame):
+def render_technical_analysis(holdings_df: pd.DataFrame):
     st.markdown('<div class="section-title">기술적 분석</div>', unsafe_allow_html=True)
     st.caption(
         "⚠ 전일 종가 기준으로 계산합니다(실시간 아님). "
@@ -3634,17 +3317,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
         return
 
     # 종목코드 기준으로 계좌 합산 (같은 종목을 여러 계좌에 나눠 갖고 있어도 하나로만 표시)
-    # 정렬 순서는 '보유 종목 상세' 화면과 동일하게: ETF 먼저, 그다음 주식 — 각 그룹 내에서는
-    # 계좌를 합산한 투자원금(매입금액) 총액이 큰 순서.
-    unique_codes = holdings_df[["종목코드", "종목명"]].drop_duplicates(subset="종목코드").copy()
-    _cost_by_code = holdings_df.groupby("종목코드")["매입금액"].sum()
-    unique_codes["_매입금액총액"] = unique_codes["종목코드"].map(_cost_by_code)
-    unique_codes["_type_rank"] = unique_codes.apply(
-        lambda r: 0 if get_asset_type(r["종목코드"], r["종목명"]) == "ETF" else 1, axis=1
-    )
-    unique_codes = unique_codes.sort_values(
-        ["_type_rank", "_매입금액총액"], ascending=[True, False]
-    )
+    unique_codes = holdings_df[["종목코드", "종목명"]].drop_duplicates(subset="종목코드")
     options = {f"{row['종목명']} ({row['종목코드']})": row["종목코드"] for _, row in unique_codes.iterrows()}
     labels = list(options.keys())
 
@@ -3656,9 +3329,6 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
     selected_label = st.session_state["ta_ticker_select"]
     code = options[selected_label]
     ticker = get_asset_ticker(code)
-
-    if get_asset_market(code) == "US":
-        st.caption("🌐 해외(미국) 종목입니다. 달러 시세를 오늘 환율로 원화 환산해서 보여줍니다 (실시간 환율 아님, 캐시 기준 최대 1시간 이내).")
 
     period_names = list(CANDLE_PERIOD_OPTIONS.keys())
     selected_period_name = st.radio(
@@ -3681,43 +3351,14 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
     ind = _calc_technical_indicators(hist)
     hi_lo = _calc_period_high_low(hist)
 
-    # ── 상승/하락 판정 기준: '전일 종가 대비' (국내 HTS 관행) ──
-    # [중요 수정] 기존에는 Plotly Candlestick 기본 방식대로 '당일 시가 대비 종가'로 양봉/음봉을
-    # 정했는데, 국내 HTS·증권사 앱은 그 날 시가가 얼마였든 상관없이 '전일 종가보다 오늘 종가가
-    # 높은가'로 빨간/파란 캔들을 정한다. 두 기준이 갈리는 날(예: 시가는 전일 종가보다 낮게
-    # 출발했지만 종가는 전일 종가보다 높게 마감)에는 색이 반대로 보였다. 캔들 몸통(시가·고가·
-    # 저가·종가 값 자체)은 그대로 두고, '어느 색으로 그릴지'만 전일 종가 대비 기준으로 바꾼다.
-    # 거래량 막대도 같은 기준을 쓰는 국내 HTS 관행에 맞춰 동일하게 적용한다.
-    prev_close = hist["Close"].shift(1)
-    is_up = hist["Close"] >= prev_close
-    if len(is_up) > 0:
-        # 첫 캔들은 비교할 전일 종가가 없으므로, 그 날의 시가 대비 종가로 대신 판정한다.
-        is_up.iloc[0] = hist["Close"].iloc[0] >= hist["Open"].iloc[0]
-
-    def _masked(series):
-        return series.where(is_up)
-
-    def _masked_inv(series):
-        return series.where(~is_up)
-
     # ── 차트: 캔들차트 + 이동평균선(위) + 거래량 막대(아래) ──
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.72, 0.28], vertical_spacing=0.03,
     )
-    # 상승(빨강)·하락(파랑) 구간을 두 개의 트레이스로 나눠 그린다. Plotly Candlestick은
-    # '시가 대비 종가'로만 색을 정하는 게 기본 동작이라, 전일 종가 대비 기준으로 바꾸려면
-    # 이렇게 날짜별로 마스킹한 두 트레이스로 쪼개는 방법이 필요하다(값이 없는 날은 자동으로 빈 칸 처리).
     fig.add_trace(go.Candlestick(
-        x=hist["Date"], open=_masked(hist["Open"]), high=_masked(hist["High"]),
-        low=_masked(hist["Low"]), close=_masked(hist["Close"]),
-        name=selected_period_name, increasing_line_color="#e35b5b", decreasing_line_color="#e35b5b",
-    ), row=1, col=1)
-    fig.add_trace(go.Candlestick(
-        x=hist["Date"], open=_masked_inv(hist["Open"]), high=_masked_inv(hist["High"]),
-        low=_masked_inv(hist["Low"]), close=_masked_inv(hist["Close"]),
-        name=selected_period_name, increasing_line_color="#4a90d9", decreasing_line_color="#4a90d9",
-        showlegend=False,
+        x=hist["Date"], open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"],
+        name=selected_period_name, increasing_line_color="#e35b5b", decreasing_line_color="#4a90d9",
     ), row=1, col=1)
     for window, color in zip((5, 20, 60, 120), ("#f0a020", "#2ecc71", "#9b59b6", "#7f8c8d")):
         if len(hist) < window:
@@ -3727,37 +3368,6 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
             x=hist["Date"], y=ma_series, name=f"{window}{unit} 이동평균",
             line=dict(width=1.2, color=color, dash="dot"),
         ), row=1, col=1)
-
-    # ── 내 평균단가 추세선 (매매 시점마다 계단식으로 변동) ──
-    # 매매 시마다 값이 바뀌는 계단형 선이라 line_shape='hv'(수평→수직)를 쓴다. 이동평균선보다
-    # 굵고 뚜렷한 색으로 그려서 '내 매입 단가 대비 지금 시세가 얼마나 차이나는지'가 한눈에
-    # 보이게 한다. 계좌를 나눠 보유해도 전체 합산 평균단가 하나로 표시한다.
-    avg_series = _avg_cost_series(trade_df, code).dropna(subset=["평균단가"])
-    if not avg_series.empty:
-        avg_series = avg_series.sort_values("Date")
-        # [수정] 기존에는 hist(캔들)의 날짜에만 평균단가를 끼워맞췄는데, 오늘 막 매수한 종목은
-        # 매수일이 아직 캔들 데이터의 마지막 날짜보다 더 최근일 수 있다(예: 장 마감 반영 전).
-        # 이 경우 hist 쪽엔 매수일과 같거나 그 이후인 날짜가 하나도 없어서 병합 결과가 전부
-        # 빈 값이 되어 선 자체가 통째로 안 보였다. hist 날짜에 avg_series 자신의 날짜(매수일)도
-        # 더해서 병합 기준으로 삼으면, 캔들이 아직 없는 시점이라도 매수 시점 자체는 반드시
-        # 하나의 기준점으로 포함된다.
-        merge_dates = pd.concat([hist[["Date"]], avg_series[["Date"]]]).drop_duplicates().sort_values("Date")
-        merged_avg = pd.merge_asof(merge_dates, avg_series, on="Date", direction="backward")
-        if merged_avg["평균단가"].notna().any():
-            # [재수정] marker size를 0으로 줄이는 방식이 기대와 달리 점을 완전히 숨기지
-            # 못했다(실제 배포에서 확인됨). size 조절 대신 mode 문자열 자체를 바꿔 아예
-            # markers를 포함시키지 않는 방식으로 확실하게 처리한다. 유효 구간이 점 1개뿐일
-            # 때(막 매수 직후, 선을 그을 다음 점이 없음)만 "lines+markers"를 쓰고, 거래가
-            # 여러 번이라 이미 선으로 이어지는 종목은 "lines"만 써서 점이 아예 안 생기게 한다.
-            valid_points = merged_avg["평균단가"].notna().sum()
-            trace_mode = "lines+markers" if valid_points == 1 else "lines"
-            fig.add_trace(go.Scatter(
-                x=merged_avg["Date"], y=merged_avg["평균단가"], name="내 평균단가",
-                mode=trace_mode,
-                line=dict(width=3, color="#ffd166", shape="hv"),
-                marker=dict(size=6, color="#ffd166"),
-                hovertemplate="%{x|%Y-%m-%d}<br>내 평균단가: %{y:,.0f}원<extra></extra>",
-            ), row=1, col=1)
 
     # 기간 내 최고가/최저가 라벨
     fig.add_annotation(
@@ -3769,7 +3379,9 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
         showarrow=True, arrowhead=1, yshift=-12, font=dict(size=11, color="#4a90d9"), row=1, col=1,
     )
 
-    volume_colors = ["#e35b5b" if up else "#4a90d9" for up in is_up]
+    volume_colors = [
+        "#e35b5b" if c >= o else "#4a90d9" for o, c in zip(hist["Open"], hist["Close"])
+    ]
     fig.add_trace(go.Bar(
         x=hist["Date"], y=hist["Volume"], name="거래량", marker_color=volume_colors, showlegend=False,
     ), row=2, col=1)
@@ -3779,7 +3391,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         xaxis_rangeslider_visible=False,
     )
-    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+    st.plotly_chart(fig, width="stretch")
 
     # ── 종목 선택 (HTS처럼 거래량 차트 바로 아래에 탭 형태로 배치) ──
     with st.container(key="ta_ticker_tabs"):
@@ -3812,30 +3424,12 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
         st.metric("RSI", f"{rsi:.1f}" if rsi is not None else "-")
         st.caption(_rsi_interpretation(rsi))
 
-    # ── 분석 코멘트 (수치를 있는 그대로 서술, 매수·매도 결론 없음) ──
-    st.markdown("##### 분석 코멘트")
-    comments = _generate_ta_comment(hist, ind, hi_lo, unit)
-    if comments:
-        comment_html = "".join(f"<li>{c}</li>" for c in comments)
-        st.markdown(
-            f"""
-            <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">
-                <ul style="margin:0;padding-left:1.1rem;line-height:1.7;">{comment_html}</ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.caption("위 코멘트는 수치를 있는 그대로 서술한 것이며, 매수·매도 의견이 아닙니다.")
-    else:
-        st.caption("코멘트를 생성할 만큼 데이터가 충분하지 않습니다.")
-
 
 # ============================================================
 # 탭4: 거래이력
 # ============================================================
 def render_trades(trade_df):
     st.markdown('<div class="section-title">거래이력</div>', unsafe_allow_html=True)
-    st.caption("🌐 해외(미국) 종목의 거래단가·거래금액은 구글시트에 입력하신 원래 통화(달러) 그대로 표시됩니다. 원화 환산 금액은 '보유 종목'·'통합 대시보드' 화면에서 확인하세요.")
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
@@ -3951,11 +3545,19 @@ def render_cashflow(trade_df, cashlog_df=None):
     display_realized = realized_df.sort_values("거래일자", ascending=False).copy()
     display_realized["거래일자"] = display_realized["거래일자"].dt.strftime("%Y-%m-%d")
 
+    def _style_pnl(v):
+        try:
+            f = float(v)
+        except Exception:
+            return ""
+        color = "#e0635e" if f > 0 else "#5b9bd8" if f < 0 else "inherit"
+        return f"color: {color}; font-weight: 600"
+
     styled = display_realized.style
     if hasattr(styled, "map"):
-        styled = styled.map(style_pnl_cell, subset=["실현손익"])
+        styled = styled.map(_style_pnl, subset=["실현손익"])
     else:
-        styled = styled.applymap(style_pnl_cell, subset=["실현손익"])
+        styled = styled.applymap(_style_pnl, subset=["실현손익"])
     col_config = build_number_column_config(
         display_realized,
         money_cols=["매도단가", "평균매입단가", "매도금액", "매입금액", "실현손익"],
@@ -3994,30 +3596,24 @@ def render_cashflow(trade_df, cashlog_df=None):
         ev_amount = ev["금액"]
         pnl = ev["손익"]
 
-        # 매도일 이후 같은 계좌의 매수 내역 — 건수 제한 없이 전부 조회.
-        # 예전에는 .head(5)로 5건까지만 표시해서, 6번째 이후 매수(예: 애플)가
-        # 화면에서 통째로 사라지는 문제가 있었음 (2026-08 발견). 지금은 앞 5건만
-        # 카드 안에 바로 보여주고, 나머지는 "더 보기" 접기(expander)로 전부 표시한다.
-        후속매수_전체 = trade_sorted[
+        # 매도일 이후 같은 계좌의 매수 내역
+        후속매수 = trade_sorted[
             (trade_sorted["거래일자_dt"] >= ev_date) &
             (trade_sorted["운용사"] == ev_account) &
             (trade_sorted["거래구분"] == "매수")
-        ]
-        표시건수 = 5
-        후속매수_표시 = 후속매수_전체.head(표시건수)
-        후속매수_나머지 = 후속매수_전체.iloc[표시건수:]
+        ].head(5)
 
-        def _buy_item_html(buy):
-            buy_amt = int(buy["거래수량"]) * float(buy["거래단가"])
-            return (
-                f'<div class="sell-follow-item">↳ {_safe_date_str(buy["거래일자_dt"])} · '
-                f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
-            )
-
-        if 후속매수_표시.empty:
+        if 후속매수.empty:
             buy_html = '<div class="sell-follow-empty">↳ 이후 같은 계좌에서 추가 매수 없음 · 매도금은 예수금에 합산 보관 중</div>'
         else:
-            buy_html = "".join(_buy_item_html(buy) for _, buy in 후속매수_표시.iterrows())
+            items = []
+            for _, buy in 후속매수.iterrows():
+                buy_amt = int(buy["거래수량"]) * float(buy["거래단가"])
+                items.append(
+                    f'<div class="sell-follow-item">↳ {_safe_date_str(buy["거래일자_dt"])} · '
+                    f'{buy["종목명"]} 매수 {int(buy["거래수량"])}주 · {fmt_money(buy_amt)}</div>'
+                )
+            buy_html = "".join(items)
 
         _acct_order_ev = sorted(trade_sorted["운용사"].unique().tolist())
         _badge_bg, _badge_fg = get_account_color(ev_account, _acct_order_ev)
@@ -4037,12 +3633,6 @@ def render_cashflow(trade_df, cashlog_df=None):
             '</div>',
             unsafe_allow_html=True
         )
-
-        # 5건을 넘는 매수 내역은 접기(expander)로 전부 표시 — 데이터 누락 없이 화면만 압축
-        if not 후속매수_나머지.empty:
-            with st.expander(f"↳ 이후 매수 {len(후속매수_나머지)}건 더 보기", expanded=False):
-                more_html = "".join(_buy_item_html(buy) for _, buy in 후속매수_나머지.iterrows())
-                st.markdown(more_html, unsafe_allow_html=True)
 
     if not events:
         st.info("매도 내역이 없습니다.")
@@ -4142,58 +3732,78 @@ def render_data_mgmt(nonstock_df, cash_df):
     st.markdown(summary_html, unsafe_allow_html=True)
 
     def _render_nonstock_table(rows, show_pnl=False, total_eval=0):
-        """비주식자산 행을 표로 렌더링.
-        [전면 개편] 이전에는 이 표만 직접 만든 HTML 테이블이라, 앱의 다른 표들(보유종목·
-        거래이력·현금흐름 등)이 다 쓰는 st.dataframe과 다르게 동작했다 — 모바일에서 숫자가
-        잘려 보이는 문제, 다운로드·검색·전체화면 버튼이 없는 문제가 전부 이 차이에서 비롯됐다.
-        이제 다른 표들과 완전히 같은 방식(st.dataframe + column_config)으로 통일해서, 모바일
-        가로 스크롤·숨은 컬럼 보기·다운로드·검색·전체화면이 다른 표들과 동일하게 제공된다."""
-        acct_rows = []
-        total_cost = 0.0
+        """비주식자산 행을 카드로 감싼 HTML 테이블로 렌더링. show_pnl=True면 평가손익 컬럼 추가, 하단에 합계행 표시."""
+        p = "padding:0.65rem 1.1rem;"
+        p_r = "padding:0.65rem 1.1rem;text-align:right;"
+        th_style = "padding:0.6rem 1.1rem;text-align:left;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
+        th_r = "padding:0.6rem 1.1rem;text-align:right;font-weight:600;color:var(--text-dim);font-size:0.8rem;border-bottom:1px solid var(--card-border);background:var(--overlay-02);"
+        row_sep = "border-bottom:1px solid var(--overlay-05);"
+
+        pnl_th = f"<th style='{th_r}'>평가손익</th>" if show_pnl else ""
+        _acct_order_ns = sorted(rows["계좌"].astype(str).str.strip().unique().tolist()) if not rows.empty else []
+        html = (
+            '<div class="mgmt-table-card">'
+            "<table style='width:100%;border-collapse:collapse;font-size:0.92rem;'>"
+            "<thead><tr>"
+            f"<th style='{th_style}'>계좌</th>"
+            f"<th style='{th_style}'>상품명</th>"
+            f"<th style='{th_r}'>투자원금</th>"
+            f"<th style='{th_r}'>평가금액</th>"
+            f"{pnl_th}"
+            f"<th style='{th_r}'>반영일자</th>"
+            f"<th style='{th_style}'>비고</th>"
+            "</tr></thead><tbody>"
+        )
+
         for _, row in rows.iterrows():
             acct = str(row.get("계좌", "")).strip()
             name = str(row.get("상품명", "")).strip()
             cost = _safe_float(row.get("원금", 0))
-            eva = _safe_float(row.get("평가금액", 0))
-            pnl = eva - cost
-            total_cost += cost
-            entry = {
-                "계좌": acct, "상품명": name,
-                "투자원금": int(cost), "평가금액": int(eva),
-            }
-            if show_pnl:
-                entry["평가손익"] = int(pnl)
-                entry["수익률"] = round(pnl / cost * 100, 2) if cost else 0.0
-            entry["반영일자"] = str(row.get("반영일자", "")).strip()
-            entry["비고"] = str(row.get("비고", "")).strip()
-            acct_rows.append(entry)
+            eva  = _safe_float(row.get("평가금액", 0))
+            pnl  = eva - cost
+            date_ = str(row.get("반영일자", "")).strip()
+            note = str(row.get("비고", "")).strip()
 
-        # 합계 행 (비고·반영일자는 비워둠)
-        total_row = {"계좌": "합계", "상품명": "", "투자원금": int(total_cost), "평가금액": int(total_eval)}
-        if show_pnl:
-            total_pnl = total_eval - total_cost
-            total_row["평가손익"] = int(total_pnl)
-            total_row["수익률"] = round(total_pnl / total_cost * 100, 2) if total_cost else 0.0
-        total_row["반영일자"] = ""
-        total_row["비고"] = ""
-        acct_rows.append(total_row)
+            badge_bg, badge_color = get_account_color(acct, _acct_order_ns)
+            badge_html = (
+                f'<span style="background:{badge_bg};color:{badge_color};'
+                f'font-size:0.75rem;padding:2px 8px;border-radius:4px;'
+                f'margin-right:6px;white-space:nowrap;">{acct}</span>'
+            )
 
-        table_df = pd.DataFrame(acct_rows)
-        money_cols = ["투자원금", "평가금액"] + (["평가손익"] if show_pnl else [])
-        pct_cols = ["수익률"] if show_pnl else []
-        col_config = build_number_column_config(table_df, money_cols=money_cols, pct_cols=pct_cols)
+            pnl_color = color_pnl(pnl)
+            pnl_td = (
+                f"<td style='{p_r}color:{pnl_color};font-weight:600;'>"
+                f"{fmt_money_full(pnl)} ({fmt_pct(pnl / cost * 100 if cost else 0)})"
+                f"</td>"
+            ) if show_pnl else ""
 
-        styled = table_df.style.map(
-            style_pnl_cell, subset=["평가손익", "수익률"] if show_pnl else []
-        ) if show_pnl else table_df
+            cost_str = fmt_money_full(cost) if cost else "-"
+            eva_str  = fmt_money_full(eva)  if eva  else "-"
 
-        st.dataframe(
-            styled,
-            width="stretch",
-            hide_index=True,
-            column_config=col_config,
-            height=min(400, 50 + 45 * len(table_df)),
+            html += (
+                f"<tr style='{row_sep}'>"
+                f"<td style='{p}'>{badge_html}</td>"
+                f"<td style='{p};font-weight:600;'>{name}</td>"
+                f"<td style='{p_r}'>{cost_str}</td>"
+                f"<td style='{p_r};font-weight:600;'>{eva_str}</td>"
+                f"{pnl_td}"
+                f"<td style='{p_r};color:var(--text-dim);font-size:0.88rem;'>{date_}</td>"
+                f"<td style='{p};color:var(--text-dim);font-size:0.88rem;'>{note}</td>"
+                "</tr>"
+            )
+
+        # 합계행 (계좌+상품명+투자원금=3열 라벨, 평가금액 합계 1열, 나머지는 빈칸)
+        trail_colspan = 3 if show_pnl else 2
+        html += (
+            "<tr style='background:var(--overlay-03);'>"
+            f"<td colspan='3' style='{p};font-weight:700;color:var(--text-dim);'>합계</td>"
+            f"<td style='{p_r};font-weight:700;'>{fmt_money_full(total_eval)}</td>"
+            f"<td colspan='{trail_colspan}' style='{p};'></td>"
+            "</tr>"
         )
+        html += "</tbody></table></div>"
+        st.markdown(html, unsafe_allow_html=True)
 
     if not nonstock_df.empty:
         if not tdf_rows.empty:
@@ -4237,7 +3847,7 @@ def render_data_mgmt(nonstock_df, cash_df):
     warn_html = (
         '<div class="mgmt-warn-card">'
         '<div class="mgmt-warn-text">'
-        '<b>실시간 시세와 구글시트 데이터를 모두 지우고 새로 불러옵니다.</b> '
+        '<b>실시간 시세와 구글시트 데이터를 모두 지우고 새로 불러옵니다.</b><br>'
         '숫자가 이상하게 보이거나 방금 구글시트에 입력한 내용이 반영되지 않을 때 눌러주세요.'
         '</div></div>'
     )
