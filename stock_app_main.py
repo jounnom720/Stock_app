@@ -1128,13 +1128,23 @@ def _fetch_krx_stock_price(krx_code: str):
     return None
 
 @st.cache_data(ttl=60)
-def get_prices(tickers: tuple) -> dict[str, float]:
+def get_prices(tickers: tuple) -> tuple[dict[str, float], str | None]:
     """현재가 조회. 국내 종목(.KS/.KQ)은 KRX 원천 데이터(pykrx)를 우선 쓰고, 실패하거나
     국내 종목이 아닌 티커만 야후 파이낸스로 조회한다.
     st.cache_data는 list를 해시할 수 없으므로 tuple로 받음.
+
+    반환값은 (시세 딕셔너리, 조회 시각) 튜플이다.
+    [2026-08-11 수정] 원래는 조회 시각을 st.cache_data 캐시 밖의 st.session_state에 별도로
+    기록했으나, st.cache_data는 '앱 전체에서 공유되는' 캐시인 반면 st.session_state는
+    '그 브라우저 세션에서만' 유효하다는 범위 불일치 문제가 있었다. 새로고침 등으로
+    session_state가 초기화된 직후 캐시가 아직 살아있으면(60초 이내) 이 함수 본문이
+    아예 실행되지 않아 조회 시각이 세션에 한 번도 기록되지 않는 버그가 있었다.
+    캐시되는 반환값 자체에 조회 시각을 담아두면, 캐시가 적중하든 새로 조회하든 —
+    그리고 어느 세션에서 읽든 — 항상 "그 시세가 실제로 언제 조회됐는지"가
+    데이터와 함께 정확히 전달된다.
     """
     if not tickers:
-        return {}
+        return {}, None
     prices = {}
     ticker_list = list(tickers)
 
@@ -1152,7 +1162,7 @@ def get_prices(tickers: tuple) -> dict[str, float]:
         yf_fallback_needed.append(t)
 
     if not yf_fallback_needed:
-        return prices
+        return prices, now_kst()
 
     # 2차: KRX 조회에 실패했거나 국내 종목이 아닌 티커는 야후에서 일괄 조회
     try:
@@ -1181,13 +1191,7 @@ def get_prices(tickers: tuple) -> dict[str, float]:
         except Exception as e:
             logging.warning("개별 시세 조회 실패 [%s]: %s", t, e)
 
-    # [2026-08-10 추가] 카드형/표 등 화면을 전환(rerun)할 때마다 캐시(ttl=60초) 만료 여부에 따라
-    # 시세가 조금씩 다르게 보이는 것을 사용자가 "버그"로 오해하지 않도록, 실제로 시세를 새로
-    # 조회한 시각을 기록해둔다. st.cache_data는 캐시가 살아있는 동안(60초 이내)에는 이 함수
-    # 본문 자체를 재실행하지 않으므로, 이 줄은 "진짜로 새로 조회했을 때"만 갱신된다.
-    st.session_state["prices_fetched_at"] = now_kst()
-
-    return prices
+    return prices, now_kst()
 
 def get_current_price(code: str, prices: dict) -> float | None:
     ticker = get_asset_ticker(code)
@@ -2317,7 +2321,7 @@ def main(spreadsheet_id: str):
             # 추가로 호출하지 않는다. 중복 rerun이 현재 선택된 탭(active_main_tab) 상태를
             # 놓쳐 통합 대시보드로 튕기는 원인이 되었었다.
 
-    prices = get_prices(tuple(tickers)) if tickers else {}
+    prices, 시세기준시각 = get_prices(tuple(tickers)) if tickers else ({}, None)
     holdings_df = enrich_with_prices(holdings_df, prices)
 
     # 시세 반영 현황 표시 (조회 실패 시 경고)
@@ -2344,7 +2348,7 @@ def main(spreadsheet_id: str):
     if selected_main_tab == MAIN_TABS[0]:
         render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=trade_df, transfer_df=transfer_df)
     elif selected_main_tab == MAIN_TABS[1]:
-        render_holdings(holdings_df, prices, nonstock_df)
+        render_holdings(holdings_df, prices, nonstock_df, 시세기준시각=시세기준시각)
     elif selected_main_tab == MAIN_TABS[2]:
         render_technical_analysis(holdings_df)
     elif selected_main_tab == MAIN_TABS[3]:
@@ -2937,7 +2941,7 @@ def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trad
 # ============================================================
 # 탭2: 보유 종목 상세
 # ============================================================
-def render_holdings(holdings_df, prices, nonstock_df=None):
+def render_holdings(holdings_df, prices, nonstock_df=None, 시세기준시각=None):
     st.markdown('<div class="section-title">보유 종목 상세</div>', unsafe_allow_html=True)
 
     if holdings_df.empty:
@@ -2963,10 +2967,9 @@ def render_holdings(holdings_df, prices, nonstock_df=None):
 
     시세반영수 = holdings_df["시세반영"].sum() if "시세반영" in holdings_df.columns else 0
     전체수 = len(holdings_df)
-    # [2026-08-10 추가] 시세 조회는 60초 캐시(ttl=60)를 쓰기 때문에, "카드형 ↔ 표" 보기 방식을
-    # 전환하는 것만으로도 그사이 캐시가 만료되면 현재가가 미세하게 달라질 수 있다. 이걸 버그로
-    # 오해하지 않도록 "이 시세가 언제 조회된 값인지"를 화면에 명시한다.
-    시세기준시각 = st.session_state.get("prices_fetched_at")
+    # [2026-08-11 수정] 조회 시각을 st.session_state가 아니라 get_prices()의 캐시된 반환값에서
+    # 직접 받은 파라미터(시세기준시각)로 표시하도록 변경. 캐시 적중/세션 초기화 여부와 무관하게
+    # 항상 "실제로 이 시세가 조회된 시각"이 정확히 표시된다 (자세한 배경은 get_prices() 주석 참고).
     if 시세기준시각:
         st.caption(f"총 {전체수}종목 · 실시간 시세 반영 {시세반영수}종목 · 시세 기준 {시세기준시각}")
     else:
