@@ -3810,13 +3810,34 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
     _cur_price_rows = holdings_df.loc[holdings_df["종목코드"] == code, "현재가"].dropna()
     현재가 = float(_cur_price_rows.iloc[0]) if not _cur_price_rows.empty else None
 
+    # [2026-08-11 강조 개선] st.metric은 세 카드가 흰색 글씨로 똑같이 보여 한눈에 구분하기
+    # 어려웠다. 차트 캔들·주석과 같은 배색 규칙(상승·최고=빨강, 하락·최저=파랑)을 그대로 가져와
+    # 카드 왼쪽에 색 스트라이프 + 값 자체도 그 색으로 강조하고, 최고가/최저가는 기록일을
+    # 툴팁이 아니라 카드 안에 바로 보이는 캡션으로 둬서 모바일에서도 바로 확인되게 한다.
     cur_col, hi_col, lo_col = st.columns(3)
     with cur_col:
-        st.metric("현재가", f"{현재가:,.0f}" if 현재가 is not None else "-")
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border);border-left:4px solid #f0a020">
+            <div class="metric-label">현재가</div>
+            <div class="metric-value" style="color:#f0a020">{f"{현재가:,.0f}" if 현재가 is not None else "-"}</div>
+        </div>
+        """, unsafe_allow_html=True)
     with hi_col:
-        st.metric("기간 내 최고가", f"{hi_lo['최고가']:,.0f}", help=f"{hi_lo['최고가_날짜'].strftime('%Y-%m-%d')} 기록")
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border);border-left:4px solid #e35b5b">
+            <div class="metric-label">🔺 기간 내 최고가</div>
+            <div class="metric-value" style="color:#e35b5b">{hi_lo['최고가']:,.0f}</div>
+            <div style="font-size:0.78rem;color:var(--text-dim);margin-top:0.2rem">{hi_lo['최고가_날짜'].strftime('%Y-%m-%d')} 기록</div>
+        </div>
+        """, unsafe_allow_html=True)
     with lo_col:
-        st.metric("기간 내 최저가", f"{hi_lo['최저가']:,.0f}", help=f"{hi_lo['최저가_날짜'].strftime('%Y-%m-%d')} 기록")
+        st.markdown(f"""
+        <div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border);border-left:4px solid #4a90d9">
+            <div class="metric-label">🔻 기간 내 최저가</div>
+            <div class="metric-value" style="color:#4a90d9">{hi_lo['최저가']:,.0f}</div>
+            <div style="font-size:0.78rem;color:var(--text-dim);margin-top:0.2rem">{hi_lo['최저가_날짜'].strftime('%Y-%m-%d')} 기록</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ── 이격도 요약 ──
     st.markdown("##### 이동평균 이격도")
