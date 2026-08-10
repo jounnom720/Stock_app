@@ -153,7 +153,6 @@ def get_account_color(acct_name: str, acct_order: list) -> tuple:
 SHEET_NAMES = {
     "거래이력":        "거래이력",
     "비주식자산":      "비주식자산",
-    "현금성자산":      "현금성자산",
     "월별자산스냅샷":  "월별자산스냅샷",
     "현금출납내역":    "현금출납내역",
 }
@@ -188,10 +187,11 @@ APP_TAG_VALUE = "jone_asset_manager"
 
 # 신규 사용자의 개인 시트를 처음 생성할 때 자동으로 만들 탭과 헤더.
 # stock_app_main.py의 load_sheet()/load_sheet_optional() 호출부와 이름이 반드시 일치해야 한다.
+# [2026-08-11] '현금성자산' 탭 제거 — 코드 어디에서도 읽지 않는 죽은 시트였음(비주식자산 탭의
+# '현금성자산' 자산군 행이 실제로 쓰이는 데이터). 신규 사용자 시트에도 더 이상 자동 생성하지 않는다.
 REQUIRED_SHEET_HEADERS = {
     "거래이력":        ["거래일자", "운용사", "종목코드", "종목명", "거래구분", "거래수량", "거래단가", "비고"],
     "비주식자산":      ["계좌", "자산군", "상품명", "원금", "평가금액", "반영일자", "비고"],
-    "현금성자산":      ["기준일", "계좌", "유형", "원금", "평가금액", "메모"],
     "월별자산스냅샷":  ["년월", "통합원금", "통합평가"],
     "계좌간이체":      ["거래일자", "출금계좌", "입금계좌", "금액", "실현손익", "비고"],
     "현금출납내역":    ["날짜", "계좌", "구분", "금액", "사유"],
@@ -209,10 +209,6 @@ COLUMN_FORMAT_RULES = {
     "비주식자산": {
         "계좌": "text", "자산군": "text", "상품명": "text", "원금": "money",
         "평가금액": "money", "반영일자": "date", "비고": "text_left",
-    },
-    "현금성자산": {
-        "기준일": "date", "계좌": "text", "유형": "text", "원금": "money",
-        "평가금액": "money", "메모": "text_left",
     },
     "월별자산스냅샷": {
         "년월": "yearmonth", "저장시각": "datetime", "통합원금": "money", "통합평가": "money",
@@ -2217,11 +2213,13 @@ div[class*="st-key-main_menu_tabs"] label:has(input:checked) p {
 def load_all_data(spreadsheet_id: str):
     trade_df     = load_sheet("거래이력", spreadsheet_id)
     nonstock_df  = load_sheet("비주식자산", spreadsheet_id)
-    cash_df      = load_sheet("현금성자산", spreadsheet_id)
     monthly_df   = load_sheet("월별자산스냅샷", spreadsheet_id)
     transfer_df  = load_sheet("계좌간이체", spreadsheet_id)  # TDF 환매 등 계좌간 자금 이동 이력 (실현손익 포함)
     cashlog_df   = load_sheet_optional("현금출납내역", spreadsheet_id)  # 생활비 인출 등 현금 입출금 이력 (아직 없는 사용자도 있어 선택적 로더 사용)
-    return trade_df, nonstock_df, cash_df, monthly_df, transfer_df, cashlog_df
+    # [2026-08-11] '현금성자산' 탭 로드 제거 — 실제 화면 어디에서도 참조하지 않던 죽은 시트였다.
+    # 대시보드/데이터관리에 표시되는 현금성자산 금액은 항상 nonstock_df(비주식자산 탭)의
+    # "자산군"=="현금성자산" 행에서 온다.
+    return trade_df, nonstock_df, monthly_df, transfer_df, cashlog_df
 
 def save_monthly_snapshot(spreadsheet_id: str, yearmonth: str, principal, eval_amount) -> tuple[bool, str]:
     """'월별자산스냅샷' 시트에 이번 달(또는 지정 월) 스냅샷을 저장.
@@ -2492,7 +2490,7 @@ def main(spreadsheet_id: str):
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
-        trade_df, nonstock_df, cash_df, monthly_df, transfer_df, cashlog_df = load_all_data(spreadsheet_id)
+        trade_df, nonstock_df, monthly_df, transfer_df, cashlog_df = load_all_data(spreadsheet_id)
 
     # 거래이력 사전 점검 (빈 셀, 거래구분 오타, 초과매도 등 흔한 입력 오류 안내)
     for _msg in validate_trade_df(trade_df):
@@ -2541,7 +2539,7 @@ def main(spreadsheet_id: str):
     st.markdown("<div style='margin-top:-0.5rem'></div>", unsafe_allow_html=True)
 
     if selected_main_tab == MAIN_TABS[0]:
-        render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=trade_df, transfer_df=transfer_df)
+        render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=trade_df, transfer_df=transfer_df)
     elif selected_main_tab == MAIN_TABS[1]:
         render_holdings(holdings_df, prices, nonstock_df, 시세기준시각=시세기준시각)
     elif selected_main_tab == MAIN_TABS[2]:
@@ -2551,7 +2549,7 @@ def main(spreadsheet_id: str):
     elif selected_main_tab == MAIN_TABS[4]:
         render_cashflow(trade_df, cashlog_df)
     elif selected_main_tab == MAIN_TABS[5]:
-        render_data_mgmt(nonstock_df, cash_df)
+        render_data_mgmt(nonstock_df)
 
 
 # ============================================================
@@ -2775,7 +2773,7 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
     }
 
 
-def render_dashboard(holdings_df, nonstock_df, cash_df, monthly_df, prices, trade_df=None, transfer_df=None):
+def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
     render_holdings_treemap(holdings_df)
 
@@ -4152,7 +4150,7 @@ def _render_cashlog_section(cashlog_df):
 # ============================================================
 # 탭6: 데이터 관리
 # ============================================================
-def render_data_mgmt(nonstock_df, cash_df):
+def render_data_mgmt(nonstock_df):
     st.markdown('<div class="section-title">비주식자산 현황 (TDF · 현금성자산)</div>', unsafe_allow_html=True)
     st.caption("💡 대시보드의 현금성자산 금액은 이 시트 기준입니다. 잔액 변경 시 비주식자산 시트를 업데이트하세요.")
 
