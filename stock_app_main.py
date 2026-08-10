@@ -41,7 +41,14 @@ KST = ZoneInfo("Asia/Seoul")
 # 완전히 숨긴다. 범례·주석(최고가·최저가 라벨 등)이 차트 오른쪽 위와 겹쳐 보이던 문제의
 # 근본 원인이 이 모드바였는데, 이 앱은 이미지 다운로드·확대 등 모드바 기능을 실제로 쓸 일이
 # 거의 없으므로 마진을 조정하는 대신 아예 숨겨서 겹침 문제를 근본적으로 없앤다.
-PLOTLY_CONFIG = {"displayModeBar": False}
+PLOTLY_CONFIG = {
+    "displayModeBar": False,
+    # [2026-08-11 추가] 모바일에서 차트를 손가락으로 확대하려고 핀치(꼬집기) 제스처를 하면,
+    # 기본값(scrollZoom=False)에서는 이 제스처를 차트가 아니라 브라우저가 페이지 전체 확대로
+    # 가로채간다. scrollZoom을 켜면 Plotly가 그 영역의 터치 제스처를 직접 가져가서
+    # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
+    "scrollZoom": True,
+}
 APP_VERSION = "v2.0.0"
 
 st.set_page_config(
