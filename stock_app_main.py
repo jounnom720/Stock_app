@@ -2144,6 +2144,9 @@ div[class*="st-key-admin_panel_wrap"] div[data-testid="stExpander"] summary:hove
 }
 
 /* ── 기술적 분석: 종목 선택을 HTS 하단 탭처럼(동그라미 없이, 선택된 것만 밑줄) ── */
+div[class*="st-key-ta_ticker_tabs"] {
+    margin-bottom: 1.1rem;  /* [2026-08-11] 탭 밑줄과 바로 아래 현재가 카드가 너무 붙어보여 여백 추가 */
+}
 div[class*="st-key-ta_ticker_tabs"] div[role="radiogroup"] {
     gap: 0;
     border-bottom: 1px solid var(--card-border);
@@ -3946,7 +3949,7 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
                    help="0%=하단선, 50%=중심(20구간 이동평균), 100%=상단선")
         st.caption(_bb_interpretation(bb_pos))
     with vol_col:
-        st.metric("거래량 배율", f"{vol_ratio:.1f}배" if vol_ratio is not None else "-",
+        st.metric("거래량 배율", f"{vol_ratio:.2f}배" if vol_ratio is not None else "-",
                    help="최근 1구간 거래량 ÷ 최근 20구간 평균 거래량")
         st.caption(_volume_ratio_interpretation(vol_ratio))
 
