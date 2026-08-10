@@ -3466,8 +3466,8 @@ def _fetch_price_history_foreign(ticker: str, months_back: int | None) -> pd.Dat
 
 
 def _calc_technical_indicators(hist: pd.DataFrame) -> dict:
-    """이동평균·이격도·RSI(14)를 계산해서 반환. 매수/매도 신호는 만들지 않고,
-    수치와 통상적인 해석 기준만 함께 제공한다 — 최종 판단은 사용자 몫이라는 원칙."""
+    """이동평균·이격도·RSI(14)·볼린저밴드·거래량 배율을 계산해서 반환. 매수/매도 신호는
+    만들지 않고, 수치와 통상적인 해석 기준만 함께 제공한다 — 최종 판단은 사용자 몫이라는 원칙."""
     close = hist["Close"]
     result = {"현재가": float(close.iloc[-1])}
 
@@ -3493,7 +3493,55 @@ def _calc_technical_indicators(hist: pd.DataFrame) -> dict:
     else:
         result["RSI14"] = None
 
+    # 볼린저밴드(20, ±2표준편차) — 가장 널리 쓰이는 표준 설정. 표준편차는 "가격이 평균에서
+    # 얼마나 들쭉날쭉했는지"를 나타내는 값으로, 변동성이 커지면 밴드 폭도 함께 넓어진다.
+    # [2026-08-11 추가]
+    if len(close) >= 20:
+        bb_mid = close.rolling(20).mean()
+        bb_std = close.rolling(20).std()
+        result["BB중심"] = float(bb_mid.iloc[-1])
+        result["BB상단"] = float((bb_mid + bb_std * 2).iloc[-1])
+        result["BB하단"] = float((bb_mid - bb_std * 2).iloc[-1])
+        band_width = result["BB상단"] - result["BB하단"]
+        result["BB위치"] = ((result["현재가"] - result["BB하단"]) / band_width * 100) if band_width else None
+    else:
+        result["BB중심"] = result["BB상단"] = result["BB하단"] = result["BB위치"] = None
+
+    # 거래량 배율 — 최근 거래량이 최근 20구간 평균 거래량 대비 몇 배인지. [2026-08-11 추가]
+    if "Volume" in hist.columns and len(hist) >= 20:
+        recent_volume = float(hist["Volume"].iloc[-1])
+        avg_volume = float(hist["Volume"].iloc[-20:].mean())
+        result["거래량배율"] = (recent_volume / avg_volume) if avg_volume else None
+    else:
+        result["거래량배율"] = None
+
     return result
+
+
+def _bb_interpretation(bb_pos) -> str:
+    """볼린저밴드 내 위치(0~100%)의 통상적인 해석 기준만 담백하게 서술."""
+    if bb_pos is None:
+        return "데이터가 부족해 계산할 수 없습니다."
+    if bb_pos >= 100:
+        return "통상 상단선을 벗어난(뚫은) 상태로, 평소 변동 범위 위쪽을 넘어섰습니다."
+    if bb_pos <= 0:
+        return "통상 하단선을 벗어난(뚫은) 상태로, 평소 변동 범위 아래쪽을 넘어섰습니다."
+    if bb_pos >= 80:
+        return "통상 상단선에 가까운 위치입니다."
+    if bb_pos <= 20:
+        return "통상 하단선에 가까운 위치입니다."
+    return "밴드 중심 부근입니다."
+
+
+def _volume_ratio_interpretation(ratio) -> str:
+    """거래량 배율의 통상적인 해석 기준만 담백하게 서술."""
+    if ratio is None:
+        return "데이터가 부족해 계산할 수 없습니다."
+    if ratio >= 2:
+        return "최근 20구간 평균 대비 거래가 크게 활발한 편입니다."
+    if ratio <= 0.5:
+        return "최근 20구간 평균 대비 거래가 뜸한 편입니다."
+    return "최근 20구간 평균과 비슷한 수준입니다."
 
 
 def _rsi_interpretation(rsi) -> str:
@@ -3549,7 +3597,19 @@ def _generate_ta_comment(hist: pd.DataFrame, ind: dict, hi_lo: dict, unit: str) 
         from_low = (price - hi_lo["최저가"]) / hi_lo["최저가"] * 100
         comments.append(f"현재가는 조회 기간 내 최고가 대비 {from_high:+.1f}%, 최저가 대비 {from_low:+.1f}% 지점입니다.")
 
-    # 4) 최근 거래량 추세 — 최근 5구간 평균과 그 직전 20구간 평균을 비교 (데이터가 충분할 때만)
+    # 4) 볼린저밴드 내 위치 — 20구간 이동평균 ± 2표준편차로 그린 밴드의 어디쯤에 있는지.
+    #    [2026-08-11 추가]
+    bb_pos = ind.get("BB위치")
+    if bb_pos is not None:
+        zone = "상단선 위" if bb_pos >= 100 else "하단선 아래" if bb_pos <= 0 else "중심 부근" if 20 < bb_pos < 80 else ("상단선 인근" if bb_pos >= 80 else "하단선 인근")
+        comments.append(f"볼린저밴드({20}{unit}, ±2표준편차) 내에서 {zone}에 위치합니다(밴드 내 위치 {bb_pos:.0f}%).")
+
+    # 5) 거래량 배율 — 최근 1구간 거래량이 최근 20구간 평균 대비 몇 배인지. [2026-08-11 추가]
+    vol_ratio = ind.get("거래량배율")
+    if vol_ratio is not None:
+        comments.append(f"최근 거래량은 20{unit} 평균 대비 {vol_ratio:.1f}배 수준입니다.")
+
+    # 6) 최근 거래량 추세 — 최근 5구간 평균과 그 직전 20구간 평균을 비교 (데이터가 충분할 때만)
     if "Volume" in hist.columns and len(hist) >= 25:
         recent_vol = hist["Volume"].iloc[-5:].mean()
         prior_vol = hist["Volume"].iloc[-25:-5].mean()
@@ -3561,7 +3621,7 @@ def _generate_ta_comment(hist: pd.DataFrame, ind: dict, hi_lo: dict, unit: str) 
             else:
                 comments.append("최근 거래량은 직전과 비슷한 수준입니다.")
 
-    # 5) 최근 등락률 (최대 20구간, 데이터가 그보다 짧으면 있는 만큼만)
+    # 7) 최근 등락률 (최대 20구간, 데이터가 그보다 짧으면 있는 만큼만)
     n = min(20, len(hist) - 1)
     if n >= 1:
         past_price = float(hist["Close"].iloc[-1 - n])
@@ -3748,6 +3808,25 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
             line=dict(width=1.2, color=color, dash="dot"),
         ), row=1, col=1)
 
+    # ── 볼린저밴드(20구간, ±2표준편차) ── [2026-08-11 추가]
+    # 이미 이동평균 4개 + 평단가선까지 겹쳐 그려서 차트가 붐비는 편이라, 기본은 꺼둔 채
+    # 체크박스로 켤 수 있게 한다(원하는 사람만 추가 정보를 더 보는 방식).
+    show_bb = st.checkbox("볼린저밴드 표시 (20구간, ±2표준편차)", value=False, key="ta_show_bb")
+    if show_bb and len(hist) >= 20:
+        bb_mid = hist["Close"].rolling(20).mean()
+        bb_std = hist["Close"].rolling(20).std()
+        bb_upper = bb_mid + bb_std * 2
+        bb_lower = bb_mid - bb_std * 2
+        fig.add_trace(go.Scatter(
+            x=hist["Date"], y=bb_upper, name="볼린저밴드 상단",
+            line=dict(width=1, color="#8ecaff", dash="dash"), showlegend=True,
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=hist["Date"], y=bb_lower, name="볼린저밴드 하단",
+            line=dict(width=1, color="#8ecaff", dash="dash"),
+            fill="tonexty", fillcolor="rgba(142,202,255,0.08)", showlegend=True,
+        ), row=1, col=1)
+
     # ── 내 평균단가 추세선 (매매 시점마다 계단식으로 변동) ──
     # 매매 시마다 값이 바뀌는 계단형 선이라 line_shape='hv'(수평→수직)를 쓴다. 이동평균선보다
     # 굵고 뚜렷한 색으로 그려서 '내 매입 단가 대비 지금 시세가 얼마나 차이나는지'가 한눈에
@@ -3853,13 +3932,23 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
             st.metric(f"{window}{unit}선 대비", f"{gap:+.1f}%" if gap is not None else "-")
             st.caption(_gap_interpretation(gap))
 
-    # ── RSI 요약 (이격도 카드와 동일하게, 설명 문구를 지표 바로 아래에 붙임) ──
-    st.markdown(f"##### RSI (14{unit})")
+    # ── RSI · 볼린저밴드 위치 · 거래량 배율 (같은 4칸 폭 카드로 일관성 유지) ── [2026-08-11 확장]
+    st.markdown(f"##### RSI (14{unit}) · 볼린저밴드 · 거래량 배율")
     rsi = ind.get("RSI14")
-    rsi_col, _, _, _ = st.columns(4)  # 이격도 카드와 같은 폭으로 맞춰 시각적 일관성 유지
+    bb_pos = ind.get("BB위치")
+    vol_ratio = ind.get("거래량배율")
+    rsi_col, bb_col, vol_col, _ = st.columns(4)
     with rsi_col:
         st.metric("RSI", f"{rsi:.1f}" if rsi is not None else "-")
         st.caption(_rsi_interpretation(rsi))
+    with bb_col:
+        st.metric("볼린저밴드 내 위치", f"{bb_pos:.0f}%" if bb_pos is not None else "-",
+                   help="0%=하단선, 50%=중심(20구간 이동평균), 100%=상단선")
+        st.caption(_bb_interpretation(bb_pos))
+    with vol_col:
+        st.metric("거래량 배율", f"{vol_ratio:.1f}배" if vol_ratio is not None else "-",
+                   help="최근 1구간 거래량 ÷ 최근 20구간 평균 거래량")
+        st.caption(_volume_ratio_interpretation(vol_ratio))
 
     # ── 분석 코멘트 (수치를 있는 그대로 서술, 매수·매도 결론 없음) ──
     st.markdown("##### 분석 코멘트")
