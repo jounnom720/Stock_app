@@ -1335,20 +1335,31 @@ def get_market_overview() -> dict:
     else:
         m["코스닥"] = {"값": None, "등락률": None, "_오류": err_q}
 
-    # 외국인·기관 수급 (코스피 시장 전체)
-    try:
-        supply_df = krx_stock.get_market_trading_value_by_date(from_date, today, "KOSPI")
-        if not supply_df.empty:
-            last = supply_df.iloc[-1]
-            m["코스피수급"] = {
-                "외국인": float(last.get("외국인합계", 0)),
-                "기관": float(last.get("기관합계", 0)),
-            }
-        else:
-            m["코스피수급"] = {"외국인": None, "기관": None, "_오류": "조회 결과 0행"}
-    except Exception as e:
-        logging.warning("코스피 수급 조회 실패: %s", e)
-        m["코스피수급"] = {"외국인": None, "기관": None, "_오류": str(e)}
+    # 외국인·기관 수급 (코스피 시장 전체) — [2026-08-12 수정]
+    # get_market_trading_value_by_date(..., "KOSPI")는 원래 개별 종목코드를 넣는 함수라
+    # 시장 코드("KOSPI")를 넣으면 매칭되는 데이터가 없어 조용히 빈 결과만 돌아왔다(실제 확인됨).
+    # 시장 전체 합계에는 get_market_net_purchases_of_equities(날짜, 날짜, 시장, 투자자)를
+    # 대신 쓴다 — 종목별 순매수거래대금 목록을 돌려주므로, 그걸 합산해서 시장 전체 값을 만든다.
+    # 최신 거래일 데이터가 아직 안 올라왔을 수도 있어(장 마감 직후 등), 최근 5일 안에서
+    # 데이터가 있는 첫 날짜를 찾을 때까지 하루씩 거슬러 올라간다.
+    supply_found = False
+    supply_last_err = None
+    for days_back in range(5):
+        d = (datetime.now(KST) - timedelta(days=days_back)).strftime("%Y%m%d")
+        try:
+            foreign_df = krx_stock.get_market_net_purchases_of_equities(d, d, "KOSPI", "외국인")
+            inst_df = krx_stock.get_market_net_purchases_of_equities(d, d, "KOSPI", "기관합계")
+            if not foreign_df.empty or not inst_df.empty:
+                foreign_net = float(foreign_df["순매수거래대금"].sum()) if not foreign_df.empty else None
+                inst_net = float(inst_df["순매수거래대금"].sum()) if not inst_df.empty else None
+                m["코스피수급"] = {"외국인": foreign_net, "기관": inst_net, "기준일": d}
+                supply_found = True
+                break
+        except Exception as e:
+            supply_last_err = str(e)
+            logging.warning("코스피 수급 조회 실패 [%s]: %s", d, e)
+    if not supply_found:
+        m["코스피수급"] = {"외국인": None, "기관": None, "_오류": supply_last_err or "최근 5일 이내 데이터 없음"}
 
     # ── 해외증시 (전일 종가 기준) ──
     _add("다우존스", "^DJI")
@@ -2624,7 +2635,8 @@ def render_admin_panel():
                         supply = mo.get("코스피수급", {})
                         foreign_txt = f"{supply['외국인']:,.0f}" if supply.get("외국인") is not None else "-"
                         inst_txt = f"{supply['기관']:,.0f}" if supply.get("기관") is not None else "-"
-                        st.caption(f"코스피 수급 — 외국인: {foreign_txt}  기관: {inst_txt}")
+                        supply_date_txt = f" ({supply['기준일']})" if supply.get("기준일") else ""
+                        st.caption(f"코스피 수급{supply_date_txt} — 외국인: {foreign_txt}  기관: {inst_txt}")
                         if supply.get("_오류"):
                             st.caption(f"코스피 수급 오류: {supply['_오류']}")
                         st.caption(f"기준시각: {mo.get('기준시각')}")
