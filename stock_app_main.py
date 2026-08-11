@@ -3607,6 +3607,31 @@ def _generate_ta_comment(hist: pd.DataFrame, ind: dict, hi_lo: dict, unit: str) 
         zone = "상단선 위" if bb_pos >= 100 else "하단선 아래" if bb_pos <= 0 else "중심 부근" if 20 < bb_pos < 80 else ("상단선 인근" if bb_pos >= 80 else "하단선 인근")
         comments.append(f"볼린저밴드({20}{unit}, ±2표준편차) 내에서 {zone}에 위치합니다(밴드 내 위치 {bb_pos:.0f}%).")
 
+        # 4-1) 밴드 폭 변화 안내 — [2026-08-12 추가]
+        # 차트에 그려진 밴드는 조회 기간 "전체"를 다 그린 것이라, 과거에 변동성이 크게 튀었던
+        # 구간(밴드가 확 넓어진 지점)이 있으면 그 폭이 시각적으로 눈에 띄어서, 지금(맨 오른쪽)
+        # 밴드가 이미 좁아진 상태인데도 마치 하단/상단에 몰려 있는 것처럼 착각하기 쉽다.
+        # 이걸 코멘트로 미리 짚어줘서, 카드 수치(밴드 내 위치)와 차트 인상이 다르게 느껴질 때
+        # 원인을 바로 알 수 있게 한다. 실제로 눈에 띄게 좁아졌을 때만(과거 최대폭 대비 70%
+        # 미만이고, 그 최대폭 시점이 최근 10구간 이내가 아닐 때만) 코멘트를 추가한다 — 항상
+        # 뜨면 오히려 코멘트가 지저분해지고 정보 가치가 떨어지기 때문.
+        bb_width_series = hist["Close"].rolling(20).std() * 4
+        valid_width = bb_width_series.dropna()
+        if len(valid_width) >= 20:
+            current_width = float(bb_width_series.iloc[-1])
+            max_width = float(valid_width.max())
+            max_pos = int(valid_width.values.argmax())
+            max_abs_pos = hist.index.get_indexer([valid_width.index[max_pos]])[0]
+            bars_since_peak = (len(hist) - 1) - max_abs_pos
+            if current_width and max_width and current_width < max_width * 0.7 and bars_since_peak > 10:
+                peak_date = hist["Date"].iloc[max_abs_pos]
+                comments.append(
+                    f"참고: 차트의 밴드는 조회 기간 전체를 그린 것입니다. 변동성이 가장 컸던 "
+                    f"{peak_date.strftime('%Y-%m-%d')} 무렵 밴드 폭이 {max_width:,.0f}원으로 가장 넓었고, "
+                    f"현재 밴드 폭은 {current_width:,.0f}원으로 그때보다 좁아진 상태입니다. "
+                    f"화면 전체에서는 그 넓었던 구간에 시선이 쏠려 최근 위치가 실제와 다르게 보일 수 있습니다."
+                )
+
     # 5) 거래량 배율 — 최근 1구간 거래량이 최근 20구간 평균 대비 몇 배인지. [2026-08-11 추가]
     vol_ratio = ind.get("거래량배율")
     if vol_ratio is not None:
