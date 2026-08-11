@@ -1262,6 +1262,28 @@ def _yf_last_two_closes(ticker: str, period_days: int = 12) -> tuple[float | Non
         logging.warning("시황 지표 조회 실패 [%s]: %s", ticker, e)
     return None, None
 
+def _kr_index_last_two_closes(pykrx_code: str, yf_fallback_ticker: str, from_date: str, today: str) -> tuple[float | None, float | None, str | None]:
+    """코스피·코스닥 같은 국내 지수의 최근 종가 2개를 가져온다. pykrx를 먼저 시도하고
+    (원천 데이터라 더 신뢰도가 높음), 실패하면 야후 파이낸스로 자동 전환한다.
+    [2026-08-12 추가] pykrx의 지수 조회 함수(get_index_ohlcv_by_date)가 KRX 웹사이트
+    구조 변경으로 KeyError('지수명')를 내며 깨진 상태인 게 실제로 확인됐다(사용자 확인).
+    나중에 pykrx 쪽이 고쳐지면 자동으로 다시 pykrx 값을 쓰게 되고, 그전까지는 야후의
+    코스피/코스닥 지수 티커(^KS11/^KQ11)로 대체한다.
+    반환값 세 번째 항목은 실패 시 진단용 오류 메시지(성공하면 None)."""
+    try:
+        df = krx_stock.get_index_ohlcv_by_date(from_date, today, pykrx_code)
+        if len(df) >= 2:
+            return float(df["종가"].iloc[-1]), float(df["종가"].iloc[-2]), None
+        pykrx_error = f"pykrx 조회 결과 {len(df)}행 (2행 미만)"
+    except Exception as e:
+        pykrx_error = str(e)
+        logging.warning("국내 지수 pykrx 조회 실패 [%s]: %s — 야후로 대체 시도", pykrx_code, e)
+
+    cur, prev = _yf_last_two_closes(yf_fallback_ticker)
+    if cur is not None:
+        return cur, prev, f"pykrx 실패({pykrx_error})해서 야후 대체값 사용 중"
+    return None, None, f"pykrx·야후 둘 다 실패 (pykrx: {pykrx_error})"
+
 @st.cache_data(ttl=21600)
 def _get_valueup_index_code() -> str | None:
     """'코리아 밸류업지수'의 KRX 지수 코드를 이름으로 검색해서 찾는다. 코드를 하드코딩하지
@@ -1309,27 +1331,27 @@ def get_market_overview() -> dict:
     from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
 
     # ── 국내증시 (전일 종가 기준) — Jone 요청으로 맨 위로 배치 [2026-08-12] ──
-    try:
-        kospi_df = krx_stock.get_index_ohlcv_by_date(from_date, today, "1001")
-        if len(kospi_df) >= 2:
-            cur_k, prev_k = float(kospi_df["종가"].iloc[-1]), float(kospi_df["종가"].iloc[-2])
-            m["코스피"] = {"값": cur_k, "등락률": (cur_k - prev_k) / prev_k * 100}
-        else:
-            m["코스피"] = {"값": None, "등락률": None, "_오류": f"조회 결과 {len(kospi_df)}행 (2행 미만)"}
-    except Exception as e:
-        logging.warning("코스피 지수 조회 실패: %s", e)
-        m["코스피"] = {"값": None, "등락률": None, "_오류": str(e)}
+    cur_k, prev_k, err_k = _kr_index_last_two_closes("1001", "^KS11", from_date, today)
+    if cur_k is not None:
+        m["코스피"] = {
+            "값": cur_k,
+            "등락률": ((cur_k - prev_k) / prev_k * 100) if prev_k else None,
+        }
+        if err_k:
+            m["코스피"]["_오류"] = err_k  # 대체 소스 사용 중이라는 안내(값은 정상적으로 있음)
+    else:
+        m["코스피"] = {"값": None, "등락률": None, "_오류": err_k}
 
-    try:
-        kosdaq_df = krx_stock.get_index_ohlcv_by_date(from_date, today, "2001")
-        if len(kosdaq_df) >= 2:
-            cur_q, prev_q = float(kosdaq_df["종가"].iloc[-1]), float(kosdaq_df["종가"].iloc[-2])
-            m["코스닥"] = {"값": cur_q, "등락률": (cur_q - prev_q) / prev_q * 100}
-        else:
-            m["코스닥"] = {"값": None, "등락률": None, "_오류": f"조회 결과 {len(kosdaq_df)}행 (2행 미만)"}
-    except Exception as e:
-        logging.warning("코스닥 지수 조회 실패: %s", e)
-        m["코스닥"] = {"값": None, "등락률": None, "_오류": str(e)}
+    cur_q, prev_q, err_q = _kr_index_last_two_closes("2001", "^KQ11", from_date, today)
+    if cur_q is not None:
+        m["코스닥"] = {
+            "값": cur_q,
+            "등락률": ((cur_q - prev_q) / prev_q * 100) if prev_q else None,
+        }
+        if err_q:
+            m["코스닥"]["_오류"] = err_q
+    else:
+        m["코스닥"] = {"값": None, "등락률": None, "_오류": err_q}
 
     # 코리아 밸류업지수 — 코드를 이름으로 먼저 찾은 뒤 조회 (위 _get_valueup_index_code 참고)
     try:
