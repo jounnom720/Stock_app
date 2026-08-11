@@ -1284,23 +1284,6 @@ def _kr_index_last_two_closes(pykrx_code: str, yf_fallback_ticker: str, from_dat
         return cur, prev, f"pykrx 실패({pykrx_error})해서 야후 대체값 사용 중"
     return None, None, f"pykrx·야후 둘 다 실패 (pykrx: {pykrx_error})"
 
-@st.cache_data(ttl=21600)
-def _get_valueup_index_code() -> str | None:
-    """'코리아 밸류업지수'의 KRX 지수 코드를 이름으로 검색해서 찾는다. 코드를 하드코딩하지
-    않는 이유: KRX 지수 코드 체계(1xxx=코스피, 2xxx=코스닥 등 내부 규칙)는 공식 문서로
-    명확히 확인이 안 됐고, 잘못된 코드를 박아두면 엉뚱한 지수를 보여줄 위험이 더 크다.
-    이름으로 검색하면 최소한 '없으면 None'이지 '틀린 지수'가 나올 일은 없다.
-    하루 한 번(6시간 캐시)만 조회하면 되는 값이라 자주 검색해도 부담 없다. [2026-08-12 추가]"""
-    try:
-        for market in ("KOSPI", "KRX"):
-            for code in krx_stock.get_index_ticker_list(market=market):
-                name = krx_stock.get_index_ticker_name(code)
-                if "밸류업" in name:
-                    return code
-    except Exception as e:
-        logging.warning("코리아 밸류업지수 코드 검색 실패: %s", e)
-    return None
-
 @st.cache_data(ttl=3600)
 def get_market_overview() -> dict:
     """일일 시황 브리핑에 쓸 지표를 한 번에 모아서 반환한다 (1시간 캐시).
@@ -1309,10 +1292,9 @@ def get_market_overview() -> dict:
     화면에서는 그 항목만 자연스럽게 생략된다 — 지표 하나 때문에 시황 섹션 전체가
     안 뜨는 일이 없도록 하는 게 핵심.
     실패 시 "_오류" 키에 예외 메시지를 함께 담아서, 화면(관리자 미리보기)에서 실패 원인을
-    바로 확인할 수 있게 한다 — [2026-08-12] 코스피·코스닥 등 pykrx 기반 지표가 전부 None으로
-    나왔던 문제를 진단하려면 로그가 아니라 화면에서 바로 원인이 보여야 하기 때문에 추가.
-    [2026-08-12 신규 추가 — 아직 실제 배포 환경에서 라이브 검증 전. 배포 후 값이
-    비정상적으로 보이면(단위가 이상하거나 등락률이 안 맞는 등) 바로 확인 필요.]
+    바로 확인할 수 있게 한다.
+    [2026-08-12] 코리아밸류업지수·코스피200야간선물·미국채2년·미국채스프레드·국내금(ETF대용)은
+    Jone 요청으로 범위에서 제외(삭제)함 — 안정적인 무료 소스 미확보 또는 정확도 문제.
     """
     m: dict[str, dict] = {}
 
@@ -1330,7 +1312,7 @@ def get_market_overview() -> dict:
     today = datetime.now(KST).strftime("%Y%m%d")
     from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
 
-    # ── 국내증시 (전일 종가 기준) — Jone 요청으로 맨 위로 배치 [2026-08-12] ──
+    # ── 국내증시 (전일 종가 기준) ──
     cur_k, prev_k, err_k = _kr_index_last_two_closes("1001", "^KS11", from_date, today)
     if cur_k is not None:
         m["코스피"] = {
@@ -1352,26 +1334,6 @@ def get_market_overview() -> dict:
             m["코스닥"]["_오류"] = err_q
     else:
         m["코스닥"] = {"값": None, "등락률": None, "_오류": err_q}
-
-    # 코리아 밸류업지수 — 코드를 이름으로 먼저 찾은 뒤 조회 (위 _get_valueup_index_code 참고)
-    try:
-        valueup_code = _get_valueup_index_code()
-        if valueup_code:
-            vu_df = krx_stock.get_index_ohlcv_by_date(from_date, today, valueup_code)
-            if len(vu_df) >= 2:
-                cur_v, prev_v = float(vu_df["종가"].iloc[-1]), float(vu_df["종가"].iloc[-2])
-                m["코리아밸류업지수"] = {"값": cur_v, "등락률": (cur_v - prev_v) / prev_v * 100}
-            else:
-                m["코리아밸류업지수"] = {"값": None, "등락률": None, "_오류": f"조회 결과 {len(vu_df)}행 (2행 미만)"}
-        else:
-            m["코리아밸류업지수"] = {"값": None, "등락률": None, "_오류": "지수 코드를 이름으로 찾지 못함(get_index_ticker_list에 '밸류업' 포함 이름 없음)"}
-    except Exception as e:
-        logging.warning("코리아 밸류업지수 조회 실패: %s", e)
-        m["코리아밸류업지수"] = {"값": None, "등락률": None, "_오류": str(e)}
-
-    # 코스피200 야간선물(CME) — [2026-08-12 보류] 무료로 안정적으로 제공하는 소스를 못 찾아
-    # 이번 범위에서는 제외. 나중에 소스 찾으면 추가.
-    m["코스피200야간선물"] = {"값": None, "등락률": None, "_오류": "미구현(안정적인 무료 소스 미확보)"}
 
     # 외국인·기관 수급 (코스피 시장 전체)
     try:
@@ -1404,33 +1366,7 @@ def get_market_overview() -> dict:
     _add("WTI", "CL=F")
     _add("브렌트유", "BZ=F")
     _add("국제금", "GC=F")
-    _add("미국채10년", "^TNX")  # 야후 ^TNX는 수익률(%) 값을 그대로 줌 (예: 4.67 = 4.67%)
-    # [검증 필요] 야후에는 미국 2년물 국채의 전용 현물 시세 티커가 없어, 2년물 국채선물
-    # 수익률(2YY=F)을 근사치로 사용한다. 실제 배포 후 다른 소스(예: investing.com, FRED)와
-    # 대조해서 크게 어긋나면 교체할 것.
-    _add("미국채2년", "2YY=F")
-
-    us10 = m.get("미국채10년", {}).get("값")
-    us2 = m.get("미국채2년", {}).get("값")
-    m["미국채스프레드"] = {"값": (us10 - us2) if (us10 is not None and us2 is not None) else None}
-
-    # 국내금 — [대체 방식] KRX 금현물시장은 별도 API(추가 인증키 필요)라 이번 범위에서 제외하고,
-    # 원화로 국내 상장된 골드선물 ETF(KODEX 골드선물(H), 132030) 가격을 국내 금 시세의
-    # 대리 지표로 사용한다. 실제 금 현물가와는 소폭 괴리가 있을 수 있음(선물·환헤지 비용 등).
-    try:
-        gold_etf_df = krx_stock.get_market_ohlcv_by_date(from_date, today, "132030")
-        gold_etf_df = gold_etf_df[gold_etf_df["종가"] > 0]
-        if len(gold_etf_df) >= 2:
-            cur_g = float(gold_etf_df["종가"].iloc[-1])
-            prev_g = float(gold_etf_df["종가"].iloc[-2])
-            m["국내금(ETF대용)"] = {"값": cur_g, "등락률": (cur_g - prev_g) / prev_g * 100}
-        elif len(gold_etf_df) == 1:
-            m["국내금(ETF대용)"] = {"값": float(gold_etf_df["종가"].iloc[-1]), "등락률": None}
-        else:
-            m["국내금(ETF대용)"] = {"값": None, "등락률": None, "_오류": "조회 결과 0행"}
-    except Exception as e:
-        logging.warning("국내금(ETF대용) 조회 실패: %s", e)
-        m["국내금(ETF대용)"] = {"값": None, "등락률": None, "_오류": str(e)}
+    _add("미국채10년", "^TNX")  # 야후 ^TNX는 수익률(%) 값을 그대로 줌 (예: 4.67 = 4.67%). 검증 완료(2026-08-12).
 
     m["기준시각"] = now_kst()
     return m
