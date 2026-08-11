@@ -1286,6 +1286,9 @@ def get_market_overview() -> dict:
     실패해도 나머지 지표는 정상적으로 채워지게 한다. 실패한 지표는 값이 None으로 남고,
     화면에서는 그 항목만 자연스럽게 생략된다 — 지표 하나 때문에 시황 섹션 전체가
     안 뜨는 일이 없도록 하는 게 핵심.
+    실패 시 "_오류" 키에 예외 메시지를 함께 담아서, 화면(관리자 미리보기)에서 실패 원인을
+    바로 확인할 수 있게 한다 — [2026-08-12] 코스피·코스닥 등 pykrx 기반 지표가 전부 None으로
+    나왔던 문제를 진단하려면 로그가 아니라 화면에서 바로 원인이 보여야 하기 때문에 추가.
     [2026-08-12 신규 추가 — 아직 실제 배포 환경에서 라이브 검증 전. 배포 후 값이
     비정상적으로 보이면(단위가 이상하거나 등락률이 안 맞는 등) 바로 확인 필요.]
     """
@@ -1301,6 +1304,67 @@ def get_market_overview() -> dict:
             "값": cur,
             "등락률": ((cur - prev) / prev * 100) if (cur is not None and prev) else None,
         }
+
+    today = datetime.now(KST).strftime("%Y%m%d")
+    from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
+
+    # ── 국내증시 (전일 종가 기준) — Jone 요청으로 맨 위로 배치 [2026-08-12] ──
+    try:
+        kospi_df = krx_stock.get_index_ohlcv_by_date(from_date, today, "1001")
+        if len(kospi_df) >= 2:
+            cur_k, prev_k = float(kospi_df["종가"].iloc[-1]), float(kospi_df["종가"].iloc[-2])
+            m["코스피"] = {"값": cur_k, "등락률": (cur_k - prev_k) / prev_k * 100}
+        else:
+            m["코스피"] = {"값": None, "등락률": None, "_오류": f"조회 결과 {len(kospi_df)}행 (2행 미만)"}
+    except Exception as e:
+        logging.warning("코스피 지수 조회 실패: %s", e)
+        m["코스피"] = {"값": None, "등락률": None, "_오류": str(e)}
+
+    try:
+        kosdaq_df = krx_stock.get_index_ohlcv_by_date(from_date, today, "2001")
+        if len(kosdaq_df) >= 2:
+            cur_q, prev_q = float(kosdaq_df["종가"].iloc[-1]), float(kosdaq_df["종가"].iloc[-2])
+            m["코스닥"] = {"값": cur_q, "등락률": (cur_q - prev_q) / prev_q * 100}
+        else:
+            m["코스닥"] = {"값": None, "등락률": None, "_오류": f"조회 결과 {len(kosdaq_df)}행 (2행 미만)"}
+    except Exception as e:
+        logging.warning("코스닥 지수 조회 실패: %s", e)
+        m["코스닥"] = {"값": None, "등락률": None, "_오류": str(e)}
+
+    # 코리아 밸류업지수 — 코드를 이름으로 먼저 찾은 뒤 조회 (위 _get_valueup_index_code 참고)
+    try:
+        valueup_code = _get_valueup_index_code()
+        if valueup_code:
+            vu_df = krx_stock.get_index_ohlcv_by_date(from_date, today, valueup_code)
+            if len(vu_df) >= 2:
+                cur_v, prev_v = float(vu_df["종가"].iloc[-1]), float(vu_df["종가"].iloc[-2])
+                m["코리아밸류업지수"] = {"값": cur_v, "등락률": (cur_v - prev_v) / prev_v * 100}
+            else:
+                m["코리아밸류업지수"] = {"값": None, "등락률": None, "_오류": f"조회 결과 {len(vu_df)}행 (2행 미만)"}
+        else:
+            m["코리아밸류업지수"] = {"값": None, "등락률": None, "_오류": "지수 코드를 이름으로 찾지 못함(get_index_ticker_list에 '밸류업' 포함 이름 없음)"}
+    except Exception as e:
+        logging.warning("코리아 밸류업지수 조회 실패: %s", e)
+        m["코리아밸류업지수"] = {"값": None, "등락률": None, "_오류": str(e)}
+
+    # 코스피200 야간선물(CME) — [2026-08-12 보류] 무료로 안정적으로 제공하는 소스를 못 찾아
+    # 이번 범위에서는 제외. 나중에 소스 찾으면 추가.
+    m["코스피200야간선물"] = {"값": None, "등락률": None, "_오류": "미구현(안정적인 무료 소스 미확보)"}
+
+    # 외국인·기관 수급 (코스피 시장 전체)
+    try:
+        supply_df = krx_stock.get_market_trading_value_by_date(from_date, today, "KOSPI")
+        if not supply_df.empty:
+            last = supply_df.iloc[-1]
+            m["코스피수급"] = {
+                "외국인": float(last.get("외국인합계", 0)),
+                "기관": float(last.get("기관합계", 0)),
+            }
+        else:
+            m["코스피수급"] = {"외국인": None, "기관": None, "_오류": "조회 결과 0행"}
+    except Exception as e:
+        logging.warning("코스피 수급 조회 실패: %s", e)
+        m["코스피수급"] = {"외국인": None, "기관": None, "_오류": str(e)}
 
     # ── 해외증시 (전일 종가 기준) ──
     _add("다우존스", "^DJI")
@@ -1332,8 +1396,6 @@ def get_market_overview() -> dict:
     # 원화로 국내 상장된 골드선물 ETF(KODEX 골드선물(H), 132030) 가격을 국내 금 시세의
     # 대리 지표로 사용한다. 실제 금 현물가와는 소폭 괴리가 있을 수 있음(선물·환헤지 비용 등).
     try:
-        today = datetime.now(KST).strftime("%Y%m%d")
-        from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
         gold_etf_df = krx_stock.get_market_ohlcv_by_date(from_date, today, "132030")
         gold_etf_df = gold_etf_df[gold_etf_df["종가"] > 0]
         if len(gold_etf_df) >= 2:
@@ -1343,70 +1405,10 @@ def get_market_overview() -> dict:
         elif len(gold_etf_df) == 1:
             m["국내금(ETF대용)"] = {"값": float(gold_etf_df["종가"].iloc[-1]), "등락률": None}
         else:
-            m["국내금(ETF대용)"] = {"값": None, "등락률": None}
+            m["국내금(ETF대용)"] = {"값": None, "등락률": None, "_오류": "조회 결과 0행"}
     except Exception as e:
         logging.warning("국내금(ETF대용) 조회 실패: %s", e)
-        m["국내금(ETF대용)"] = {"값": None, "등락률": None}
-
-    # ── 국내증시 (전일 종가 기준) ──
-    today = datetime.now(KST).strftime("%Y%m%d")
-    from_date = (datetime.now(KST) - timedelta(days=10)).strftime("%Y%m%d")
-    try:
-        kospi_df = krx_stock.get_index_ohlcv_by_date(from_date, today, "1001")
-        if len(kospi_df) >= 2:
-            cur_k, prev_k = float(kospi_df["종가"].iloc[-1]), float(kospi_df["종가"].iloc[-2])
-            m["코스피"] = {"값": cur_k, "등락률": (cur_k - prev_k) / prev_k * 100}
-        else:
-            m["코스피"] = {"값": None, "등락률": None}
-    except Exception as e:
-        logging.warning("코스피 지수 조회 실패: %s", e)
-        m["코스피"] = {"값": None, "등락률": None}
-
-    try:
-        kosdaq_df = krx_stock.get_index_ohlcv_by_date(from_date, today, "2001")
-        if len(kosdaq_df) >= 2:
-            cur_q, prev_q = float(kosdaq_df["종가"].iloc[-1]), float(kosdaq_df["종가"].iloc[-2])
-            m["코스닥"] = {"값": cur_q, "등락률": (cur_q - prev_q) / prev_q * 100}
-        else:
-            m["코스닥"] = {"값": None, "등락률": None}
-    except Exception as e:
-        logging.warning("코스닥 지수 조회 실패: %s", e)
-        m["코스닥"] = {"값": None, "등락률": None}
-
-    # 코리아 밸류업지수 — 코드를 이름으로 먼저 찾은 뒤 조회 (위 _get_valueup_index_code 참고)
-    try:
-        valueup_code = _get_valueup_index_code()
-        if valueup_code:
-            vu_df = krx_stock.get_index_ohlcv_by_date(from_date, today, valueup_code)
-            if len(vu_df) >= 2:
-                cur_v, prev_v = float(vu_df["종가"].iloc[-1]), float(vu_df["종가"].iloc[-2])
-                m["코리아밸류업지수"] = {"값": cur_v, "등락률": (cur_v - prev_v) / prev_v * 100}
-            else:
-                m["코리아밸류업지수"] = {"값": None, "등락률": None}
-        else:
-            m["코리아밸류업지수"] = {"값": None, "등락률": None}
-    except Exception as e:
-        logging.warning("코리아 밸류업지수 조회 실패: %s", e)
-        m["코리아밸류업지수"] = {"값": None, "등락률": None}
-
-    # 외국인·기관 수급 (코스피 시장 전체)
-    try:
-        supply_df = krx_stock.get_market_trading_value_by_date(from_date, today, "KOSPI")
-        if not supply_df.empty:
-            last = supply_df.iloc[-1]
-            m["코스피수급"] = {
-                "외국인": float(last.get("외국인합계", 0)),
-                "기관": float(last.get("기관합계", 0)),
-            }
-        else:
-            m["코스피수급"] = {"외국인": None, "기관": None}
-    except Exception as e:
-        logging.warning("코스피 수급 조회 실패: %s", e)
-        m["코스피수급"] = {"외국인": None, "기관": None}
-
-    # 코스피200 야간선물(CME) — [2026-08-12 보류] 무료로 안정적으로 제공하는 소스를 못 찾아
-    # 이번 범위에서는 제외. 나중에 소스 찾으면 추가.
-    m["코스피200야간선물"] = {"값": None, "등락률": None}
+        m["국내금(ETF대용)"] = {"값": None, "등락률": None, "_오류": str(e)}
 
     m["기준시각"] = now_kst()
     return m
@@ -2649,13 +2651,26 @@ def render_admin_panel():
                                 "지표": key,
                                 "값": v.get("값"),
                                 "등락률(%)": round(v["등락률"], 2) if v.get("등락률") is not None else None,
+                                "오류": v.get("_오류", ""),
                             })
-                        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+                        df_mo = pd.DataFrame(rows)
+                        # [2026-08-12] 값은 천 단위 콤마, 등락률은 기존 손익 색상 규칙(양수=빨강,
+                        # 음수=파랑)을 그대로 적용 — style_pnl_cell()이 이미 앱 전체에서 쓰는
+                        # 손익 색상 헬퍼라 그대로 재사용.
+                        styled = (
+                            df_mo.style
+                            .format({"값": "{:,.2f}", "등락률(%)": "{:+.2f}"}, na_rep="-")
+                            .map(style_pnl_cell, subset=["등락률(%)"])
+                        )
+                        st.dataframe(styled, width="stretch", hide_index=True)
                         supply = mo.get("코스피수급", {})
-                        st.caption(f"코스피 수급 — 외국인: {supply.get('외국인')}  기관: {supply.get('기관')}")
+                        foreign_txt = f"{supply['외국인']:,.0f}" if supply.get("외국인") is not None else "-"
+                        inst_txt = f"{supply['기관']:,.0f}" if supply.get("기관") is not None else "-"
+                        st.caption(f"코스피 수급 — 외국인: {foreign_txt}  기관: {inst_txt}")
+                        if supply.get("_오류"):
+                            st.caption(f"코스피 수급 오류: {supply['_오류']}")
                         st.caption(f"기준시각: {mo.get('기준시각')}")
-                        st.caption("⚠ '값'이 None으로 나온 항목은 해당 소스 조회에 실패한 것입니다. "
-                                   "등락률이 이상하게 크거나 작으면 단위(예: %가 아니라 배수)를 의심해보세요.")
+                        st.caption("⚠ '값'이 None(-)으로 나온 항목은 '오류' 칸에 실패 사유가 표시됩니다.")
 
 
 # ============================================================
