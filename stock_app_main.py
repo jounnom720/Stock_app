@@ -1335,49 +1335,14 @@ def get_market_overview() -> dict:
     else:
         m["코스닥"] = {"값": None, "등락률": None, "_오류": err_q}
 
-    # 외국인·기관 수급 (코스피 시장 전체) — [2026-08-12 재수정]
-    # 1차: 원래 정석대로 get_market_trading_value_by_date(범위, "KOSPI")를 시도한다 —
-    # pykrx 공식 이슈 리포트에서도 이 방식이 맞다고 되어 있음. 다만 이것도 코스피 지수
-    # 조회와 같은 근본 원인(KRX 웹사이트 구조 변경)으로 최근에 빈 결과만 돌아올 수 있다.
-    # 2차: 1차가 비거나 실패하면, get_market_net_purchases_of_equities를 쓰되 — 이 함수는
-    # "하루짜리"가 아니라 "기간 누적" 집계용으로 설계된 함수라 어제 시도했던 (같은 날짜, 같은
-    # 날짜) 호출은 애초에 안 맞는 사용법이었다. 이번엔 원래 문서 예제처럼 최근 며칠치 범위로
-    # 조회해서 "최근 N영업일 누적 순매수"로 표시한다 (특정 하루 값이 아님을 명시).
-    m["코스피수급"] = {"외국인": None, "기관": None, "_오류": None}
-    try:
-        supply_df = krx_stock.get_market_trading_value_by_date(from_date, today, "KOSPI")
-        if not supply_df.empty:
-            last = supply_df.iloc[-1]
-            supply_date = supply_df.index[-1]
-            m["코스피수급"] = {
-                "외국인": float(last.get("외국인합계", 0)),
-                "기관": float(last.get("기관합계", 0)),
-                "기준일": str(supply_date)[:10] if supply_date is not None else None,
-            }
-    except Exception as e:
-        logging.warning("코스피 수급 1차(get_market_trading_value_by_date) 실패: %s", e)
-        m["코스피수급"]["_오류"] = f"1차 실패: {e}"
-
-    if m["코스피수급"]["외국인"] is None:
-        try:
-            foreign_df = krx_stock.get_market_net_purchases_of_equities(from_date, today, "KOSPI", "외국인")
-            inst_df = krx_stock.get_market_net_purchases_of_equities(from_date, today, "KOSPI", "기관합계")
-            if not foreign_df.empty or not inst_df.empty:
-                foreign_net = float(foreign_df["순매수거래대금"].sum()) if not foreign_df.empty else None
-                inst_net = float(inst_df["순매수거래대금"].sum()) if not inst_df.empty else None
-                m["코스피수급"] = {
-                    "외국인": foreign_net, "기관": inst_net,
-                    "기준일": f"최근 영업일 누적({from_date}~{today})",
-                }
-            else:
-                prev_err = m["코스피수급"].get("_오류")
-                m["코스피수급"] = {"외국인": None, "기관": None,
-                                 "_오류": f"{prev_err} / 2차도 빈 결과" if prev_err else "1·2차 모두 빈 결과"}
-        except Exception as e:
-            logging.warning("코스피 수급 2차(get_market_net_purchases_of_equities) 실패: %s", e)
-            prev_err = m["코스피수급"].get("_오류")
-            m["코스피수급"] = {"외국인": None, "기관": None,
-                             "_오류": f"{prev_err} / 2차 실패: {e}" if prev_err else f"2차 실패: {e}"}
+    # 외국인·기관 수급(코스피 시장 전체) — [2026-08-12 잠정 제외]
+    # pykrx의 투자자별 수급 관련 함수 2가지(get_market_trading_value_by_date,
+    # get_market_net_purchases_of_equities)를 모두 시도했으나 둘 다 실제로 빈 결과만
+    # 반환함을 확인(2026-08-12, Jone 실측). 코스피·코스닥 지수 조회가 깨진 것과 같은
+    # 근본 원인(KRX 웹사이트 구조 변경)으로 pykrx의 수급 관련 기능 자체가 광범위하게
+    # 막혀있는 것으로 판단, 코드로 더 파고드는 대신 이번 범위에서는 제외하기로 함
+    # (코리아밸류업지수·코스피200야간선물·국내금과 같은 처지). pykrx가 나중에 고쳐지거나
+    # 별도 인증 API를 쓰기로 하면 그때 다시 추가할 것.
 
     # ── 해외증시 (전일 종가 기준) ──
     _add("다우존스", "^DJI")
@@ -2632,7 +2597,7 @@ def render_admin_panel():
                             mo = get_market_overview()
                         rows = []
                         for key, v in mo.items():
-                            if key in ("기준시각", "코스피수급"):
+                            if key in ("기준시각",):
                                 continue
                             rows.append({
                                 "지표": key,
@@ -2650,13 +2615,6 @@ def render_admin_panel():
                             .map(style_pnl_cell, subset=["등락률(%)"])
                         )
                         st.dataframe(styled, width="stretch", hide_index=True)
-                        supply = mo.get("코스피수급", {})
-                        foreign_txt = f"{supply['외국인']:,.0f}" if supply.get("외국인") is not None else "-"
-                        inst_txt = f"{supply['기관']:,.0f}" if supply.get("기관") is not None else "-"
-                        supply_date_txt = f" ({supply['기준일']})" if supply.get("기준일") else ""
-                        st.caption(f"코스피 수급{supply_date_txt} — 외국인: {foreign_txt}  기관: {inst_txt}")
-                        if supply.get("_오류"):
-                            st.caption(f"코스피 수급 오류: {supply['_오류']}")
                         st.caption(f"기준시각: {mo.get('기준시각')}")
                         st.caption("⚠ '값'이 None(-)으로 나온 항목은 '오류' 칸에 실패 사유가 표시됩니다.")
 
