@@ -1335,31 +1335,49 @@ def get_market_overview() -> dict:
     else:
         m["코스닥"] = {"값": None, "등락률": None, "_오류": err_q}
 
-    # 외국인·기관 수급 (코스피 시장 전체) — [2026-08-12 수정]
-    # get_market_trading_value_by_date(..., "KOSPI")는 원래 개별 종목코드를 넣는 함수라
-    # 시장 코드("KOSPI")를 넣으면 매칭되는 데이터가 없어 조용히 빈 결과만 돌아왔다(실제 확인됨).
-    # 시장 전체 합계에는 get_market_net_purchases_of_equities(날짜, 날짜, 시장, 투자자)를
-    # 대신 쓴다 — 종목별 순매수거래대금 목록을 돌려주므로, 그걸 합산해서 시장 전체 값을 만든다.
-    # 최신 거래일 데이터가 아직 안 올라왔을 수도 있어(장 마감 직후 등), 최근 5일 안에서
-    # 데이터가 있는 첫 날짜를 찾을 때까지 하루씩 거슬러 올라간다.
-    supply_found = False
-    supply_last_err = None
-    for days_back in range(5):
-        d = (datetime.now(KST) - timedelta(days=days_back)).strftime("%Y%m%d")
+    # 외국인·기관 수급 (코스피 시장 전체) — [2026-08-12 재수정]
+    # 1차: 원래 정석대로 get_market_trading_value_by_date(범위, "KOSPI")를 시도한다 —
+    # pykrx 공식 이슈 리포트에서도 이 방식이 맞다고 되어 있음. 다만 이것도 코스피 지수
+    # 조회와 같은 근본 원인(KRX 웹사이트 구조 변경)으로 최근에 빈 결과만 돌아올 수 있다.
+    # 2차: 1차가 비거나 실패하면, get_market_net_purchases_of_equities를 쓰되 — 이 함수는
+    # "하루짜리"가 아니라 "기간 누적" 집계용으로 설계된 함수라 어제 시도했던 (같은 날짜, 같은
+    # 날짜) 호출은 애초에 안 맞는 사용법이었다. 이번엔 원래 문서 예제처럼 최근 며칠치 범위로
+    # 조회해서 "최근 N영업일 누적 순매수"로 표시한다 (특정 하루 값이 아님을 명시).
+    m["코스피수급"] = {"외국인": None, "기관": None, "_오류": None}
+    try:
+        supply_df = krx_stock.get_market_trading_value_by_date(from_date, today, "KOSPI")
+        if not supply_df.empty:
+            last = supply_df.iloc[-1]
+            supply_date = supply_df.index[-1]
+            m["코스피수급"] = {
+                "외국인": float(last.get("외국인합계", 0)),
+                "기관": float(last.get("기관합계", 0)),
+                "기준일": str(supply_date)[:10] if supply_date is not None else None,
+            }
+    except Exception as e:
+        logging.warning("코스피 수급 1차(get_market_trading_value_by_date) 실패: %s", e)
+        m["코스피수급"]["_오류"] = f"1차 실패: {e}"
+
+    if m["코스피수급"]["외국인"] is None:
         try:
-            foreign_df = krx_stock.get_market_net_purchases_of_equities(d, d, "KOSPI", "외국인")
-            inst_df = krx_stock.get_market_net_purchases_of_equities(d, d, "KOSPI", "기관합계")
+            foreign_df = krx_stock.get_market_net_purchases_of_equities(from_date, today, "KOSPI", "외국인")
+            inst_df = krx_stock.get_market_net_purchases_of_equities(from_date, today, "KOSPI", "기관합계")
             if not foreign_df.empty or not inst_df.empty:
                 foreign_net = float(foreign_df["순매수거래대금"].sum()) if not foreign_df.empty else None
                 inst_net = float(inst_df["순매수거래대금"].sum()) if not inst_df.empty else None
-                m["코스피수급"] = {"외국인": foreign_net, "기관": inst_net, "기준일": d}
-                supply_found = True
-                break
+                m["코스피수급"] = {
+                    "외국인": foreign_net, "기관": inst_net,
+                    "기준일": f"최근 영업일 누적({from_date}~{today})",
+                }
+            else:
+                prev_err = m["코스피수급"].get("_오류")
+                m["코스피수급"] = {"외국인": None, "기관": None,
+                                 "_오류": f"{prev_err} / 2차도 빈 결과" if prev_err else "1·2차 모두 빈 결과"}
         except Exception as e:
-            supply_last_err = str(e)
-            logging.warning("코스피 수급 조회 실패 [%s]: %s", d, e)
-    if not supply_found:
-        m["코스피수급"] = {"외국인": None, "기관": None, "_오류": supply_last_err or "최근 5일 이내 데이터 없음"}
+            logging.warning("코스피 수급 2차(get_market_net_purchases_of_equities) 실패: %s", e)
+            prev_err = m["코스피수급"].get("_오류")
+            m["코스피수급"] = {"외국인": None, "기관": None,
+                             "_오류": f"{prev_err} / 2차 실패: {e}" if prev_err else f"2차 실패: {e}"}
 
     # ── 해외증시 (전일 종가 기준) ──
     _add("다우존스", "^DJI")
