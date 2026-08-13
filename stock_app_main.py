@@ -4992,10 +4992,29 @@ if __name__ == "__main__" or True:
                                 logging.warning("refresh_token으로 재로그인 실패: %s", e)
                                 cached_credentials = None
                     if cached_credentials is not None:
+                        # [2026-08-13 추가] show_login()의 안전장치와 동일한 로직.
+                        # 세션 자동 복구 경로는 show_login()을 거치지 않고 화이트리스트의
+                        # spreadsheet_id를 바로 신뢰했는데, 이 값이 accounts 시트 ID와
+                        # 같은 잘못된 값으로 남아있는 동안(수정 전 로그인에서 저장된 경우)
+                        # 이 경로로 복구될 때마다 같은 사고가 재발했다. 여기서도 동일하게
+                        # 검증하고, 무효하면 즉시 새로 만들어서 시트에 바로잡아 저장한다.
+                        restored_sid = str(status_row.get("spreadsheet_id", "")).strip()
+                        accounts_sid = str(st.secrets.get("accounts", {}).get("spreadsheet_id", "")).strip()
+                        if restored_sid and accounts_sid and restored_sid == accounts_sid:
+                            logging.warning("세션 복구 중 개인 시트 ID가 화이트리스트 시트 ID와 동일해 무효 처리함: %s", restored_email)
+                            restored_sid = ""
+                        if not restored_sid:
+                            display_name = str(status_row.get("이름", "")).strip() or restored_email.split("@")[0]
+                            try:
+                                restored_sid, _created = find_or_create_user_spreadsheet(cached_credentials, display_name)
+                                save_user_spreadsheet_id(restored_email, restored_sid)
+                            except Exception as e:
+                                logging.warning("세션 복구 중 개인 시트 재생성 실패: %s", e)
+                                restored_sid = ""
                         st.session_state["logged_in"] = True
                         st.session_state["user_name"] = str(status_row.get("이름", "")).strip() or restored_email.split("@")[0]
                         st.session_state["user_email"] = restored_email
-                        st.session_state["spreadsheet_id"] = str(status_row.get("spreadsheet_id", "")).strip()
+                        st.session_state["spreadsheet_id"] = restored_sid
                         st.session_state["oauth_credentials"] = cached_credentials
                         st.session_state["is_admin"] = (
                             restored_email.strip().lower() == str(st.secrets.get("admin", {}).get("email", "")).strip().lower()
