@@ -1347,10 +1347,9 @@ def _kr_index_last_two_closes(pykrx_code: str, yf_fallback_ticker: str, from_dat
 # 네이버 증권의 비공식 내부 API를 사용한다. 후자는 stock.naver.com이 robots.txt로
 # 전체 크롤링을 금지(Disallow: /)하고 있음을 Jone이 인지한 상태에서, 지인 50명
 # 대상 비공개 서비스라는 점을 근거로 사용하기로 결정한 것(2026-08-12, Jone 확정).
-# [주의] 네이버 쪽 응답 필드명은 이번 세션에서 실제 브라우저로 검증하지 못했고
-# (Chrome 자동화 도구가 네이버 도메인 접근을 차단함), 공개된 API 조사 문서를
-# 기반으로 최선 추정해 파싱한다. 필드명이 실제와 다르면 빈 값으로 채워질 수
-# 있으니, 관리자 미리보기의 "원본 응답 보기"로 실제 필드를 확인 후 조정할 것.
+# 네이버 쪽 응답 필드명은 Jone이 관리자 미리보기의 "원본 응답 보기"로 실제 응답을
+# 캡처해줘서 확정함(2026-08-12) — 뉴스는 clusters[].items[] 구조, 리포트는
+# opinionText/brokerName, 컨센서스는 date/opinion(1~5 점수)/targetPrice 3개뿐임.
 
 _NAVER_STOCK_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1403,8 +1402,12 @@ def get_dart_disclosures(corp_code: str, days: int = 14, max_count: int = 15) ->
 @st.cache_data(ttl=1800)
 def get_naver_news(item_code: str, max_count: int = 10) -> list[dict]:
     """네이버 증권 종목 뉴스 목록 조회 (30분 캐시, 비공식 API).
-    [필드명 미검증 — 위 섹션 설명 참고] 응답 구조가 예상과 다르면 항목은 비어
-    있는 값으로 채워질 수 있음. 실패 시 빈 리스트."""
+    [2026-08-12] 실제 응답을 Jone이 확인해준 결과로 필드명 확정함. 응답은
+    items/list 같은 평면 구조가 아니라 같은 이슈끼리 묶인 clusters[].items[]
+    구조였음(예: 같은 사건을 다룬 여러 매체 기사가 한 클러스터에 묶임).
+    또한 응답에 기사 링크 필드가 없어서 officeId/articleId로 네이버 뉴스
+    표준 URL 패턴(n.news.naver.com/mnews/article/{officeId}/{articleId})을
+    직접 구성함 — 이 패턴 자체는 네이버 뉴스 전반에서 널리 쓰이는 형태."""
     try:
         resp = requests.get(
             "https://stock.naver.com/api/domestic/detail/news",
@@ -1414,15 +1417,20 @@ def get_naver_news(item_code: str, max_count: int = 10) -> list[dict]:
         )
         resp.raise_for_status()
         data = resp.json()
-        items = data.get("items") or data.get("list") or []
         results = []
-        for it in items[:max_count]:
-            results.append({
-                "제목": it.get("title") or it.get("subject") or "",
-                "언론사": it.get("officeName") or it.get("source") or "",
-                "날짜": it.get("datetime") or it.get("date") or it.get("regDate") or "",
-                "링크": it.get("url") or it.get("link") or "",
-            })
+        for cluster in data.get("clusters", []):
+            for it in cluster.get("items", []):
+                dt_raw = it.get("datetime", "")  # "202608130938" (YYYYMMDDHHMM)
+                날짜 = f"{dt_raw[:4]}-{dt_raw[4:6]}-{dt_raw[6:8]} {dt_raw[8:10]}:{dt_raw[10:12]}" if len(dt_raw) == 12 else dt_raw
+                office_id, article_id = it.get("officeId", ""), it.get("articleId", "")
+                results.append({
+                    "제목": it.get("title", ""),
+                    "언론사": it.get("officeName", ""),
+                    "날짜": 날짜,
+                    "링크": f"https://n.news.naver.com/mnews/article/{office_id}/{article_id}" if office_id and article_id else "",
+                })
+                if len(results) >= max_count:
+                    return results
         return results
     except Exception as e:
         logging.warning("네이버 증권 뉴스 조회 실패 [%s]: %s", item_code, e)
@@ -1431,7 +1439,8 @@ def get_naver_news(item_code: str, max_count: int = 10) -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_naver_research(item_code: str, max_count: int = 5) -> list[dict]:
     """네이버 증권 종목별 애널리스트 리포트 목록 조회 (1시간 캐시, 비공식 API).
-    [필드명 미검증] — get_naver_news와 동일한 주의사항 적용."""
+    [2026-08-12] 실제 응답 필드명 확정(Jone 확인). 애널리스트 실명(작성자) 필드는
+    이 API에 애초에 존재하지 않아 제공하지 않음 — 증권사명(brokerName)까지만 제공됨."""
     try:
         resp = requests.get(
             "https://stock.naver.com/api/stockSecurity/researches/v2/company",
@@ -1445,22 +1454,42 @@ def get_naver_research(item_code: str, max_count: int = 5) -> list[dict]:
         results = []
         for it in items[:max_count]:
             results.append({
-                "제목": it.get("title") or "",
-                "증권사": it.get("brokerName") or it.get("broker") or "",
-                "작성자": it.get("writer") or it.get("analyst") or "",
-                "날짜": it.get("date") or it.get("writeDate") or "",
-                "목표주가": it.get("goalPrice") or it.get("targetPrice"),
-                "투자의견": it.get("opinion") or it.get("investOpinion") or "",
+                "제목": it.get("title", ""),
+                "증권사": it.get("brokerName", ""),
+                "날짜": it.get("writeDate", ""),
+                "목표주가": it.get("goalPrice"),
+                "투자의견": it.get("opinionText", ""),
             })
         return results
     except Exception as e:
         logging.warning("네이버 증권 리서치 조회 실패 [%s]: %s", item_code, e)
         return []
 
+# [2026-08-12] 컨센서스 investOpinion 점수(1~5) 해석 기준. 네이버가 공식 문서화한
+# 임계값이 아니라 국내 증권사 리서치에서 통상 쓰이는 5단계 척도를 참고한 추정치이니
+# 정확한 경계값이 필요하면 실제 서비스 화면의 문구와 대조해서 조정할 것.
+def _investor_opinion_label(score) -> str:
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return ""
+    if score >= 4.5:
+        return "적극매수"
+    if score >= 3.5:
+        return "매수"
+    if score >= 2.5:
+        return "중립"
+    if score >= 1.5:
+        return "비중축소"
+    return "매도"
+
 @st.cache_data(ttl=3600)
 def get_naver_consensus(item_code: str) -> dict:
-    """네이버 증권 종목 컨센서스(투자의견·목표주가 평균) 조회 (1시간 캐시, 비공식 API).
-    [필드명 미검증] 실패 시 빈 딕셔너리."""
+    """네이버 증권 종목 컨센서스(투자의견 점수·목표주가) 조회 (1시간 캐시, 비공식 API).
+    [2026-08-12] 실제 응답 필드명 확정(Jone 확인) — date/opinion/targetPrice 3개뿐이고,
+    당초 기대했던 현재가대비·애널리스트수 필드는 이 API에 존재하지 않음(제공 안 됨).
+    opinion은 텍스트가 아니라 1~5 점수(높을수록 매수강도 강함) — _investor_opinion_label()로
+    참고용 라벨을 붙여서 같이 반환."""
     try:
         resp = requests.get(
             f"https://stock.naver.com/api/domestic/detail/{item_code}/consensus",
@@ -1469,12 +1498,12 @@ def get_naver_consensus(item_code: str) -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
+        score = data.get("opinion")
         return {
-            "투자의견": data.get("investOpinion") or data.get("opinion"),
-            "목표주가": data.get("goalPrice") or data.get("targetPrice"),
-            "현재가대비": data.get("goalPriceRatio") or data.get("upside"),
-            "애널리스트수": data.get("analystCount") or data.get("count"),
-            "_원본": data,  # [2026-08-12] 필드명 검증 전까지 관리자 미리보기에서 원본 확인용
+            "투자의견점수": score,
+            "투자의견_참고라벨": _investor_opinion_label(score),
+            "목표주가": data.get("targetPrice"),
+            "기준일": data.get("date", ""),
         }
     except Exception as e:
         logging.warning("네이버 증권 컨센서스 조회 실패 [%s]: %s", item_code, e)
@@ -2921,16 +2950,15 @@ def render_admin_panel():
                             st.caption("⚠ 코스피/코스닥 수급 데이터를 가져오지 못했습니다 (다음 금융 API 응답 실패).")
 
                     st.divider()
-                    # [2026-08-12 추가] 종목별 일일 리포트(공시+뉴스+애널리스트 리포트+컨센서스)
-                    # 미리보기 — 특히 네이버 증권 쪽은 필드명을 이번 세션에서 실제로 검증하지
-                    # 못했으므로, "원본 응답 보기"를 체크하면 raw JSON을 그대로 보여줘서
-                    # 파싱이 깨졌는지 실제 필드명이 다른지 바로 확인할 수 있게 해둠.
+                    # [2026-08-12] 종목별 일일 리포트(공시+뉴스+애널리스트 리포트+컨센서스) 미리보기.
+                    # 네이버 쪽 필드명은 Jone이 실제 응답을 확인해줘서 확정됨(get_naver_news 등 docstring
+                    # 참고). "원본 응답 보기"는 이후 네이버가 API 구조를 바꿨을 때 재진단용으로 남겨둠.
                     st.caption("종목 하나를 골라 공시(DART)·뉴스·애널리스트 리포트·컨센서스가 잘 나오는지 확인합니다 (개발 중 임시 기능).")
                     preview_code = st.text_input(
                         "종목코드(6자리)", value="005930", key="admin_daily_report_code",
                         help="예: 삼성전자 005930, SK하이닉스 000660",
                     )
-                    show_raw = st.checkbox("원본 응답 보기 (네이버 필드명 검증용)", key="admin_daily_report_raw")
+                    show_raw = st.checkbox("원본 응답 보기 (문제 발생 시 진단용)", key="admin_daily_report_raw")
                     if st.button("📰 일일 리포트 미리보기(테스트)", key="admin_daily_report_preview", width="stretch"):
                         with st.spinner("공시·뉴스·리포트 조회 중..."):
                             report = get_daily_stock_report(preview_code.strip())
@@ -2960,18 +2988,9 @@ def render_admin_panel():
                         st.markdown("**🎯 컨센서스 (네이버 증권)**")
                         consensus = report["컨센서스"]
                         if consensus:
-                            raw = consensus.pop("_원본", None)
                             st.json(consensus)
-                            if show_raw and raw is not None:
-                                st.markdown("**원본 응답 (필드명 확인용)**")
-                                st.json(raw)
                         else:
                             st.caption("컨센서스 없음 또는 조회 실패")
-
-                        if show_raw:
-                            st.caption("⚠ 뉴스·리포트 표가 비어있는데 원본 응답에는 데이터가 있다면, "
-                                       "코드의 필드명(title/officeName 등)이 실제 응답과 달라서 파싱이 안 된 것입니다. "
-                                       "이 경우 실제 필드명을 알려주시면 다음 세션에서 바로 고쳐드리겠습니다.")
 
 
 # ============================================================
