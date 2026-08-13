@@ -1457,13 +1457,24 @@ def get_naver_research(item_code: str, max_count: int = 5) -> list[dict]:
                 "제목": it.get("title", ""),
                 "증권사": it.get("brokerName", ""),
                 "날짜": it.get("writeDate", ""),
-                "목표주가": it.get("goalPrice"),
+                "목표주가": _safe_float_or_none(it.get("goalPrice")),
                 "투자의견": it.get("opinionText", ""),
             })
         return results
     except Exception as e:
         logging.warning("네이버 증권 리서치 조회 실패 [%s]: %s", item_code, e)
         return []
+
+# [2026-08-13 추가] 네이버 증권 API는 숫자 값도 문자열로 주는 경우가 많다(예: "491875.0").
+# 이 값을 다루는 곳마다 매번 변환 코드를 반복하지 않도록 공용 헬퍼로 뺌.
+def _safe_float_or_none(v):
+    """문자열/숫자/None 어떤 형태로 와도 float 또는 None으로 안전하게 변환."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 # [2026-08-12] 컨센서스 investOpinion 점수(1~5) 해석 기준. 네이버가 공식 문서화한
 # 임계값이 아니라 국내 증권사 리서치에서 통상 쓰이는 5단계 척도를 참고한 추정치이니
@@ -1489,7 +1500,11 @@ def get_naver_consensus(item_code: str) -> dict:
     [2026-08-12] 실제 응답 필드명 확정(Jone 확인) — date/opinion/targetPrice 3개뿐이고,
     당초 기대했던 현재가대비·애널리스트수 필드는 이 API에 존재하지 않음(제공 안 됨).
     opinion은 텍스트가 아니라 1~5 점수(높을수록 매수강도 강함) — _investor_opinion_label()로
-    참고용 라벨을 붙여서 같이 반환."""
+    참고용 라벨을 붙여서 같이 반환.
+    [2026-08-13 수정] 네이버 API가 opinion·targetPrice를 숫자가 아니라 문자열로 준다
+    (예: "491875.0")는 걸 놓쳐서, 화면에서 "{target:,.0f}" 같은 숫자 서식을 바로 적용하다
+    ValueError로 앱이 죽는 실제 장애가 발생함. 여기(데이터를 만드는 지점)에서 미리 float로
+    변환해두면, 이 값을 쓰는 화면 쪽에서는 서식 지정 걱정 없이 바로 쓸 수 있다."""
     try:
         resp = requests.get(
             f"https://stock.naver.com/api/domestic/detail/{item_code}/consensus",
@@ -1498,11 +1513,11 @@ def get_naver_consensus(item_code: str) -> dict:
         )
         resp.raise_for_status()
         data = resp.json()
-        score = data.get("opinion")
+        score = _safe_float_or_none(data.get("opinion"))
         return {
             "투자의견점수": score,
             "투자의견_참고라벨": _investor_opinion_label(score),
-            "목표주가": data.get("targetPrice"),
+            "목표주가": _safe_float_or_none(data.get("targetPrice")),
             "기준일": data.get("date", ""),
         }
     except Exception as e:
@@ -1522,6 +1537,85 @@ def get_daily_stock_report(code: str, name: str = "") -> dict:
         "리포트": get_naver_research(code),
         "컨센서스": get_naver_consensus(code),
     }
+
+@st.cache_data(ttl=3600)
+def generate_stock_daily_summary(code: str, name: str, report: dict) -> str:
+    """수집된 공시·뉴스·애널리스트 리포트·컨센서스를 Claude(Haiku)로 종합해 오늘자
+    브리핑 문단을 만든다 (1시간 캐시).
+    [2026-08-13 추가, 원래 설계 의도 보완] 애초 세션 정리 문서에 "종목별 섹션: 공시+뉴스+
+    애널리스트리포트+기타이벤트... 실제 특이사항 적을 것"이라고 되어 있었고, Anthropic API
+    키도 이 목적으로 별도 발급해뒀던 것인데(예상 월비용 $1~1.5), 정작 이 요약 단계 없이
+    원본 데이터를 표로만 나열하고 있었던 것을 뒤늦게 보완함.
+    실패 시(시크릿 미설정, API 오류 등) 빈 문자열 반환 — 호출부가 원본 표로 자연스럽게
+    폴백하게 되어 있어 이 기능 하나 때문에 화면 전체가 죽지 않는다."""
+    try:
+        api_key = st.secrets["anthropic"]["api_key"]
+    except Exception:
+        return ""
+
+    news_lines = "\n".join(
+        f"- [{n.get('날짜', '')}] {n.get('언론사', '')}: {n.get('제목', '')}"
+        for n in report.get("뉴스", [])[:10]
+    ) or "없음"
+    disclosure_lines = "\n".join(
+        f"- [{d.get('날짜', '')}] {d.get('제목', '')}"
+        for d in report.get("공시", [])[:10]
+    ) or "없음"
+    research_lines = "\n".join(
+        f"- [{r.get('날짜', '')}] {r.get('증권사', '')} "
+        f"(목표주가 {r.get('목표주가')}원, {r.get('투자의견', '')}): {r.get('제목', '')}"
+        for r in report.get("리포트", [])[:5]
+    ) or "없음"
+    consensus = report.get("컨센서스") or {}
+    consensus_line = (
+        f"투자의견 {consensus.get('투자의견_참고라벨', '-')}, 목표주가 {consensus.get('목표주가', '-')}원"
+        if consensus else "없음"
+    )
+
+    prompt = f"""아래는 {name}({code})에 대해 오늘 수집된 원본 데이터입니다. 이를 바탕으로
+개인 투자자가 30초 안에 읽을 수 있는 "오늘의 종합 브리핑"을 한국어로 작성해주세요.
+
+[최근 뉴스]
+{news_lines}
+
+[최근 공시]
+{disclosure_lines}
+
+[최근 애널리스트 리포트]
+{research_lines}
+
+[컨센서스]
+{consensus_line}
+
+작성 규칙:
+- 3~5개의 짧은 불릿 포인트로 작성
+- 오늘/최근 특이사항(주가에 영향 줄 만한 뉴스·공시·리포트 톤 변화)을 우선순위로 다룰 것
+- 위 데이터에 없는 내용은 추측해서 언급하지 말 것
+- 투자 조언이나 매수/매도 권유는 하지 말고 사실 전달에 집중할 것
+- 마크다운 불릿(-) 형식으로만 출력하고, 다른 설명이나 인사말은 붙이지 말 것"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        return text.strip()
+    except Exception as e:
+        logging.warning("일일 리포트 AI 요약 실패 [%s]: %s", code, e)
+        return ""
 
 @st.cache_data(ttl=1800)
 def _get_naver_raw(kind: str, item_code: str) -> dict:
@@ -3082,42 +3176,70 @@ def render_daily_report(holdings_df: pd.DataFrame):
     with st.spinner(f"{name} 리포트 불러오는 중..."):
         report = get_daily_stock_report(code, name)
 
-    col1, col2 = st.columns(2)
-    with col1:
+    # ── AI 종합 브리핑 (Anthropic API) ──
+    # [2026-08-13] 원본 데이터를 그대로 나열하는 대신, 애초 설계 의도대로 Claude가
+    # 읽고 핵심만 뽑아주는 요약을 메인으로 보여준다. 원본은 아래 expander에서 필요할 때만.
+    with st.spinner("AI 종합 브리핑 작성 중..."):
+        summary = generate_stock_daily_summary(code, name, report)
+
+    st.markdown(f"##### 🧾 {name} 오늘의 종합 브리핑")
+    if summary:
+        st.markdown(summary)
+        st.caption("AI(Claude)가 아래 원본 데이터를 바탕으로 요약한 내용입니다. 투자 판단은 반드시 원본을 직접 확인 후 하세요.")
+    else:
+        st.info(
+            "AI 종합 브리핑을 만들지 못했습니다 (Anthropic API 키 미설정 또는 일시적 오류). "
+            "아래 원본 데이터를 직접 확인해주세요."
+        )
+
+    # ── 컨센서스 요약 카드 ──
+    consensus = report["컨센서스"]
+    if consensus:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("투자의견", consensus.get("투자의견_참고라벨") or "-")
+        target = consensus.get("목표주가")  # get_naver_consensus에서 이미 float/None으로 정리해서 줌
+        c2.metric("목표주가", f"{target:,.0f}원" if target is not None else "-")
+        score = consensus.get("투자의견점수")
+        c3.metric("투자의견 점수", f"{score:.2f}/5" if score is not None else "-")
+        st.caption(f"컨센서스 기준일: {consensus.get('기준일', '-')} (네이버 증권 제공, 참고용)")
+
+    st.divider()
+
+    # ── 원본 데이터 (필요할 때만 펼쳐보기) ──
+    with st.expander("📋 원본 데이터 보기 (공시·뉴스·애널리스트 리포트)"):
         st.markdown("**📢 공시 (DART)**")
         if report["공시"]:
-            st.dataframe(pd.DataFrame(report["공시"]), width="stretch", hide_index=True)
+            df_disc = pd.DataFrame(report["공시"])
+            st.dataframe(
+                df_disc, width="stretch", hide_index=True,
+                column_config={
+                    "링크": st.column_config.LinkColumn("링크", display_text="바로가기"),
+                },
+            )
         else:
             st.caption("공시 없음 (ETF는 DART 고유번호가 없어 항상 비어있는 게 정상입니다)")
 
-        st.markdown("**🎯 컨센서스**")
-        consensus = report["컨센서스"]
-        if consensus:
-            c1, c2 = st.columns(2)
-            c1.metric("투자의견", consensus.get("투자의견_참고라벨") or "-")
-            target = consensus.get("목표주가")
-            c2.metric("목표주가", f"{target:,.0f}원" if target else "-")
-            st.caption(f"기준일: {consensus.get('기준일', '-')} · 투자의견 점수 {consensus.get('투자의견점수', '-')}/5(참고용)")
-        else:
-            st.caption("컨센서스 정보 없음")
-
-    with col2:
         st.markdown("**📰 최근 뉴스**")
         if report["뉴스"]:
-            for n in report["뉴스"][:8]:
-                st.markdown(
-                    f"- [{n['제목']}]({n['링크']})  \n"
-                    f"<span style='color:gray;font-size:0.8rem'>{n['언론사']} · {n['날짜']}</span>",
-                    unsafe_allow_html=True,
-                )
+            df_news = pd.DataFrame(report["뉴스"])
+            st.dataframe(
+                df_news, width="stretch", hide_index=True,
+                column_config={
+                    "링크": st.column_config.LinkColumn("링크", display_text="기사 보기"),
+                },
+            )
         else:
             st.caption("뉴스 없음")
 
-    st.markdown("**📊 애널리스트 리포트**")
-    if report["리포트"]:
-        st.dataframe(pd.DataFrame(report["리포트"]), width="stretch", hide_index=True)
-    else:
-        st.caption("애널리스트 리포트 없음")
+        st.markdown("**📊 애널리스트 리포트**")
+        if report["리포트"]:
+            df_report = pd.DataFrame(report["리포트"])
+            st.dataframe(
+                df_report, width="stretch", hide_index=True,
+                column_config=build_number_column_config(df_report, money_cols=["목표주가"]),
+            )
+        else:
+            st.caption("애널리스트 리포트 없음")
 
 
 def main(spreadsheet_id: str):
