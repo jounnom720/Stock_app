@@ -30,6 +30,10 @@ import hashlib
 import base64
 import time
 import secrets as pysecrets
+import requests  # DART corpCode.xml 다운로드용 (2026-08-12 추가)
+import zipfile
+import xml.etree.ElementTree as ET
+from io import BytesIO
 
 # ============================================================
 # 기본 설정
@@ -134,6 +138,58 @@ def get_asset_type(code: str, name: str = "") -> str:
     if any(name_str.startswith(p.upper()) for p in ETF_BRAND_PREFIXES):
         return "ETF"
     return "주식"
+
+# ============================================================
+# DART 공시 고유번호(corp_code) 자동 조회 — [2026-08-12 추가]
+# ============================================================
+# DART는 증권시장 종목코드(예: 278470)만으로는 공시를 조회할 수 없고, 별도의 8자리
+# "고유번호(corp_code)"가 있어야 한다. 이 매핑은 DART 웹페이지 어디에도 노출되지 않고
+# corpCode.xml이라는 전용 API(대용량 zip 파일)로만 받을 수 있다. ASSET_MASTER에 새
+# 개별기업이 추가될 때마다 매번 손으로 고유번호를 찾아 하드코딩하면 놓치기 쉽고
+# (2026-08-12 실제로 3개 종목이 누락된 채로 발견됨), 그래서 정적 딕셔너리 대신 여기서는
+# 전체 매핑을 1회 다운로드해 24시간 캐시해두고 종목코드로 바로 조회하는 방식을 쓴다.
+# ETF는 DART가 아니라 KRX의 KIND 시스템에서 공시를 관리하므로 이 매핑에 원천적으로
+# 존재하지 않는다 (정상 동작 — None이 반환되면 ETF이거나 상장기업이 아닌 것으로 처리).
+#
+# [필요 설정] secrets.toml에 아래 섹션 추가 필요 (없으면 조회가 항상 실패로 처리됨):
+#   [dart]
+#   api_key = "발급받은 DART Open API 인증키"
+
+@st.cache_data(ttl=86400)
+def _get_dart_corp_code_map() -> dict[str, str]:
+    """DART 고유번호 전체 목록을 다운로드해 {종목코드: 고유번호} 딕셔너리로 변환
+    (24시간 캐시 — 파일 크기가 크고 자주 바뀌는 정보가 아니므로 매 요청마다 받을 필요 없음).
+    상장사가 아니라 종목코드가 없는 회사는 애초에 매핑에서 제외한다.
+    실패 시 빈 딕셔너리를 반환 — 호출부(get_dart_corp_code)에서 자연스럽게 '조회 불가'로
+    처리되게 해서, 이 기능 하나 때문에 앱 전체나 다른 화면이 죽는 일이 없도록 한다."""
+    try:
+        api_key = st.secrets["dart"]["api_key"]
+        resp = requests.get(
+            "https://opendart.fss.or.kr/api/corpCode.xml",
+            params={"crtfc_key": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        with zipfile.ZipFile(BytesIO(resp.content)) as zf:
+            xml_bytes = zf.read("CORPCODE.xml")
+        root = ET.fromstring(xml_bytes)
+        mapping: dict[str, str] = {}
+        for item in root.iter("list"):
+            stock_code = (item.findtext("stock_code") or "").strip()
+            corp_code = (item.findtext("corp_code") or "").strip()
+            if stock_code and corp_code:
+                mapping[stock_code] = corp_code
+        return mapping
+    except Exception as e:
+        logging.warning("DART 고유번호 목록 다운로드 실패: %s", e)
+        return {}
+
+def get_dart_corp_code(stock_code: str) -> str | None:
+    """종목코드(예: '278470')로 DART 고유번호(8자리)를 조회해 반환한다. 상장기업이
+    아니거나(ETF 등) DART 목록 다운로드 자체가 실패한 경우 None을 반환한다.
+    사용 예: corp_code = get_dart_corp_code("005930")  # 삼성전자 -> '00126380'"""
+    stock_code = str(stock_code).strip()
+    return _get_dart_corp_code_map().get(stock_code)
 
 # 계좌별 카드 배지 색상 팔레트 — 계좌 수가 몇 개든(신한/미래에셋뿐 아니라 향후 추가 계좌도)
 # 순서대로 돌려가며 배정하기 위함. (bg, fg) 튜플.
@@ -1284,6 +1340,222 @@ def _kr_index_last_two_closes(pykrx_code: str, yf_fallback_ticker: str, from_dat
         return cur, prev, f"pykrx 실패({pykrx_error})해서 야후 대체값 사용 중"
     return None, None, f"pykrx·야후 둘 다 실패 (pykrx: {pykrx_error})"
 
+# ============================================================
+# 일일 종목 리포트 — 공시·뉴스·애널리스트 리포트 수집 (2026-08-12 추가)
+# ============================================================
+# 공시는 DART 공식 API(문서화·안정적), 뉴스와 애널리스트 리포트/컨센서스는
+# 네이버 증권의 비공식 내부 API를 사용한다. 후자는 stock.naver.com이 robots.txt로
+# 전체 크롤링을 금지(Disallow: /)하고 있음을 Jone이 인지한 상태에서, 지인 50명
+# 대상 비공개 서비스라는 점을 근거로 사용하기로 결정한 것(2026-08-12, Jone 확정).
+# [주의] 네이버 쪽 응답 필드명은 이번 세션에서 실제 브라우저로 검증하지 못했고
+# (Chrome 자동화 도구가 네이버 도메인 접근을 차단함), 공개된 API 조사 문서를
+# 기반으로 최선 추정해 파싱한다. 필드명이 실제와 다르면 빈 값으로 채워질 수
+# 있으니, 관리자 미리보기의 "원본 응답 보기"로 실제 필드를 확인 후 조정할 것.
+
+_NAVER_STOCK_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://stock.naver.com/",
+}
+
+@st.cache_data(ttl=1800)
+def get_dart_disclosures(corp_code: str, days: int = 14, max_count: int = 15) -> list[dict]:
+    """DART 공식 API(list.json)로 최근 공시 목록을 조회한다 (30분 캐시).
+    corp_code는 get_dart_corp_code()로 얻은 8자리 고유번호. ETF 등 corp_code가
+    없는 종목은 애초에 호출하지 않도록 호출부에서 걸러야 한다.
+    실패 시 빈 리스트 반환 — 공시 하나 실패해도 나머지 종목·섹션은 정상 표시되게."""
+    try:
+        api_key = st.secrets["dart"]["api_key"]
+        today = datetime.now(KST)
+        resp = requests.get(
+            "https://opendart.fss.or.kr/api/list.json",
+            params={
+                "crtfc_key": api_key,
+                "corp_code": corp_code,
+                "bgn_de": (today - timedelta(days=days)).strftime("%Y%m%d"),
+                "end_de": today.strftime("%Y%m%d"),
+                "page_no": 1,
+                "page_count": max_count,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "000":  # DART: "000"이 정상, "013"은 검색결과 없음 등
+            if data.get("status") == "013":
+                return []  # 검색결과 없음은 정상 케이스(오류 아님)
+            logging.warning("DART 공시 조회 오류 [%s]: %s", corp_code, data.get("message"))
+            return []
+        results = []
+        for item in data.get("list", []):
+            rcept_no = item.get("rcept_no", "")
+            results.append({
+                "제목": item.get("report_nm", ""),
+                "제출인": item.get("flr_nm", ""),
+                "날짜": item.get("rcept_dt", ""),
+                "링크": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}" if rcept_no else "",
+            })
+        return results
+    except Exception as e:
+        logging.warning("DART 공시 조회 실패 [%s]: %s", corp_code, e)
+        return []
+
+@st.cache_data(ttl=1800)
+def get_naver_news(item_code: str, max_count: int = 10) -> list[dict]:
+    """네이버 증권 종목 뉴스 목록 조회 (30분 캐시, 비공식 API).
+    [필드명 미검증 — 위 섹션 설명 참고] 응답 구조가 예상과 다르면 항목은 비어
+    있는 값으로 채워질 수 있음. 실패 시 빈 리스트."""
+    try:
+        resp = requests.get(
+            "https://stock.naver.com/api/domestic/detail/news",
+            params={"itemCode": item_code, "page": 1, "pageSize": max_count},
+            headers=_NAVER_STOCK_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("items") or data.get("list") or []
+        results = []
+        for it in items[:max_count]:
+            results.append({
+                "제목": it.get("title") or it.get("subject") or "",
+                "언론사": it.get("officeName") or it.get("source") or "",
+                "날짜": it.get("datetime") or it.get("date") or it.get("regDate") or "",
+                "링크": it.get("url") or it.get("link") or "",
+            })
+        return results
+    except Exception as e:
+        logging.warning("네이버 증권 뉴스 조회 실패 [%s]: %s", item_code, e)
+        return []
+
+@st.cache_data(ttl=3600)
+def get_naver_research(item_code: str, max_count: int = 5) -> list[dict]:
+    """네이버 증권 종목별 애널리스트 리포트 목록 조회 (1시간 캐시, 비공식 API).
+    [필드명 미검증] — get_naver_news와 동일한 주의사항 적용."""
+    try:
+        resp = requests.get(
+            "https://stock.naver.com/api/stockSecurity/researches/v2/company",
+            params={"itemCodes": item_code, "index": 0, "size": max_count},
+            headers=_NAVER_STOCK_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("items") or []
+        results = []
+        for it in items[:max_count]:
+            results.append({
+                "제목": it.get("title") or "",
+                "증권사": it.get("brokerName") or it.get("broker") or "",
+                "작성자": it.get("writer") or it.get("analyst") or "",
+                "날짜": it.get("date") or it.get("writeDate") or "",
+                "목표주가": it.get("goalPrice") or it.get("targetPrice"),
+                "투자의견": it.get("opinion") or it.get("investOpinion") or "",
+            })
+        return results
+    except Exception as e:
+        logging.warning("네이버 증권 리서치 조회 실패 [%s]: %s", item_code, e)
+        return []
+
+@st.cache_data(ttl=3600)
+def get_naver_consensus(item_code: str) -> dict:
+    """네이버 증권 종목 컨센서스(투자의견·목표주가 평균) 조회 (1시간 캐시, 비공식 API).
+    [필드명 미검증] 실패 시 빈 딕셔너리."""
+    try:
+        resp = requests.get(
+            f"https://stock.naver.com/api/domestic/detail/{item_code}/consensus",
+            headers=_NAVER_STOCK_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "투자의견": data.get("investOpinion") or data.get("opinion"),
+            "목표주가": data.get("goalPrice") or data.get("targetPrice"),
+            "현재가대비": data.get("goalPriceRatio") or data.get("upside"),
+            "애널리스트수": data.get("analystCount") or data.get("count"),
+            "_원본": data,  # [2026-08-12] 필드명 검증 전까지 관리자 미리보기에서 원본 확인용
+        }
+    except Exception as e:
+        logging.warning("네이버 증권 컨센서스 조회 실패 [%s]: %s", item_code, e)
+        return {}
+
+def get_daily_stock_report(code: str, name: str = "") -> dict:
+    """한 종목의 공시(DART)+뉴스+리포트+컨센서스를 한 번에 모아서 반환한다.
+    ETF는 DART 고유번호가 없으므로 공시는 자동으로 빈 리스트가 되고, 뉴스만
+    의미 있게 채워진다(기존 세션 정리에서 합의된 처리 방식과 동일)."""
+    corp_code = get_dart_corp_code(code)
+    return {
+        "종목코드": code,
+        "종목명": name,
+        "공시": get_dart_disclosures(corp_code) if corp_code else [],
+        "뉴스": get_naver_news(code),
+        "리포트": get_naver_research(code),
+        "컨센서스": get_naver_consensus(code),
+    }
+
+@st.cache_data(ttl=1800)
+def _get_naver_raw(kind: str, item_code: str) -> dict:
+    """[2026-08-12, 관리자 미리보기 전용] 네이버 증권 API 원본 응답을 그대로 반환한다.
+    파싱 함수(get_naver_news 등)의 필드명 추정이 맞는지 확인하기 위한 디버그용 —
+    실제 필드명이 확인되면 이 함수는 정리해도 된다."""
+    try:
+        if kind == "news":
+            url = "https://stock.naver.com/api/domestic/detail/news"
+            params = {"itemCode": item_code, "page": 1, "pageSize": 10}
+        elif kind == "research":
+            url = "https://stock.naver.com/api/stockSecurity/researches/v2/company"
+            params = {"itemCodes": item_code, "index": 0, "size": 5}
+        else:
+            return {"_오류": f"알 수 없는 kind: {kind}"}
+        resp = requests.get(url, params=params, headers=_NAVER_STOCK_HEADERS, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        return {"_오류": str(e)}
+
+
+# Daum 금융이 실제로 쓰는 내부 API 헤더 — Referer가 없으면 403 Forbidden을 반환한다
+# (2026-08-12, Chrome 네트워크 탭으로 실측 확인. crawling 방지용으로 추정).
+_DAUM_INVESTOR_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://finance.daum.net/domestic/investors/KOSPI",
+}
+
+@st.cache_data(ttl=3600)
+def get_investor_trend(market: str) -> dict:
+    """코스피/코스닥 시장 전체의 외국인·기관·개인 순매수 금액(원)을 다음 금융에서
+    조회한다 (1시간 캐시). market은 'KOSPI' 또는 'KOSDAQ'.
+    [배경, 2026-08-12] 애초 KRX 공식 Open API로 이 데이터를 받아오려 했으나, 무료
+    Open API 서비스 목록에는 '일별매매정보'(시세·거래량)만 있고 투자자별(외국인/기관)
+    매매동향 API는 아예 없음을 확인함. 이 데이터는 다음 금융이 자체적으로 쓰는 내부
+    API(finance.daum.net/api/charts/investors/{market}/days)에서 가져온다 — Chrome
+    개발자도구 네트워크 탭으로 실제 요청을 확인해 알아낸 엔드포인트.
+    반환값의 금액 단위는 원(KRW), 양수=순매수, 음수=순매도."""
+    try:
+        url = f"https://finance.daum.net/api/charts/investors/{market}/days"
+        resp = requests.get(
+            url,
+            params={"limit": 2, "adjusted": "true"},
+            headers=_DAUM_INVESTOR_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        rows = resp.json().get("data", [])
+        if not rows:
+            return {}
+        latest = rows[-1]
+        return {
+            "날짜": latest.get("date", "")[:10],
+            "외국인": latest.get("foreignStraightPurchasePrice"),
+            "기관": latest.get("institutionStraightPurchasePrice"),
+            "개인": latest.get("individualStraightPurchasePrice"),
+        }
+    except Exception as e:
+        logging.warning("다음 금융 투자자별 매매동향 조회 실패 [%s]: %s", market, e)
+        return {}
+
 @st.cache_data(ttl=3600)
 def get_market_overview() -> dict:
     """일일 시황 브리핑에 쓸 지표를 한 번에 모아서 반환한다 (1시간 캐시).
@@ -1335,14 +1607,17 @@ def get_market_overview() -> dict:
     else:
         m["코스닥"] = {"값": None, "등락률": None, "_오류": err_q}
 
-    # 외국인·기관 수급(코스피 시장 전체) — [2026-08-12 잠정 제외]
-    # pykrx의 투자자별 수급 관련 함수 2가지(get_market_trading_value_by_date,
-    # get_market_net_purchases_of_equities)를 모두 시도했으나 둘 다 실제로 빈 결과만
-    # 반환함을 확인(2026-08-12, Jone 실측). 코스피·코스닥 지수 조회가 깨진 것과 같은
-    # 근본 원인(KRX 웹사이트 구조 변경)으로 pykrx의 수급 관련 기능 자체가 광범위하게
-    # 막혀있는 것으로 판단, 코드로 더 파고드는 대신 이번 범위에서는 제외하기로 함
-    # (코리아밸류업지수·코스피200야간선물·국내금과 같은 처지). pykrx가 나중에 고쳐지거나
-    # 별도 인증 API를 쓰기로 하면 그때 다시 추가할 것.
+    # ── 외국인·기관 수급(코스피/코스닥 시장 전체) ──
+    # [2026-08-12] pykrx의 투자자별 수급 함수 2가지 모두 KRX 웹사이트 구조 변경으로
+    # 빈 결과만 반환함을 확인. KRX 공식 Open API도 이 데이터 자체를 제공하지 않음을
+    # 서비스 목록에서 확인(주식 카테고리는 일별매매정보·종목기본정보뿐). 다음 금융의
+    # 내부 API로 대체 구현함 — get_investor_trend() 참고.
+    kospi_flow = get_investor_trend("KOSPI")
+    if kospi_flow:
+        m["코스피_수급"] = kospi_flow
+    kosdaq_flow = get_investor_trend("KOSDAQ")
+    if kosdaq_flow:
+        m["코스닥_수급"] = kosdaq_flow
 
     # ── 해외증시 (전일 종가 기준) ──
     _add("다우존스", "^DJI")
@@ -2595,9 +2870,12 @@ def render_admin_panel():
                     if st.button("🌐 시황 데이터 미리보기(테스트)", key="admin_market_overview_preview", width="stretch"):
                         with st.spinner("시황 지표 조회 중..."):
                             mo = get_market_overview()
+                        # [2026-08-12] 수급 데이터(코스피_수급/코스닥_수급)는 값/등락률 구조가
+                        # 아니라 날짜+외국인/기관/개인 순매수금액 구조라 별도 표로 분리해서 보여준다.
+                        FLOW_KEYS = ("코스피_수급", "코스닥_수급")
                         rows = []
                         for key, v in mo.items():
-                            if key in ("기준시각",):
+                            if key in ("기준시각",) or key in FLOW_KEYS:
                                 continue
                             rows.append({
                                 "지표": key,
@@ -2617,6 +2895,83 @@ def render_admin_panel():
                         st.dataframe(styled, width="stretch", hide_index=True)
                         st.caption(f"기준시각: {mo.get('기준시각')}")
                         st.caption("⚠ '값'이 None(-)으로 나온 항목은 '오류' 칸에 실패 사유가 표시됩니다.")
+
+                        # [2026-08-12 추가] 코스피/코스닥 수급(외국인·기관·개인 순매수) 별도 표
+                        flow_rows = []
+                        for key in FLOW_KEYS:
+                            flow = mo.get(key)
+                            if not flow:
+                                continue
+                            flow_rows.append({
+                                "시장": key.replace("_수급", ""),
+                                "날짜": flow.get("날짜"),
+                                "외국인(억원)": (flow.get("외국인") or 0) / 1e8,
+                                "기관(억원)": (flow.get("기관") or 0) / 1e8,
+                                "개인(억원)": (flow.get("개인") or 0) / 1e8,
+                            })
+                        if flow_rows:
+                            df_flow = pd.DataFrame(flow_rows)
+                            styled_flow = (
+                                df_flow.style
+                                .format({"외국인(억원)": "{:+,.0f}", "기관(억원)": "{:+,.0f}", "개인(억원)": "{:+,.0f}"})
+                                .map(style_pnl_cell, subset=["외국인(억원)", "기관(억원)", "개인(억원)"])
+                            )
+                            st.dataframe(styled_flow, width="stretch", hide_index=True)
+                        else:
+                            st.caption("⚠ 코스피/코스닥 수급 데이터를 가져오지 못했습니다 (다음 금융 API 응답 실패).")
+
+                    st.divider()
+                    # [2026-08-12 추가] 종목별 일일 리포트(공시+뉴스+애널리스트 리포트+컨센서스)
+                    # 미리보기 — 특히 네이버 증권 쪽은 필드명을 이번 세션에서 실제로 검증하지
+                    # 못했으므로, "원본 응답 보기"를 체크하면 raw JSON을 그대로 보여줘서
+                    # 파싱이 깨졌는지 실제 필드명이 다른지 바로 확인할 수 있게 해둠.
+                    st.caption("종목 하나를 골라 공시(DART)·뉴스·애널리스트 리포트·컨센서스가 잘 나오는지 확인합니다 (개발 중 임시 기능).")
+                    preview_code = st.text_input(
+                        "종목코드(6자리)", value="005930", key="admin_daily_report_code",
+                        help="예: 삼성전자 005930, SK하이닉스 000660",
+                    )
+                    show_raw = st.checkbox("원본 응답 보기 (네이버 필드명 검증용)", key="admin_daily_report_raw")
+                    if st.button("📰 일일 리포트 미리보기(테스트)", key="admin_daily_report_preview", width="stretch"):
+                        with st.spinner("공시·뉴스·리포트 조회 중..."):
+                            report = get_daily_stock_report(preview_code.strip())
+
+                        st.markdown("**📢 공시 (DART)**")
+                        if report["공시"]:
+                            st.dataframe(pd.DataFrame(report["공시"]), width="stretch", hide_index=True)
+                        else:
+                            st.caption("공시 없음 또는 조회 실패 (ETF는 DART 고유번호가 없어 정상적으로 비어있을 수 있음)")
+
+                        st.markdown("**📰 뉴스 (네이버 증권)**")
+                        if report["뉴스"]:
+                            st.dataframe(pd.DataFrame(report["뉴스"]), width="stretch", hide_index=True)
+                        else:
+                            st.caption("뉴스 없음 또는 조회 실패")
+                        if show_raw:
+                            st.json(_get_naver_raw("news", preview_code.strip()))
+
+                        st.markdown("**📊 애널리스트 리포트 (네이버 증권)**")
+                        if report["리포트"]:
+                            st.dataframe(pd.DataFrame(report["리포트"]), width="stretch", hide_index=True)
+                        else:
+                            st.caption("리포트 없음 또는 조회 실패")
+                        if show_raw:
+                            st.json(_get_naver_raw("research", preview_code.strip()))
+
+                        st.markdown("**🎯 컨센서스 (네이버 증권)**")
+                        consensus = report["컨센서스"]
+                        if consensus:
+                            raw = consensus.pop("_원본", None)
+                            st.json(consensus)
+                            if show_raw and raw is not None:
+                                st.markdown("**원본 응답 (필드명 확인용)**")
+                                st.json(raw)
+                        else:
+                            st.caption("컨센서스 없음 또는 조회 실패")
+
+                        if show_raw:
+                            st.caption("⚠ 뉴스·리포트 표가 비어있는데 원본 응답에는 데이터가 있다면, "
+                                       "코드의 필드명(title/officeName 등)이 실제 응답과 달라서 파싱이 안 된 것입니다. "
+                                       "이 경우 실제 필드명을 알려주시면 다음 세션에서 바로 고쳐드리겠습니다.")
 
 
 # ============================================================
