@@ -3004,6 +3004,122 @@ def show_developer_info():
     st.caption("버그 제보나 기능 제안은 위 이메일로 보내주세요.")
 
 
+def render_daily_report(holdings_df: pd.DataFrame):
+    """일일 시황 + 보유 종목별 공시·뉴스·애널리스트 리포트 화면.
+    [2026-08-13 추가] 데이터 수집 함수(get_market_overview, get_daily_stock_report 등)는
+    2026-08-12에 이미 완성돼 관리자 메뉴 "미리보기"로만 쓰이고 있었는데, 이번에 실제
+    사용자 화면으로 옮겼다. 시황은 화면 진입 시 바로 보여주고, 종목별 리포트는 보유 종목이
+    여러 개일 때 전부 한꺼번에 불러오면 느릴 수 있어 선택한 종목 하나만 그때그때 불러온다."""
+    st.markdown('<div class="section-title">오늘의 시황 · 종목 리포트</div>', unsafe_allow_html=True)
+    st.caption("공시(DART)·뉴스·애널리스트 리포트는 참고용 정보이며, 투자 판단의 근거로 쓰기엔 부족할 수 있습니다.")
+
+    # ── 시황 ──
+    with st.spinner("시황 데이터 불러오는 중..."):
+        mo = get_market_overview()
+
+    st.markdown("##### 🌐 국내·해외 시황")
+
+    def _metric_row(keys, cols_per_row):
+        cols = st.columns(cols_per_row)
+        i = 0
+        for key in keys:
+            v = mo.get(key)
+            if not v or v.get("값") is None:
+                continue
+            with cols[i % cols_per_row]:
+                st.metric(
+                    key, f"{v['값']:,.2f}",
+                    f"{v['등락률']:+.2f}%" if v.get("등락률") is not None else None,
+                    delta_color="inverse",  # 국내 관례(상승=빨강)에 맞춤
+                )
+            i += 1
+
+    _metric_row(["코스피", "코스닥"], 2)
+    _metric_row(["다우존스", "S&P500", "나스닥", "필라델피아반도체", "니케이225", "상하이종합", "항셍지수", "VIX"], 4)
+    _metric_row(["원달러환율", "달러인덱스", "WTI", "브렌트유", "국제금", "미국채10년"], 3)
+
+    # ── 코스피/코스닥 수급 ──
+    flow_rows = []
+    for key in ("코스피_수급", "코스닥_수급"):
+        flow = mo.get(key)
+        if flow:
+            flow_rows.append({
+                "시장": key.replace("_수급", ""),
+                "날짜": flow.get("날짜"),
+                "외국인(억원)": (flow.get("외국인") or 0) / 1e8,
+                "기관(억원)": (flow.get("기관") or 0) / 1e8,
+                "개인(억원)": (flow.get("개인") or 0) / 1e8,
+            })
+    if flow_rows:
+        st.markdown("##### 💹 코스피·코스닥 수급 (외국인·기관·개인 순매수)")
+        df_flow = pd.DataFrame(flow_rows)
+        styled_flow = (
+            df_flow.style
+            .format({"외국인(억원)": "{:+,.0f}", "기관(억원)": "{:+,.0f}", "개인(억원)": "{:+,.0f}"})
+            .map(style_pnl_cell, subset=["외국인(억원)", "기관(억원)", "개인(억원)"])
+        )
+        st.dataframe(styled_flow, width="stretch", hide_index=True)
+
+    st.caption(f"기준시각: {mo.get('기준시각', '-')}")
+    st.divider()
+
+    # ── 종목별 리포트 ──
+    st.markdown("##### 📰 보유 종목 리포트")
+    if holdings_df.empty:
+        st.info("보유 중인 종목이 없어 종목별 리포트를 표시할 수 없습니다.")
+        return
+
+    stock_options = holdings_df[["종목코드", "종목명"]].drop_duplicates().sort_values("종목명")
+    code_by_label = {
+        f"{row['종목명']} ({row['종목코드']})": (row["종목코드"], row["종목명"])
+        for _, row in stock_options.iterrows()
+    }
+    selected_label = st.selectbox("리포트를 볼 종목 선택", list(code_by_label.keys()), key="daily_report_stock_select")
+
+    if not selected_label:
+        return
+    code, name = code_by_label[selected_label]
+    with st.spinner(f"{name} 리포트 불러오는 중..."):
+        report = get_daily_stock_report(code, name)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**📢 공시 (DART)**")
+        if report["공시"]:
+            st.dataframe(pd.DataFrame(report["공시"]), width="stretch", hide_index=True)
+        else:
+            st.caption("공시 없음 (ETF는 DART 고유번호가 없어 항상 비어있는 게 정상입니다)")
+
+        st.markdown("**🎯 컨센서스**")
+        consensus = report["컨센서스"]
+        if consensus:
+            c1, c2 = st.columns(2)
+            c1.metric("투자의견", consensus.get("투자의견_참고라벨") or "-")
+            target = consensus.get("목표주가")
+            c2.metric("목표주가", f"{target:,.0f}원" if target else "-")
+            st.caption(f"기준일: {consensus.get('기준일', '-')} · 투자의견 점수 {consensus.get('투자의견점수', '-')}/5(참고용)")
+        else:
+            st.caption("컨센서스 정보 없음")
+
+    with col2:
+        st.markdown("**📰 최근 뉴스**")
+        if report["뉴스"]:
+            for n in report["뉴스"][:8]:
+                st.markdown(
+                    f"- [{n['제목']}]({n['링크']})  \n"
+                    f"<span style='color:gray;font-size:0.8rem'>{n['언론사']} · {n['날짜']}</span>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("뉴스 없음")
+
+    st.markdown("**📊 애널리스트 리포트**")
+    if report["리포트"]:
+        st.dataframe(pd.DataFrame(report["리포트"]), width="stretch", hide_index=True)
+    else:
+        st.caption("애널리스트 리포트 없음")
+
+
 def main(spreadsheet_id: str):
     # 헤더
     col_title, col_time = st.columns([4, 1])
@@ -3064,7 +3180,7 @@ def main(spreadsheet_id: str):
     # 크게 바뀌는 위젯을 클릭하면, Streamlit이 화면을 완전히 새로 그리는 걸로 착각해
     # 첫 번째 탭으로 튕겨나가는 버그가 있다 (Streamlit 자체의 알려진 미해결 이슈).
     # session_state에 직접 선택된 탭을 저장하는 라디오 버튼으로 대체해 이 문제를 원천 차단한다.
-    MAIN_TABS = ["📈 통합 대시보드", "💼 보유 종목", "📐 기술적 분석", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"]
+    MAIN_TABS = ["📈 통합 대시보드", "💼 보유 종목", "📐 기술적 분석", "🗞️ 오늘의 리포트", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"]
 
     with st.container(key="main_menu_tabs"):
         selected_main_tab = st.radio(
@@ -3080,10 +3196,12 @@ def main(spreadsheet_id: str):
     elif selected_main_tab == MAIN_TABS[2]:
         render_technical_analysis(holdings_df, trade_df)
     elif selected_main_tab == MAIN_TABS[3]:
-        render_trades(trade_df)
+        render_daily_report(holdings_df)
     elif selected_main_tab == MAIN_TABS[4]:
-        render_cashflow(trade_df, cashlog_df)
+        render_trades(trade_df)
     elif selected_main_tab == MAIN_TABS[5]:
+        render_cashflow(trade_df, cashlog_df)
+    elif selected_main_tab == MAIN_TABS[6]:
         render_data_mgmt(nonstock_df)
 
 
