@@ -616,22 +616,14 @@ def _initialize_sheet_structure(credentials, spreadsheet_id: str):
 
 def find_or_create_user_spreadsheet(credentials, display_name: str):
     """로그인한 사용자의 드라이브에서 이 앱이 만든 자산관리 시트를 찾거나, 없으면 새로 생성.
-    반환값: (spreadsheet_id, created 여부)
-    [2026-08-13 추가] 화이트리스트(accounts) 시트는 검색 결과에서 명시적으로 제외한다.
-    실제로 jounnom@gmail.com 계정에서, 초기에 개인 시트로 자동 생성됐던 파일이 나중에
-    화이트리스트 용도로 재활용되면서 구글 드라이브 앱 태그만 남아 있었고, 이 함수가 그
-    파일을 "기존 개인 시트"로 오인해서 연결해버려 거래이력 등 모든 개인 시트 탭이
-    WorksheetNotFound로 깨지는 실제 장애가 발생했다. 이 제외 처리가 없으면 위쪽의
-    existing_sid 무효화 안전장치를 넣어도 이 함수가 매번 같은 잘못된 파일을 다시
-    찾아내 똑같은 사고를 반복시킨다."""
+    반환값: (spreadsheet_id, created 여부)"""
     drive_service = build("drive", "v3", credentials=credentials)
     query = (
         f"appProperties has {{ key='{APP_TAG_KEY}' and value='{APP_TAG_VALUE}' }} "
         "and trashed = false"
     )
     results = drive_service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
-    accounts_sid = str(st.secrets.get("accounts", {}).get("spreadsheet_id", "")).strip()
-    files = [f for f in results.get("files", []) if f["id"] != accounts_sid]
+    files = results.get("files", [])
     if files:
         return files[0]["id"], False
 
@@ -1186,17 +1178,6 @@ def show_login():
         # spreadsheet_id가 비어있는 '완전히 새로운' 사용자만 find_or_create로 개인 시트를 만든다.
         display_name = str(status_row.get("이름", "")).strip() or email.split("@")[0]
         existing_sid = str(status_row.get("spreadsheet_id", "")).strip()
-        # [2026-08-13 추가, 실제 장애 대응] 개인 자산 시트 ID가 화이트리스트(accounts) 시트
-        # ID와 똑같이 저장되어 있으면 명백히 잘못된 값이다 — 화이트리스트 시트에는 거래이력·
-        # 비주식자산 같은 개인 시트 탭이 없어서 전부 WorksheetNotFound로 깨진다. 실제로
-        # jounnom@gmail.com 계정에서 이 사고가 발생했음(초기에 개인 시트로 자동 생성됐던
-        # 파일이 나중에 화이트리스트 용도로 재활용되면서, 구글 드라이브의 앱 태그만 그대로
-        # 남아 find_or_create_user_spreadsheet가 이 파일을 "기존 개인 시트"로 오인해 연결함).
-        # 이 경우 저장된 값을 무시하고 새로 만들도록 강제한다.
-        accounts_sid = str(st.secrets.get("accounts", {}).get("spreadsheet_id", "")).strip()
-        if existing_sid and accounts_sid and existing_sid == accounts_sid:
-            logging.warning("개인 시트 ID가 화이트리스트 시트 ID와 동일해 무효 처리함: %s", email)
-            existing_sid = ""
         created = False
 
         if existing_sid:
@@ -4992,29 +4973,10 @@ if __name__ == "__main__" or True:
                                 logging.warning("refresh_token으로 재로그인 실패: %s", e)
                                 cached_credentials = None
                     if cached_credentials is not None:
-                        # [2026-08-13 추가] show_login()의 안전장치와 동일한 로직.
-                        # 세션 자동 복구 경로는 show_login()을 거치지 않고 화이트리스트의
-                        # spreadsheet_id를 바로 신뢰했는데, 이 값이 accounts 시트 ID와
-                        # 같은 잘못된 값으로 남아있는 동안(수정 전 로그인에서 저장된 경우)
-                        # 이 경로로 복구될 때마다 같은 사고가 재발했다. 여기서도 동일하게
-                        # 검증하고, 무효하면 즉시 새로 만들어서 시트에 바로잡아 저장한다.
-                        restored_sid = str(status_row.get("spreadsheet_id", "")).strip()
-                        accounts_sid = str(st.secrets.get("accounts", {}).get("spreadsheet_id", "")).strip()
-                        if restored_sid and accounts_sid and restored_sid == accounts_sid:
-                            logging.warning("세션 복구 중 개인 시트 ID가 화이트리스트 시트 ID와 동일해 무효 처리함: %s", restored_email)
-                            restored_sid = ""
-                        if not restored_sid:
-                            display_name = str(status_row.get("이름", "")).strip() or restored_email.split("@")[0]
-                            try:
-                                restored_sid, _created = find_or_create_user_spreadsheet(cached_credentials, display_name)
-                                save_user_spreadsheet_id(restored_email, restored_sid)
-                            except Exception as e:
-                                logging.warning("세션 복구 중 개인 시트 재생성 실패: %s", e)
-                                restored_sid = ""
                         st.session_state["logged_in"] = True
                         st.session_state["user_name"] = str(status_row.get("이름", "")).strip() or restored_email.split("@")[0]
                         st.session_state["user_email"] = restored_email
-                        st.session_state["spreadsheet_id"] = restored_sid
+                        st.session_state["spreadsheet_id"] = str(status_row.get("spreadsheet_id", "")).strip()
                         st.session_state["oauth_credentials"] = cached_credentials
                         st.session_state["is_admin"] = (
                             restored_email.strip().lower() == str(st.secrets.get("admin", {}).get("email", "")).strip().lower()
