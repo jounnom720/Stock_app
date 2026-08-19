@@ -53,9 +53,10 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.3"
-# [2026-08-19] v2.1.2 → v2.1.3: AI 종합 브리핑에서 마크다운 굵게(**)·목록(-)이 그대로
-# 별표/기호로 노출되던 버그 수정 (Jone 제보, KODEX 200 브리핑에서 확인됨).
+APP_VERSION = "v2.1.4"
+# [2026-08-19] v2.1.3 → v2.1.4: 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 추가.
+# 기존엔 장 시작 전(09:00 이전)만 안내했는데, 같은 원인(NXT 미반영)이 장 마감 후에도
+# 재현되는 게 Jone 실측(16:52, ETF는 일치·개별주식만 벌어짐)으로 확인되어 확장함.
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -2198,6 +2199,20 @@ def is_before_krx_open() -> bool:
     now = datetime.now(KST)
     return now.hour < 9
 
+# [2026-08-19 추가] 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 판단용.
+# Jone 실측 확인(16:52, ETF 3종목은 정확히 일치·개별주식만 크게 벌어짐)으로 원인이
+# 확정됨: 이 앱의 가격 소스는 KRX 정규장 15:30 종가에서 더 이상 안 바뀌는데, NXT
+# 거래가능 종목은 애프터마켓(15:30~20:00)에서 계속 실시간으로 움직이기 때문. 아침의
+# 프리마켓(is_before_krx_open)과 근본 원인이 같음 — NXT 시세 자체를 이 앱이 못 가져옴.
+def is_after_krx_close() -> bool:
+    """지금이 KRX 정규장 마감(15:30 KST) 이후이면서 NXT 애프터마켓 종료(20:00) 이전인지
+    여부. 20:00 이후는 NXT도 종료되어 다시 다음날 프리마켓까지 가격이 고정되므로(정규장
+    종가 = NXT 마지막가), 굳이 안내가 필요하지 않다."""
+    now = datetime.now(KST)
+    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    nxt_after_end = now.replace(hour=20, minute=0, second=0, microsecond=0)
+    return market_close <= now < nxt_after_end
+
 def _safe_date_str(v, fmt: str = "%Y-%m-%d") -> str:
     """pandas Timestamp를 안전하게 문자열로 변환. NaT(날짜 파싱 실패)이면 '-'를 반환해
     strftime 호출 시 앱이 죽는 것을 방지한다."""
@@ -3721,17 +3736,25 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
 
 def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
-    # [2026-08-19 추가] 장 시작 전(09:00 KST 이전) 안내 배너.
-    # Jone 제보: NXT 프리마켓(08:00~08:50) 시간대에 증권사 앱은 실시간가를 보여주는데
-    # 이 앱은 전일 종가만 계속 표시(새로고침해도 그대로)해서 실시간 시세로 착각할 수
-    # 있었음. 원인은 이 앱의 시세 소스(pykrx→네이버, KRX 정규장 데이터)가 정규장
-    # 개장(09:00) 전에는 "오늘" 데이터 자체가 없어 자동으로 전일 종가가 나오는 구조적
-    # 특성 때문 — NXT 프리마켓 실시간가를 가져오는 건 별도 조사가 필요해 아직 미착수.
-    # 우선 착각하지 않도록 안내만 명확히 띄운다.
+    # [2026-08-19 추가] 장 시작 전(09:00 KST 이전)/장 마감 후(15:30~20:00) 안내 배너.
+    # Jone 제보 + 실측(16:52, ETF 3종목은 정규장 종가와 정확히 일치·NXT 거래가능 개별주식만
+    # 크게 벌어짐)으로 원인이 확정됨: 이 앱의 시세 소스(pykrx→네이버, KRX 정규장 데이터)는
+    # 정규장(09:00~15:30) 밖의 시간에는 "정규장 종가"에서 더 이상 안 바뀌는데, NXT
+    # 거래가능 종목은 프리마켓(08:00~08:50)·애프터마켓(15:30~20:00)에도 실시간으로 계속
+    # 움직인다. 처음엔 프리마켓만 반영했었는데, 애프터마켓에서도 똑같은 문제가 실제로
+    # 재현되는 걸 놓쳤음 — 두 시간대 모두 안내하도록 확장.
+    # NXT 실시간가 자체를 가져오는 건 별도 조사가 필요해 아직 미착수(관리자와 논의 후 보류).
     if is_before_krx_open():
         st.warning(
             "⏰ 지금은 KRX 정규장 개장(09:00) 전입니다. 화면의 시세는 **전일 종가**이며, "
             "NXT 프리마켓 등 실시간 시세는 아직 반영되지 않습니다. 실시간 가격은 증권사 앱을 참고해주세요."
+        )
+    elif is_after_krx_close():
+        st.warning(
+            "⏰ 지금은 KRX 정규장 마감(15:30) 이후입니다. 화면의 시세는 **정규장 종가**이며, "
+            "NXT 애프터마켓(15:30~20:00) 실시간 시세는 반영되지 않습니다. "
+            "(참고: ETF는 NXT 거래 대상이 아니라 이 시간대에도 실제가와 대체로 일치합니다.) "
+            "실시간 가격은 증권사 앱을 참고해주세요."
         )
 
     render_holdings_treemap(holdings_df)
