@@ -53,10 +53,11 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.1"
-# [2026-08-19] v2.1.0 → v2.1.1: 관리자 메뉴를 상단 메인 탭("데이터 관리" 옆)으로 이동,
-# 장 시작 전(09:00 KST 이전) 전일 종가 표시 안내 배너 추가, 관리자용 시세 지연 진단
-# 패널(pykrx vs 야후 동시 비교) 추가.
+APP_VERSION = "v2.1.2"
+# [2026-08-19] v2.1.1 → v2.1.2: "오늘의 리포트" 화면 UI 전면 재설계(카드 기반 레이아웃,
+# 네이버 증권 스타일 참고). st.metric 대신 커스텀 HTML 배지로 교체해 등락 색상을 앱
+# 전체와 통일(상승=빨강 #e0635e, 하락=파랑 #5b9bd8) — 기존엔 하락이 초록으로 표시되던
+# Streamlit 기본 컴포넌트의 한계를 해결.
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -3158,12 +3159,45 @@ def show_developer_info():
     st.caption("버그 제보나 기능 제안은 위 이메일로 보내주세요.")
 
 
+# [2026-08-19] 오늘의 리포트 화면 전용 배지(등락률) HTML 생성 헬퍼.
+# Jone 제보: 기존엔 st.metric의 delta_color="inverse"를 썼는데, 이건 빨강/초록만 지원해서
+# 국내 관례인 "하락=파랑"이 안 나왔음(초록으로 표시됨). 앱의 다른 화면(보유종목 등)에서
+# 이미 손익 표시에 쓰고 있는 style_pnl_cell과 정확히 같은 색(상승 #e0635e, 하락 #5b9bd8)으로
+# 통일해서 커스텀 배지를 직접 그린다. Jone이 승인한 시안(네이버 증권 스타일 참고) 반영.
+_UP_COLOR, _UP_BG = "#e0635e", "rgba(224,99,94,0.12)"
+_DOWN_COLOR, _DOWN_BG = "#5b9bd8", "rgba(91,155,216,0.12)"
+
+def _change_badge_html(pct) -> str:
+    """등락률(%) 값을 받아 상승=빨강/하락=파랑 배지 HTML을 반환. None이면 빈 문자열."""
+    if pct is None:
+        return ""
+    color, bg = (_UP_COLOR, _UP_BG) if pct > 0 else (_DOWN_COLOR, _DOWN_BG) if pct < 0 else ("var(--text-secondary,#888)", "rgba(136,136,136,0.12)")
+    arrow = "▲" if pct > 0 else "▼" if pct < 0 else "-"
+    return (
+        f"<span style='display:inline-flex;align-items:center;gap:2px;margin-top:4px;"
+        f"font-size:12px;font-weight:600;color:{color};background:{bg};"
+        f"padding:2px 6px;border-radius:6px;'>{arrow} {abs(pct):.2f}%</span>"
+    )
+
+def _metric_card_html(label: str, value: str, pct=None) -> str:
+    """시황 카드 하나(라벨 + 값 + 등락 배지) HTML."""
+    return (
+        "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:12px;'>"
+        f"<div style='font-size:12px;color:var(--text-secondary,#888);margin-bottom:4px;'>{label}</div>"
+        f"<div style='font-size:20px;font-weight:600;'>{value}</div>"
+        f"{_change_badge_html(pct)}"
+        "</div>"
+    )
+
 def render_daily_report(holdings_df: pd.DataFrame):
     """일일 시황 + 보유 종목별 공시·뉴스·애널리스트 리포트 화면.
     [2026-08-13 추가] 데이터 수집 함수(get_market_overview, get_daily_stock_report 등)는
     2026-08-12에 이미 완성돼 관리자 메뉴 "미리보기"로만 쓰이고 있었는데, 이번에 실제
-    사용자 화면으로 옮겼다. 시황은 화면 진입 시 바로 보여주고, 종목별 리포트는 보유 종목이
-    여러 개일 때 전부 한꺼번에 불러오면 느릴 수 있어 선택한 종목 하나만 그때그때 불러온다."""
+    사용자 화면으로 옮겼다.
+    [2026-08-19 재설계] Jone 피드백(등락색이 실제 증권앱과 다름, 전체 UI 가독성 개선 요청)
+    반영 — 네이버 증권 스타일을 참고한 시안을 먼저 승인받고, 카드 기반 레이아웃으로
+    전면 재설계함. st.metric 대신 커스텀 HTML 카드/배지를 써서 상승=빨강/하락=파랑을
+    앱 전체와 통일했다."""
     st.markdown('<div class="section-title">오늘의 시황 · 종목 리포트</div>', unsafe_allow_html=True)
     st.caption("공시(DART)·뉴스·애널리스트 리포트는 참고용 정보이며, 투자 판단의 근거로 쓰기엔 부족할 수 있습니다.")
 
@@ -3173,7 +3207,7 @@ def render_daily_report(holdings_df: pd.DataFrame):
 
     st.markdown("##### 🌐 국내·해외 시황")
 
-    def _metric_row(keys, cols_per_row):
+    def _card_grid(keys, cols_per_row):
         cols = st.columns(cols_per_row)
         i = 0
         for key in keys:
@@ -3181,16 +3215,18 @@ def render_daily_report(holdings_df: pd.DataFrame):
             if not v or v.get("값") is None:
                 continue
             with cols[i % cols_per_row]:
-                st.metric(
-                    key, f"{v['값']:,.2f}",
-                    f"{v['등락률']:+.2f}%" if v.get("등락률") is not None else None,
-                    delta_color="inverse",  # 국내 관례(상승=빨강)에 맞춤
+                st.markdown(
+                    _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률")),
+                    unsafe_allow_html=True,
                 )
             i += 1
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    _metric_row(["코스피", "코스닥"], 2)
-    _metric_row(["다우존스", "S&P500", "나스닥", "필라델피아반도체", "니케이225", "상하이종합", "항셍지수", "VIX"], 4)
-    _metric_row(["원달러환율", "달러인덱스", "WTI", "브렌트유", "국제금", "미국채10년"], 3)
+    _card_grid(["코스피", "코스닥"], 2)
+    _card_grid(["다우존스", "S&P500", "나스닥", "필라델피아반도체"], 4)
+    _card_grid(["니케이225", "상하이종합", "항셍지수", "VIX"], 4)
+    _card_grid(["원달러환율", "달러인덱스", "WTI"], 3)
+    _card_grid(["브렌트유", "국제금", "미국채10년"], 3)
 
     # ── 코스피/코스닥 수급 ──
     flow_rows = []
@@ -3199,20 +3235,34 @@ def render_daily_report(holdings_df: pd.DataFrame):
         if flow:
             flow_rows.append({
                 "시장": key.replace("_수급", ""),
-                "날짜": flow.get("날짜"),
-                "외국인(억원)": (flow.get("외국인") or 0) / 1e8,
-                "기관(억원)": (flow.get("기관") or 0) / 1e8,
-                "개인(억원)": (flow.get("개인") or 0) / 1e8,
+                "외국인": (flow.get("외국인") or 0) / 1e8,
+                "기관": (flow.get("기관") or 0) / 1e8,
+                "개인": (flow.get("개인") or 0) / 1e8,
             })
     if flow_rows:
-        st.markdown("##### 💹 코스피·코스닥 수급 (외국인·기관·개인 순매수)")
-        df_flow = pd.DataFrame(flow_rows)
-        styled_flow = (
-            df_flow.style
-            .format({"외국인(억원)": "{:+,.0f}", "기관(억원)": "{:+,.0f}", "개인(억원)": "{:+,.0f}"})
-            .map(style_pnl_cell, subset=["외국인(억원)", "기관(억원)", "개인(억원)"])
+        st.markdown("##### 💹 코스피·코스닥 수급 (억원)")
+
+        def _flow_cell(v: float) -> str:
+            color = _UP_COLOR if v > 0 else _DOWN_COLOR if v < 0 else "inherit"
+            return f"<div style='text-align:right;color:{color};font-weight:600;'>{v:+,.0f}</div>"
+
+        rows_html = "".join(
+            "<div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;padding:8px 0;"
+            "border-top:1px solid rgba(128,128,128,0.15);font-size:14px;align-items:center;'>"
+            f"<div style='font-weight:600;'>{r['시장']}</div>"
+            f"{_flow_cell(r['외국인'])}{_flow_cell(r['기관'])}{_flow_cell(r['개인'])}"
+            "</div>"
+            for r in flow_rows
         )
-        st.dataframe(styled_flow, width="stretch", hide_index=True)
+        st.markdown(
+            "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
+            "<div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;padding:8px 0;"
+            "font-size:12px;color:var(--text-secondary,#888);'>"
+            "<div>시장</div><div style='text-align:right;'>외국인</div>"
+            "<div style='text-align:right;'>기관</div><div style='text-align:right;'>개인</div></div>"
+            f"{rows_html}</div>",
+            unsafe_allow_html=True,
+        )
 
     st.caption(f"기준시각: {mo.get('기준시각', '-')}")
     st.divider()
@@ -3237,14 +3287,19 @@ def render_daily_report(holdings_df: pd.DataFrame):
         report = get_daily_stock_report(code, name)
 
     # ── AI 종합 브리핑 (Anthropic API) ──
-    # [2026-08-13] 원본 데이터를 그대로 나열하는 대신, 애초 설계 의도대로 Claude가
-    # 읽고 핵심만 뽑아주는 요약을 메인으로 보여준다. 원본은 아래 expander에서 필요할 때만.
     with st.spinner("AI 종합 브리핑 작성 중..."):
         summary = generate_stock_daily_summary(code, name, report)
 
-    st.markdown(f"##### 🧾 {name} 오늘의 종합 브리핑")
     if summary:
-        st.markdown(summary)
+        summary_html = summary.replace("\n", "<br>")
+        st.markdown(
+            "<div style='background:rgba(46,116,181,0.10);border-radius:12px;padding:16px;margin-bottom:12px;'>"
+            "<div style='display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;"
+            "color:#2E74B5;margin-bottom:8px;'>✨ 오늘의 종합 브리핑</div>"
+            f"<div style='font-size:14px;line-height:1.7;'>{summary_html}</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
         st.caption("AI(Claude)가 아래 원본 데이터를 바탕으로 요약한 내용입니다. 투자 판단은 반드시 원본을 직접 확인 후 하세요.")
     else:
         st.info(
@@ -3255,18 +3310,48 @@ def render_daily_report(holdings_df: pd.DataFrame):
     # ── 컨센서스 요약 카드 ──
     consensus = report["컨센서스"]
     if consensus:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("투자의견", consensus.get("투자의견_참고라벨") or "-")
-        target = consensus.get("목표주가")  # get_naver_consensus에서 이미 float/None으로 정리해서 줌
-        c2.metric("목표주가", f"{target:,.0f}원" if target is not None else "-")
+        target = consensus.get("목표주가")
         score = consensus.get("투자의견점수")
-        c3.metric("투자의견 점수", f"{score:.2f}/5" if score is not None else "-")
+        opinion = consensus.get("투자의견_참고라벨") or "-"
+        opinion_color = _UP_COLOR if opinion in ("적극매수", "매수") else _DOWN_COLOR if opinion in ("매도", "비중축소") else "inherit"
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(
+                "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:10px;'>"
+                "<div style='font-size:12px;color:var(--text-secondary,#888);'>투자의견</div>"
+                f"<div style='font-size:16px;font-weight:600;color:{opinion_color};'>{opinion}</div></div>",
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(
+                _metric_card_html("목표주가", f"{target:,.0f}원" if target is not None else "-"),
+                unsafe_allow_html=True,
+            )
+        with c3:
+            st.markdown(
+                _metric_card_html("의견 점수", f"{score:.2f} / 5" if score is not None else "-"),
+                unsafe_allow_html=True,
+            )
         st.caption(f"컨센서스 기준일: {consensus.get('기준일', '-')} (네이버 증권 제공, 참고용)")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.markdown("**📰 최근 뉴스**")
+    if report["뉴스"]:
+        news_html = "".join(
+            "<div style='display:flex;justify-content:space-between;gap:8px;padding:8px 0;"
+            "border-top:1px solid rgba(128,128,128,0.15);font-size:13px;'>"
+            f"<a href='{n['링크']}' target='_blank' style='color:inherit;text-decoration:none;'>{n['제목']}</a>"
+            f"<span style='color:var(--text-secondary,#888);white-space:nowrap;'>{n['언론사']}</span></div>"
+            for n in report["뉴스"][:10]
+        )
+        st.markdown(news_html, unsafe_allow_html=True)
+    else:
+        st.caption("뉴스 없음")
 
     st.divider()
 
     # ── 원본 데이터 (필요할 때만 펼쳐보기) ──
-    with st.expander("📋 원본 데이터 보기 (공시·뉴스·애널리스트 리포트)"):
+    with st.expander("📋 원본 데이터 보기 (공시·전체 리포트)"):
         st.markdown("**📢 공시 (DART)**")
         if report["공시"]:
             df_disc = pd.DataFrame(report["공시"])
@@ -3278,18 +3363,6 @@ def render_daily_report(holdings_df: pd.DataFrame):
             )
         else:
             st.caption("공시 없음 (ETF는 DART 고유번호가 없어 항상 비어있는 게 정상입니다)")
-
-        st.markdown("**📰 최근 뉴스**")
-        if report["뉴스"]:
-            df_news = pd.DataFrame(report["뉴스"])
-            st.dataframe(
-                df_news, width="stretch", hide_index=True,
-                column_config={
-                    "링크": st.column_config.LinkColumn("링크", display_text="기사 보기"),
-                },
-            )
-        else:
-            st.caption("뉴스 없음")
 
         st.markdown("**📊 애널리스트 리포트**")
         if report["리포트"]:
