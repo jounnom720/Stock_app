@@ -53,10 +53,10 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.0"
-# [2026-08-13] v2.0.0 → v2.1.0: "오늘의 리포트" 탭 신설(시황+코스피/코스닥 수급+종목별
-# 공시·뉴스·애널리스트 리포트+AI 종합 브리핑), DART corp_code 자동조회, 다음 금융
-# 수급 데이터 연동, 네이버 증권 뉴스/리포트/컨센서스 연동 추가.
+APP_VERSION = "v2.1.1"
+# [2026-08-19] v2.1.0 → v2.1.1: 관리자 메뉴를 상단 메인 탭("데이터 관리" 옆)으로 이동,
+# 장 시작 전(09:00 KST 이전) 전일 종가 표시 안내 배너 추가, 관리자용 시세 지연 진단
+# 패널(pykrx vs 야후 동시 비교) 추가.
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -2188,6 +2188,17 @@ def style_pnl_cell(v) -> str:
 def now_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M")
 
+# [2026-08-19 추가] 장 시작 전(09:00 이전) 안내 배너 판단용.
+# 반드시 서버 시간이 아니라 서울시간(KST, ZoneInfo("Asia/Seoul"))을 기준으로 판단해야
+# 한다 — Streamlit Cloud 서버가 다른 시간대에서 돌아가고 있어도 여기서 오판하지 않도록,
+# 이미 앱 전체에서 쓰고 있는 KST 타임존 객체를 그대로 재사용한다.
+def is_before_krx_open() -> bool:
+    """지금이 KRX 정규장 개장(09:00 KST) 이전인지 여부. 주말·공휴일 여부는 따로 판단하지
+    않는다 — 어차피 그런 날은 09시가 지나도 시세가 그대로일 뿐이라, 오전 시간대에만 뜨는
+    이 배너가 굳이 필요하지 않은 부작용은 있어도 잘못된 정보를 주진 않는다."""
+    now = datetime.now(KST)
+    return now.hour < 9
+
 def _safe_date_str(v, fmt: str = "%Y-%m-%d") -> str:
     """pandas Timestamp를 안전하게 문자열로 변환. NaT(날짜 파싱 실패)이면 '-'를 반환해
     strftime 호출 시 앱이 죽는 것을 방지한다."""
@@ -3307,8 +3318,8 @@ def main(spreadsheet_id: str):
             st.query_params.clear()
             st.rerun()
 
-    # 관리자 메뉴는 더 이상 여기(최상단)에 두지 않고, 통합 대시보드 하단
-    # "개발자: H.W Jone" 옆으로 옮겼다 (render_dashboard 함수 참고).
+    # 관리자 메뉴는 상단 메인 탭의 "🔧 관리자 메뉴"(데이터 관리 바로 옆)에서 진입한다
+    # (관리자 계정으로 로그인했을 때만 이 탭 자체가 목록에 추가됨 — MAIN_TABS 구성 부분 참고).
 
     # 데이터 로드
     with st.spinner("데이터 불러오는 중..."):
@@ -3352,6 +3363,13 @@ def main(spreadsheet_id: str):
     # 첫 번째 탭으로 튕겨나가는 버그가 있다 (Streamlit 자체의 알려진 미해결 이슈).
     # session_state에 직접 선택된 탭을 저장하는 라디오 버튼으로 대체해 이 문제를 원천 차단한다.
     MAIN_TABS = ["📈 통합 대시보드", "💼 보유 종목", "📐 기술적 분석", "🗞️ 오늘의 리포트", "📋 거래이력", "💵 현금흐름", "⚙️ 데이터 관리"]
+    # [2026-08-19] 관리자 메뉴를 대시보드 맨 아래 토글 버튼 방식에서, 다른 메뉴들과 동등하게
+    # 상단 탭 목록의 "데이터 관리" 바로 옆으로 옮김 (Jone 요청 — 아래에 있어서 매번 스크롤해야
+    # 하고 클릭도 한 번 더 필요해 불편했음). 관리자 계정으로 로그인했을 때만 이 탭 자체가
+    # 목록에 추가되어, 다른 사용자 화면에는 존재하지 않는다(코드상 조건부로 append됨).
+    is_admin_user = st.session_state.get("is_admin", False)
+    if is_admin_user:
+        MAIN_TABS = MAIN_TABS + ["🔧 관리자 메뉴"]
 
     with st.container(key="main_menu_tabs"):
         selected_main_tab = st.radio(
@@ -3360,20 +3378,22 @@ def main(spreadsheet_id: str):
         )
     st.markdown("<div style='margin-top:-0.5rem'></div>", unsafe_allow_html=True)
 
-    if selected_main_tab == MAIN_TABS[0]:
+    if selected_main_tab == "📈 통합 대시보드":
         render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=trade_df, transfer_df=transfer_df)
-    elif selected_main_tab == MAIN_TABS[1]:
+    elif selected_main_tab == "💼 보유 종목":
         render_holdings(holdings_df, prices, nonstock_df, 시세기준시각=시세기준시각)
-    elif selected_main_tab == MAIN_TABS[2]:
+    elif selected_main_tab == "📐 기술적 분석":
         render_technical_analysis(holdings_df, trade_df)
-    elif selected_main_tab == MAIN_TABS[3]:
+    elif selected_main_tab == "🗞️ 오늘의 리포트":
         render_daily_report(holdings_df)
-    elif selected_main_tab == MAIN_TABS[4]:
+    elif selected_main_tab == "📋 거래이력":
         render_trades(trade_df)
-    elif selected_main_tab == MAIN_TABS[5]:
+    elif selected_main_tab == "💵 현금흐름":
         render_cashflow(trade_df, cashlog_df)
-    elif selected_main_tab == MAIN_TABS[6]:
+    elif selected_main_tab == "⚙️ 데이터 관리":
         render_data_mgmt(nonstock_df)
+    elif selected_main_tab == "🔧 관리자 메뉴" and is_admin_user:
+        render_admin_panel()
 
 
 # ============================================================
@@ -3598,6 +3618,19 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
 
 
 def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None, transfer_df=None):
+
+    # [2026-08-19 추가] 장 시작 전(09:00 KST 이전) 안내 배너.
+    # Jone 제보: NXT 프리마켓(08:00~08:50) 시간대에 증권사 앱은 실시간가를 보여주는데
+    # 이 앱은 전일 종가만 계속 표시(새로고침해도 그대로)해서 실시간 시세로 착각할 수
+    # 있었음. 원인은 이 앱의 시세 소스(pykrx→네이버, KRX 정규장 데이터)가 정규장
+    # 개장(09:00) 전에는 "오늘" 데이터 자체가 없어 자동으로 전일 종가가 나오는 구조적
+    # 특성 때문 — NXT 프리마켓 실시간가를 가져오는 건 별도 조사가 필요해 아직 미착수.
+    # 우선 착각하지 않도록 안내만 명확히 띄운다.
+    if is_before_krx_open():
+        st.warning(
+            "⏰ 지금은 KRX 정규장 개장(09:00) 전입니다. 화면의 시세는 **전일 종가**이며, "
+            "NXT 프리마켓 등 실시간 시세는 아직 반영되지 않습니다. 실시간 가격은 증권사 앱을 참고해주세요."
+        )
 
     render_holdings_treemap(holdings_df)
 
@@ -3939,22 +3972,14 @@ def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None
             st.rerun()
 
     # ── 개발자 정보 (통합 대시보드 맨 아래에만 표시) ──
+    # [2026-08-19] 관리자 메뉴 진입 버튼은 상단 "🔧 관리자 메뉴" 탭으로 옮겨서 여기서는 제거함.
     st.markdown("---")
-    col_dev, col_btn, col_admin_entry = st.columns([4, 1, 1])
+    col_dev, col_btn = st.columns([5, 1])
     with col_dev:
         st.caption(f"개발자: H.W Jone · {APP_VERSION}")
     with col_btn:
         if st.button("ℹ️ 앱 정보", key="dev_info_btn"):
             show_developer_info()
-    with col_admin_entry:
-        # 관리자 본인 계정으로 로그인했을 때만 이 버튼 자체가 렌더링된다 — 다른 사용자
-        # 화면에는 이 자리에 아무것도 나타나지 않는다 (코드상 아예 존재하지 않음).
-        if st.session_state.get("is_admin"):
-            if st.button("🔧 관리자", key="admin_entry_btn"):
-                st.session_state["show_admin_panel"] = not st.session_state.get("show_admin_panel", False)
-
-    if st.session_state.get("is_admin") and st.session_state.get("show_admin_panel"):
-        render_admin_panel()
 
 
 # ============================================================
