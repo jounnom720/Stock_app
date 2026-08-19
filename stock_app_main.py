@@ -53,11 +53,9 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.2"
-# [2026-08-19] v2.1.1 → v2.1.2: "오늘의 리포트" 화면 UI 전면 재설계(카드 기반 레이아웃,
-# 네이버 증권 스타일 참고). st.metric 대신 커스텀 HTML 배지로 교체해 등락 색상을 앱
-# 전체와 통일(상승=빨강 #e0635e, 하락=파랑 #5b9bd8) — 기존엔 하락이 초록으로 표시되던
-# Streamlit 기본 컴포넌트의 한계를 해결.
+APP_VERSION = "v2.1.3"
+# [2026-08-19] v2.1.2 → v2.1.3: AI 종합 브리핑에서 마크다운 굵게(**)·목록(-)이 그대로
+# 별표/기호로 노출되던 버그 수정 (Jone 제보, KODEX 200 브리핑에서 확인됨).
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -3189,6 +3187,37 @@ def _metric_card_html(label: str, value: str, pct=None) -> str:
         "</div>"
     )
 
+# [2026-08-19 추가] AI(Claude)가 만든 요약은 마크다운 문법(**굵게**, "- " 목록)을 그대로
+# 텍스트로 반환하는데, 이걸 그냥 <br>로만 줄바꿈 처리해서 커스텀 HTML 카드에 넣었더니
+# 마크다운이 해석되지 않고 별표(**)가 그대로 화면에 노출되는 버그가 실제로 발견됨
+# (Jone 제보, 스크린샷 확인). st.markdown의 표준 마크다운 파서에 맡기는 대신, 이 카드는
+# 색깔 있는 배경이 필요해서 raw HTML을 써야 하므로, 필요한 마크다운 문법 2가지(굵게·목록)만
+# 직접 HTML로 변환하는 경량 헬퍼를 추가함. 복잡한 마크다운 전체를 지원하진 않지만,
+# 프롬프트에서 요청하는 형식(불릿 포인트 3~5개)에는 이 정도로 충분하다.
+def _brief_markdown_to_html(text: str) -> str:
+    """AI 브리핑 텍스트의 **굵게**와 "- " 목록만 HTML로 변환. 그 외 텍스트는 그대로 두고
+    줄바꿈은 <br>로 처리."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    lines = text.split("\n")
+    html_parts = []
+    in_list = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- ") or stripped.startswith("• "):
+            if not in_list:
+                html_parts.append("<ul style='margin:4px 0;padding-left:20px;'>")
+                in_list = True
+            html_parts.append(f"<li style='margin-bottom:4px;'>{stripped[2:]}</li>")
+        else:
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            if stripped:
+                html_parts.append(f"{stripped}<br>")
+    if in_list:
+        html_parts.append("</ul>")
+    return "".join(html_parts)
+
 def render_daily_report(holdings_df: pd.DataFrame):
     """일일 시황 + 보유 종목별 공시·뉴스·애널리스트 리포트 화면.
     [2026-08-13 추가] 데이터 수집 함수(get_market_overview, get_daily_stock_report 등)는
@@ -3291,7 +3320,7 @@ def render_daily_report(holdings_df: pd.DataFrame):
         summary = generate_stock_daily_summary(code, name, report)
 
     if summary:
-        summary_html = summary.replace("\n", "<br>")
+        summary_html = _brief_markdown_to_html(summary)
         st.markdown(
             "<div style='background:rgba(46,116,181,0.10);border-radius:12px;padding:16px;margin-bottom:12px;'>"
             "<div style='display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;"
