@@ -53,7 +53,10 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.1.0"
+# [2026-08-13] v2.0.0 → v2.1.0: "오늘의 리포트" 탭 신설(시황+코스피/코스닥 수급+종목별
+# 공시·뉴스·애널리스트 리포트+AI 종합 브리핑), DART corp_code 자동조회, 다음 금융
+# 수급 데이터 연동, 네이버 증권 뉴스/리포트/컨센서스 연동 추가.
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -3085,6 +3088,52 @@ def render_admin_panel():
                             st.json(consensus)
                         else:
                             st.caption("컨센서스 없음 또는 조회 실패")
+
+                    st.divider()
+                    # [2026-08-19 추가] 시세 지연 진단 패널.
+                    # Jone 제보: 보유종목 8개 전부(국내주식+ETF)에서 앱 등락률이 실제(증권사 앱)보다
+                    # 일관되게 덜 하락하게 나옴(예: 삼성전자 앱 -7.45% vs 실제 -8.01%), 시세 새로고침을
+                    # 눌러도 그대로. 8개 전부 같은 방향으로 벌어진다는 건 종목별로 들쭉날쭉한 NXT
+                    # 미반영 문제와는 다른 패턴이라, 데이터 소스 자체(_fetch_krx_stock_price가 실제로는
+                    # 네이버 경유임 — 위 주석 참고)의 지연 가능성이 의심됨. 정확한 원인을 추측이 아니라
+                    # 실측으로 확인하기 위해, 같은 종목을 pykrx(네이버 경유)와 야후 파이낸스 두 소스로
+                    # 동시에 조회해서 값과 조회 시각을 나란히 보여준다. 원인이 확인되면 이 패널은
+                    # 정리해도 된다.
+                    st.caption("같은 종목을 두 소스로 동시에 조회해서 값을 비교합니다 (시세 지연 원인 진단용, 개발 중 임시 기능).")
+                    diag_code = st.text_input(
+                        "종목코드(6자리)", value="005930", key="admin_price_diag_code",
+                        help="예: 삼성전자 005930, SK하이닉스 000660",
+                    )
+                    if st.button("⏱️ 시세 지연 진단 실행", key="admin_price_diag_run", width="stretch"):
+                        code = diag_code.strip()
+                        with st.spinner("두 소스에서 동시 조회 중..."):
+                            krx_price = _fetch_krx_stock_price(code)
+                            t1 = now_kst()
+                            yf_price = None
+                            try:
+                                hist = yf.Ticker(f"{code}.KS").history(period="5d")
+                                if hist.empty:
+                                    hist = yf.Ticker(f"{code}.KQ").history(period="5d")
+                                if not hist.empty:
+                                    yf_price = float(hist["Close"].dropna().iloc[-1])
+                            except Exception as e:
+                                logging.warning("진단용 야후 조회 실패 [%s]: %s", code, e)
+                            t2 = now_kst()
+
+                        d1, d2 = st.columns(2)
+                        with d1:
+                            st.metric("pykrx (네이버 경유)", f"{krx_price:,.0f}원" if krx_price else "조회 실패")
+                            st.caption(f"조회 완료 시각: {t1}")
+                        with d2:
+                            st.metric("야후 파이낸스", f"{yf_price:,.0f}원" if yf_price else "조회 실패")
+                            st.caption(f"조회 완료 시각: {t2}")
+                        if krx_price and yf_price:
+                            diff = krx_price - yf_price
+                            st.caption(f"두 소스 차이: {diff:+,.0f}원 ({diff/yf_price*100:+.2f}%)")
+                        st.caption(
+                            "⚠ 이 화면의 값도 지금 이 순간의 스냅샷일 뿐입니다. 증권사 앱에 뜬 실제가와 "
+                            "비교해서 어느 소스가 더 가까운지, 시간이 지나도 계속 벌어지는지 확인해주세요."
+                        )
 
 
 # ============================================================
