@@ -492,16 +492,18 @@ def get_naver_consensus(item_code: str) -> tuple:
 
 
 def get_daily_stock_report(code: str, name: str, dart_api_key: str) -> dict:
-    """종목 하나의 공시+뉴스+컨센서스를 한 번에 모아 반환. lru_cache가 걸린 하위 함수들만
-    실제 API를 부르므로, 여러 사용자가 같은 종목을 보유해도 이 실행 안에서는 한 번만 호출된다."""
+    """종목 하나의 공시를 조회해 반환. lru_cache가 걸린 하위 함수들만 실제 API를 부르므로,
+    여러 사용자가 같은 종목을 보유해도 이 실행 안에서는 한 번만 호출된다.
+    [2026-08-25] 원래는 네이버 증권 뉴스·컨센서스도 함께 담았으나, GitHub Actions 서버 IP에서는
+    네이버 쪽이 예외 없이 빈 결과만 돌려주는 것으로 확인됨(Streamlit Cloud 배포 앱에서는 동일
+    종목이 정상적으로 나옴 — IP별 차등 응답으로 추정). 그래서 이메일에서는 공시만 담고,
+    뉴스·컨센서스는 앱의 "오늘의 리포트" 탭에서 보도록 안내 문구로 대체함(get_naver_news,
+    get_naver_consensus 함수 자체는 나중에 프록시 등으로 우회할 경우를 대비해 남겨둠)."""
     corp_code = get_dart_corp_code(code, dart_api_key)
     disclosures = get_dart_disclosures(corp_code, dart_api_key) if corp_code else tuple()
-    news = get_naver_news(code)
-    label, target, base_date = get_naver_consensus(code)
     return {
         "종목코드": code, "종목명": name,
-        "공시": disclosures, "뉴스": news,
-        "투자의견": label, "목표주가": target, "컨센서스_기준일": base_date,
+        "공시": disclosures,
     }
 
 
@@ -537,13 +539,6 @@ def build_email_html(display_name: str, market: dict, stock_reports: list[dict],
 
     stock_blocks = []
     for r in stock_reports:
-        news_html = "".join(
-            f'<div style="padding:4px 0;font-size:13px;">'
-            f'<a href="{link}" style="color:#333;text-decoration:none;">{title}</a>'
-            f'<span style="color:#999;"> · {press}</span></div>'
-            for title, press, date_, link in r["뉴스"][:3]
-        ) or '<div style="font-size:13px;color:#999;">최근 뉴스 없음</div>'
-
         disc_html = "".join(
             f'<div style="padding:4px 0;font-size:13px;">'
             f'<a href="{link}" style="color:#333;text-decoration:none;">{title}</a>'
@@ -551,18 +546,10 @@ def build_email_html(display_name: str, market: dict, stock_reports: list[dict],
             for title, date_, link in r["공시"][:2]
         ) or '<div style="font-size:13px;color:#999;">최근 공시 없음</div>'
 
-        consensus_html = (
-            f'투자의견 <b>{r["투자의견"]}</b> · 목표주가 {r["목표주가"]:,.0f}원 ({r["컨센서스_기준일"]})'
-            if r["투자의견"] and r["목표주가"] else '컨센서스 정보 없음'
-        )
-
         stock_blocks.append(f"""
         <div style="border:1px solid #e5e5e5;border-radius:10px;padding:14px 16px;margin-bottom:10px;">
             <div style="font-weight:700;font-size:15px;margin-bottom:8px;">{r['종목명']} ({r['종목코드']})</div>
-            <div style="font-size:13px;color:#555;margin-bottom:8px;">{consensus_html}</div>
-            <div style="font-size:12px;color:#777;margin-bottom:2px;">📰 최근 뉴스</div>
-            {news_html}
-            <div style="font-size:12px;color:#777;margin:8px 0 2px;">📢 최근 공시</div>
+            <div style="font-size:12px;color:#777;margin-bottom:2px;">📢 최근 공시</div>
             {disc_html}
         </div>""")
 
@@ -576,9 +563,11 @@ def build_email_html(display_name: str, market: dict, stock_reports: list[dict],
             {market_rows}
         </table>
         <h3 style="font-size:16px;">보유 종목 리포트</h3>
+        <p style="color:#999;font-size:12px;margin-top:-4px;">최신 뉴스 · 애널리스트 컨센서스는 앱의 "오늘의 리포트" 탭에서 확인하세요.</p>
         {stocks_html}
         <p style="color:#aaa;font-size:11px;margin-top:20px;">
-            공시(DART)·뉴스·컨센서스는 참고용 정보이며, 투자 판단의 근거로 쓰기엔 부족할 수 있습니다.<br>
+            공시(DART)는 참고용 정보이며, 투자 판단의 근거로 쓰기엔 부족할 수 있습니다.<br>
+            뉴스 · 컨센서스 전체 내용은 <a href="https://stockapp-claude0608.streamlit.app" style="color:#888;">앱</a>에서 확인하실 수 있습니다.<br>
             문의: hwcho@me.com
         </p>
     </div>
