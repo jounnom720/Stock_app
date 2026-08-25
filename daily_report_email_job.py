@@ -42,6 +42,17 @@ stock_app_main.py의 render_daily_report()에는 Claude(Haiku) API로 만드는 
   - DART_API_KEY                : DART Open API 인증키 (앱 secrets의 [dart] api_key와 동일 값)
   - GMAIL_SENDER_EMAIL          : 발송에 쓸 Gmail 주소 (신규)
   - GMAIL_APP_PASSWORD          : 그 Gmail 계정의 앱 비밀번호(16자리, 일반 로그인 비번 아님) (신규)
+  - UNSUBSCRIBE_WEBAPP_URL      : 수신거부 원클릭 링크가 가리킬 Google Apps Script 웹앱 URL
+                                  (2026-08-25 신규. unsubscribe_webapp.gs 참고)
+
+[2026-08-25 추가 — 이메일 수신거부]
+'사용자계정' 시트에 '리포트수신' 열을 추가해야 한다(값: '구독' 또는 '거부', 비어 있으면
+'구독'으로 간주 — 기존 행에 열을 새로 추가해도 하위호환됨). 이메일 하단의 "수신거부"
+링크를 누르면 별도로 배포한 Google Apps Script 웹앱(unsubscribe_webapp.gs)이 해당
+이메일의 '리포트수신' 값을 '거부'로 바꾸고, 다음 발송부터는 main()의 활성 사용자 필터에서
+자동으로 제외된다. 이메일 주소를 URL 파라미터로 그대로 사용하므로(서명·토큰 검증 없음)
+지인 소규모 사용자 기준으로는 충분하지만, 더 엄격한 보안이 필요해지면 이메일 대신
+서명된 토큰으로 바꿀 것.
 """
 
 import os
@@ -56,6 +67,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from functools import lru_cache
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from io import BytesIO
 import zipfile
@@ -521,7 +533,10 @@ def _pct_html(pct) -> str:
     return f'<span style="color:{color};font-weight:600;">{arrow} {abs(pct):.2f}%</span>'
 
 
-def build_email_html(display_name: str, market: dict, stock_reports: list[dict], report_date: str) -> str:
+def build_email_html(
+    display_name: str, market: dict, stock_reports: list[dict], report_date: str,
+    email: str = "", unsubscribe_url: str = "",
+) -> str:
     def _market_row(key):
         v = market.get(key)
         if not v or v.get("값") is None:
@@ -555,6 +570,11 @@ def build_email_html(display_name: str, market: dict, stock_reports: list[dict],
 
     stocks_html = "".join(stock_blocks) if stock_blocks else '<p style="color:#999;">보유 중인 종목이 없습니다.</p>'
 
+    unsubscribe_html = ""
+    if unsubscribe_url and email:
+        unsub_link = f"{unsubscribe_url}?email={quote(email)}"
+        unsubscribe_html = f'이 리포트를 더 받고 싶지 않으시면 <a href="{unsub_link}" style="color:#888;">수신거부</a>하실 수 있습니다.<br>'
+
     return f"""
     <div style="font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;max-width:600px;margin:0 auto;color:#222;">
         <h2 style="margin-bottom:4px;">📊 {report_date} 오늘의 시황 · 종목 리포트</h2>
@@ -568,7 +588,7 @@ def build_email_html(display_name: str, market: dict, stock_reports: list[dict],
         <p style="color:#aaa;font-size:11px;margin-top:20px;">
             공시(DART)는 참고용 정보이며, 투자 판단의 근거로 쓰기엔 부족할 수 있습니다.<br>
             뉴스 · 컨센서스 전체 내용은 <a href="https://stockapp-claude0608.streamlit.app" style="color:#888;">앱</a>에서 확인하실 수 있습니다.<br>
-            문의: hwcho@me.com
+            {unsubscribe_html}문의: hwcho@me.com
         </p>
     </div>
     """
@@ -589,7 +609,7 @@ def send_email(smtp_conn, sender: str, to_addr: str, subject: str, html_body: st
 def process_one_user(
     row: dict, client_id: str, client_secret: str, secret_key: str,
     dart_api_key: str, market: dict, report_date: str,
-    smtp_conn, sender_email: str,
+    smtp_conn, sender_email: str, unsubscribe_url: str = "",
 ) -> str:
     email = row.get("이메일", "")
     name = str(row.get("이름", "")).strip() or email.split("@")[0]
@@ -622,7 +642,7 @@ def process_one_user(
         except Exception as e:
             log.warning("종목 리포트 생성 실패 [%s]: %s", code, e)
 
-    html = build_email_html(name, market, stock_reports, report_date)
+    html = build_email_html(name, market, stock_reports, report_date, email=email, unsubscribe_url=unsubscribe_url)
     subject = f"[통합자산관리] {report_date} 오늘의 시황·종목 리포트"
 
     try:
@@ -653,6 +673,9 @@ def main():
     dart_api_key = _env("DART_API_KEY")
     sender_email = _env("GMAIL_SENDER_EMAIL")
     app_password = _env("GMAIL_APP_PASSWORD")
+    # 아직 Apps Script 웹앱을 배포하지 않았어도 발송 자체는 계속되도록 필수값으로 두지 않음
+    # (없으면 이메일에 수신거부 링크만 빠지고 나머지는 정상 동작).
+    unsubscribe_url = _env("UNSUBSCRIBE_WEBAPP_URL", required=False)
 
     sa_creds = ServiceAccountCredentials.from_service_account_info(
         service_account_json,
@@ -662,8 +685,20 @@ def main():
     accounts_sheet = sa_client.open_by_key(accounts_spreadsheet_id).worksheet("사용자계정")
     accounts = accounts_sheet.get_all_records()
 
-    active_users = [r for r in accounts if str(r.get("상태", "")).strip() == "활성"]
-    log.info("활성 사용자 %d명 대상 일일 리포트 발송 시작", len(active_users))
+    # '리포트수신' 열이 아직 없는 기존 행(빈 값)은 구독 중인 것으로 간주 — 하위호환.
+    active_users = [
+        r for r in accounts
+        if str(r.get("상태", "")).strip() == "활성"
+        and str(r.get("리포트수신", "")).strip() != "거부"
+    ]
+    skipped_unsub = sum(
+        1 for r in accounts
+        if str(r.get("상태", "")).strip() == "활성" and str(r.get("리포트수신", "")).strip() == "거부"
+    )
+    log.info(
+        "활성 사용자 %d명 대상 일일 리포트 발송 시작 (수신거부로 제외된 인원 %d명)",
+        len(active_users), skipped_unsub,
+    )
 
     log.info("시황 데이터 조회 중 (전체 사용자 공통, 1회만 조회)...")
     market = get_market_overview()
@@ -677,7 +712,7 @@ def main():
             try:
                 result = process_one_user(
                     row, client_id, client_secret, secret_key, dart_api_key,
-                    market, report_date, smtp_conn, sender_email,
+                    market, report_date, smtp_conn, sender_email, unsubscribe_url,
                 )
             except Exception as e:
                 result = f"{row.get('이메일','?')}: 예외 발생 - {e}"
