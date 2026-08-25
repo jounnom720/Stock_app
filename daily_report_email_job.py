@@ -130,22 +130,41 @@ def build_credentials_from_refresh_token(refresh_token: str, client_id: str, cli
 # 자산 마스터 (stock_app_main.py의 ASSET_MASTER와 동일 — 신규 종목 추가 시 그쪽도 함께 갱신)
 # ============================================================
 ASSET_MASTER = {
-    "069500": {"ticker": "069500.KS", "market": "KR"},
-    "102110": {"ticker": "102110.KS", "market": "KR"},
-    "471990": {"ticker": "471990.KS", "market": "KR"},
-    "487240": {"ticker": "487240.KS", "market": "KR"},
-    "229200": {"ticker": "229200.KS", "market": "KR"},
-    "0148J0": {"ticker": "148J0.KS", "market": "KR"},
-    "292150": {"ticker": "292150.KS", "market": "KR"},
-    "005930": {"ticker": "005930.KS", "market": "KR"},
-    "000660": {"ticker": "000660.KS", "market": "KR"},
-    "278470": {"ticker": "278470.KS", "market": "KR"},
-    "009150": {"ticker": "009150.KS", "market": "KR"},
-    "005380": {"ticker": "005380.KS", "market": "KR"},
-    "042660": {"ticker": "042660.KS", "market": "KR"},
-    "071970": {"ticker": "071970.KS", "market": "KR"},
-    "034020": {"ticker": "034020.KS", "market": "KR"},
+    "069500": {"ticker": "069500.KS", "market": "KR", "type": "ETF"},
+    "102110": {"ticker": "102110.KS", "market": "KR", "type": "ETF"},
+    "471990": {"ticker": "471990.KS", "market": "KR", "type": "ETF"},
+    "487240": {"ticker": "487240.KS", "market": "KR", "type": "ETF"},
+    "229200": {"ticker": "229200.KS", "market": "KR", "type": "ETF"},
+    "0148J0": {"ticker": "148J0.KS", "market": "KR", "type": "ETF"},
+    "292150": {"ticker": "292150.KS", "market": "KR", "type": "ETF"},
+    "005930": {"ticker": "005930.KS", "market": "KR", "type": "주식"},
+    "000660": {"ticker": "000660.KS", "market": "KR", "type": "주식"},
+    "278470": {"ticker": "278470.KS", "market": "KR", "type": "주식"},
+    "009150": {"ticker": "009150.KS", "market": "KR", "type": "주식"},
+    "005380": {"ticker": "005380.KS", "market": "KR", "type": "주식"},
+    "042660": {"ticker": "042660.KS", "market": "KR", "type": "주식"},
+    "071970": {"ticker": "071970.KS", "market": "KR", "type": "주식"},
+    "034020": {"ticker": "034020.KS", "market": "KR", "type": "주식"},
 }
+
+# 국내 상장 ETF는 대부분 이 브랜드명으로 시작 — ASSET_MASTER에 등록되지 않은 새 종목이 들어와도
+# 종목명만으로 ETF/주식을 자동 구분하기 위한 보조 목록 (stock_app_main.py와 동일)
+ETF_BRAND_PREFIXES = (
+    "KODEX", "TIGER", "KBSTAR", "ARIRANG", "SOL", "ACE", "HANARO",
+    "KOSEF", "PLUS", "RISE", "WOORI", "마이다스", "히어로즈", "TIMEFOLIO",
+)
+
+
+def get_asset_type(code: str, name: str = "") -> str:
+    """stock_app_main.py의 get_asset_type과 동일 로직. ETF/주식 구분."""
+    code = str(code).strip()
+    meta = ASSET_MASTER.get(code)
+    if meta:
+        return meta["type"]
+    name_str = str(name).strip().upper()
+    if name_str.startswith(ETF_BRAND_PREFIXES):
+        return "ETF"
+    return "주식"
 
 
 def get_asset_market(code: str) -> str:
@@ -181,7 +200,10 @@ def _safe_float_or_none(v):
 
 # ============================================================
 # 거래이력 → 보유 종목(중복 없이 종목코드·종목명만) — 이메일 대상 종목 뽑기용
-# (calc_holdings 전체 로직은 필요 없고, "지금 무엇을 들고 있는가"만 필요하므로 간소화)
+# [2026-08-25] 표시 순서를 stock_app_main.py의 보유종목 표(4190번 줄 부근)와 동일하게
+# 맞춤: "ETF 먼저, 그 다음 주식 — 각 그룹 내에서는 투자원금(매입금액) 큰 순서".
+# 이를 위해 계좌별 평균단가를 replay해서 종목코드 단위로 투자원금(매입금액)을 합산한다
+# (여러 계좌에 나눠 보유해도 종목당 하나의 투자원금 합계로 정렬).
 # ============================================================
 def get_held_stocks(trade_df: pd.DataFrame) -> list[tuple[str, str]]:
     if trade_df.empty:
@@ -190,25 +212,43 @@ def get_held_stocks(trade_df: pd.DataFrame) -> list[tuple[str, str]]:
     df["_dt"] = pd.to_datetime(df["거래일자"], errors="coerce")
     df = df.sort_values("_dt")
 
-    qty_held: dict[str, float] = {}
+    qty_held: dict[tuple[str, str], float] = {}
+    avg_cost: dict[tuple[str, str], float] = {}
     names: dict[str, str] = {}
     for _, row in df.iterrows():
         code = str(row.get("종목코드", "")).strip()
         name = str(row.get("종목명", "")).strip()
+        account = str(row.get("운용사", "")).strip()
         qty = _safe_num(row.get("거래수량", 0))
+        price = _safe_num(row.get("거래단가", 0))
         구분 = str(row.get("거래구분", "")).strip()
         if not code:
             continue
         names[code] = name
+        key = (account, code)
         if 구분 == "매수":
-            qty_held[code] = qty_held.get(code, 0) + qty
+            prev_qty = qty_held.get(key, 0)
+            prev_avg = avg_cost.get(key, 0.0)
+            new_qty = prev_qty + qty
+            avg_cost[key] = (prev_avg * prev_qty + price * qty) / new_qty if new_qty else price
+            qty_held[key] = new_qty
         elif 구분 == "매도":
-            qty_held[code] = qty_held.get(code, 0) - qty
+            qty_held[key] = qty_held.get(key, 0) - qty
 
-    return sorted(
-        [(code, names.get(code, "")) for code, qty in qty_held.items() if qty > 0.0001],
-        key=lambda x: x[1],
+    # 종목코드 단위로 투자원금(매입금액 = 평균단가 × 보유수량)을 계좌 합산
+    invested_by_code: dict[str, float] = {}
+    for (account, code), qty in qty_held.items():
+        if qty > 0.0001:
+            invested_by_code[code] = invested_by_code.get(code, 0.0) + avg_cost.get((account, code), 0.0) * qty
+
+    held_codes = list(invested_by_code.keys())
+    held_codes.sort(
+        key=lambda code: (
+            0 if get_asset_type(code, names.get(code, "")) == "ETF" else 1,
+            -invested_by_code[code],
+        )
     )
+    return [(code, names.get(code, "")) for code in held_codes]
 
 
 # ============================================================
