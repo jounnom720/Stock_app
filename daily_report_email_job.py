@@ -77,10 +77,10 @@ log = logging.getLogger("daily_report_email_job")
 KST = ZoneInfo("Asia/Seoul")
 
 OAUTH_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
 ]
 
 
