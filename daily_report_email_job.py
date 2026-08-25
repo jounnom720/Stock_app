@@ -33,6 +33,17 @@ stock_app_main.py의 render_daily_report()에는 Claude(Haiku) API로 만드는 
 정리해서 보내고, 필요하면 나중에 generate_stock_daily_summary()를 그대로 가져와
 추가하면 된다(같은 캐시 전략 적용 가능).
 
+[2026-08-25 버그 수정] 모든 종목의 "최근 공시"가 예외 없이 항상 비어 보이는 문제 발견·수정.
+원인: gspread가 '거래이력' 시트의 종목코드 셀을 숫자로 인식하면 정수로 돌려주는데(예:
+"005930" → 5930), 이 스크립트는 이를 그대로 문자열로만 바꿔 앞자리 0이 사라진 코드
+("5930")를 썼다. DART 고유번호 매핑은 항상 0으로 채운 6자리 코드("005930")를 쓰므로
+매칭이 항상 실패해 corp_code가 None이 되고, 공시 조회 자체가 호출되지 않은 채 조용히
+"최근 공시 없음"만 표시됐다(예외가 안 나서 로그에도 안 남았음). stock_app_main.py의
+load_sheet_df()에는 이미 있던 zfill(6) 보정을 이 스크립트에는 빠뜨렸던 것 — process_one_user()에서
+trade_df 로드 직후 동일 보정을 추가해 수정. 아울러 DART API가 실제 오류(상태코드 "013"=
+검색결과 없음 제외)를 반환하는 경우를 로그에 남기도록 get_dart_disclosures()도 보강함
+(앞으로 비슷한 문제가 생기면 로그로 원인 구분이 가능하도록).
+
 필요한 GitHub Actions 저장소 시크릿(Settings > Secrets and variables > Actions):
   - GOOGLE_SERVICE_ACCOUNT_JSON : 서비스 계정 키 파일(JSON) 전체 내용 (기존과 동일)
   - ACCOUNTS_SPREADSHEET_ID     : '사용자계정' 화이트리스트 시트의 스프레드시트 ID (기존과 동일)
@@ -422,7 +433,12 @@ def get_dart_disclosures(corp_code: str, dart_api_key: str, days: int = 14, max_
         )
         resp.raise_for_status()
         data = resp.json()
-        if data.get("status") not in ("000",):
+        if data.get("status") != "000":
+            # DART: "000"=정상, "013"=검색결과 없음(정상 케이스, 로그 불필요).
+            # 그 외 상태(잘못된 키, 사용한도 초과 등)는 stock_app_main.py처럼 반드시
+            # 로그를 남긴다 — 안 남기면 이번처럼 "공시 없음"과 "API 에러"를 구분 못 함.
+            if data.get("status") != "013":
+                log.warning("DART 공시 조회 오류 [%s]: %s", corp_code, data.get("message"))
             return tuple()
         results = []
         for item in data.get("list", []):
@@ -512,6 +528,8 @@ def get_daily_stock_report(code: str, name: str, dart_api_key: str) -> dict:
     뉴스·컨센서스는 앱의 "오늘의 리포트" 탭에서 보도록 안내 문구로 대체함(get_naver_news,
     get_naver_consensus 함수 자체는 나중에 프록시 등으로 우회할 경우를 대비해 남겨둠)."""
     corp_code = get_dart_corp_code(code, dart_api_key)
+    if not corp_code:
+        log.warning("DART 고유번호 매핑 없음 [%s %s] — 공시 조회를 건너뜀 (ETF이거나 종목코드 형식 문제일 수 있음)", code, name)
     disclosures = get_dart_disclosures(corp_code, dart_api_key) if corp_code else tuple()
     return {
         "종목코드": code, "종목명": name,
@@ -631,6 +649,15 @@ def process_one_user(
         spreadsheet = gc.open_by_key(spreadsheet_id)
         ws = spreadsheet.worksheet("거래이력")
         trade_df = pd.DataFrame(ws.get_all_records())
+        # [2026-08-25] gspread가 숫자처럼 보이는 셀을 int로 반환 → 종목코드 앞자리 0 유실
+        # (예: "005930" → 5930). stock_app_main.py의 load_sheet_df와 동일한 보정을 적용.
+        # 이 보정이 없으면 DART 고유번호 매핑(zero-padded 6자리)과 코드가 어긋나
+        # get_dart_corp_code()가 항상 None을 반환하고, 공시 섹션이 예외 없이
+        # "최근 공시 없음"으로만 표시된다(로그에도 안 남는 조용한 실패였음).
+        if "종목코드" in trade_df.columns:
+            trade_df["종목코드"] = trade_df["종목코드"].apply(
+                lambda x: str(int(x)).zfill(6) if str(x).strip().isdigit() else str(x).strip()
+            )
     except Exception as e:
         return f"{email}: 실패 (개인 시트 접근 실패 - {e})"
 
