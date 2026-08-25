@@ -40,9 +40,6 @@ jobs:
           DART_API_KEY: ${{ secrets.DART_API_KEY }}
           GMAIL_SENDER_EMAIL: ${{ secrets.GMAIL_SENDER_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          UNSUBSCRIBE_WEBAPP_URL: ${{ secrets.UNSUBSCRIBE_WEBAPP_URL }}
           FORCE_RUN: ${{ github.event.inputs.force_run == 'true' && '1' || '' }}
-        # [주의] monthly_snapshot.yml은 "python automation/monthly_snapshot_job.py" 경로로
-        # 실행합니다. 실제 저장소에 automation/ 폴더가 있다면 아래 경로도 그에 맞게
-        # "python automation/daily_report_email_job.py"로 바꿔주세요. 이 워크플로 파일은
-        # 로컬 작업 폴더 기준(저장소 루트에 스크립트가 있다고 가정)으로 작성했습니다.
         run: python daily_report_email_job.py
