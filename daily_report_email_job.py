@@ -69,6 +69,7 @@ trade_df 로드 직후 동일 보정을 추가해 수정. 아울러 DART API가 
 
 import os
 import sys
+import re
 import json
 import base64
 import hashlib
@@ -693,7 +694,34 @@ def main():
 
     report_date = now.strftime("%Y-%m-%d (%a)")
 
-    service_account_json = json.loads(_env("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    # base64로 인코딩된 값을 기대한다 (monthly_snapshot_job.py와 동일한 방식으로 통일.
+    # 사람이 JSON 파일을 직접 복사/붙여넣기 하면 private_key 안의 '\n' 이스케이프가
+    # 실제 줄바꿈으로 깨지는 사고가 반복되어, 복사 실수가 불가능한 base64 한 줄
+    # 문자열 방식으로 바꿨다. [2026-08-27] 이 스크립트만 예전 방식(원본 JSON 그대로
+    # json.loads)으로 남아있어 base64 값을 넣자 JSONDecodeError가 발생 — 수정.)
+    raw_b64 = _env("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    # 붙여넣기 과정에서 섞여 들어올 수 있는 공백/줄바꿈/탭을 전부 제거 (base64 자체에는
+    # 원래 이런 문자가 없어야 하므로, 있다면 실수로 섞인 것이니 조용히 제거하고 진행한다).
+    cleaned_b64 = "".join(raw_b64.split())
+
+    # base64 알파벳(A-Z a-z 0-9 + / =)이 아닌 문자가 섞여 있으면 여기서 바로 명확히 알려준다.
+    invalid_chars = sorted(set(re.sub(r"[A-Za-z0-9+/=]", "", cleaned_b64)))
+    if invalid_chars:
+        raise RuntimeError(
+            f"GOOGLE_SERVICE_ACCOUNT_JSON에 base64가 아닌 문자가 섞여 있습니다: {invalid_chars!r} "
+            f"(시크릿 입력창에 이전 값이 남아있는 상태로 이어 붙여진 것일 수 있습니다 — "
+            f"입력창을 전체 삭제한 뒤 다시 붙여넣어보세요)"
+        )
+
+    try:
+        raw_sa_json = base64.b64decode(cleaned_b64, validate=True).decode("utf-8")
+    except Exception as e:
+        raise RuntimeError(
+            f"GOOGLE_SERVICE_ACCOUNT_JSON base64 디코딩 실패: {e} "
+            f"(base64로 인코딩한 값을 넣었는지, 값이 잘리지 않았는지 확인하세요)"
+        )
+    service_account_json = json.loads(raw_sa_json)
     accounts_spreadsheet_id = _env("ACCOUNTS_SPREADSHEET_ID")
     client_id = _env("GOOGLE_OAUTH_CLIENT_ID")
     client_secret = _env("GOOGLE_OAUTH_CLIENT_SECRET")
