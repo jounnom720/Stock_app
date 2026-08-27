@@ -1772,6 +1772,96 @@ def get_market_overview() -> dict:
     m["기준시각"] = now_kst()
     return m
 
+# ============================================================
+# 시황 카드 스파크라인(분봉) — 코스피/코스닥 전용 (2026-08-27 추가)
+# ============================================================
+# [배경] Jone이 미래에셋증권 앱처럼 시황 카드 오른쪽 여백에 오늘 하루 움직임을 보여주는
+# 미니 차트를 넣고 싶어함(2026-08-27). pykrx·야후는 국내 지수의 "일별 종가"만 제공하고
+# 장중 분(分) 단위 데이터가 없어서, 네이버 금융의 옛 "지수 시간대별 시세" 페이지
+# (finance.naver.com/sise/sise_index_time.naver)를 비공식으로 이용한다. 뉴스/컨센서스
+# (stock.naver.com/api/...)와 달리 이 페이지는 JSON이 아니라 HTML 표를 그대로 내려주므로,
+# 표에서 시각·지수 값 두 칸만 정규식으로 뽑아 쓴다.
+# ⚠ [2026-08-27] 이 코드를 작성한 Claude 작업 환경은 외부 네트워크 허용목록에
+# naver.com이 없어 실제 응답을 직접 확인(curl)하지 못했다 — 즉 아래 파싱 로직은 "예전부터
+# 알려진 페이지 구조"를 근거로 한 첫 버전(미검증)이며, get_market_overview()의 다른
+# 지표들과 달리 아직 실제 배포 환경에서 값이 맞는지 확인된 적이 없다. Jone이 관리자 메뉴
+# "시스템" 탭의 새 버튼 "📈 분봉 차트 미리보기(테스트)"로 먼저 확인해야 한다 — 파싱된
+# 행이 0개로 나오면 "원본 응답 보기"로 실제 HTML을 캡처해서 알려주면, 그 구조에 맞게
+# 아래 _MINUTE_ROW_RE 정규식을 고친다(뉴스/리포트 API를 처음 붙였을 때와 동일한 절차,
+# get_investor_trend 위 주석 참고). 실패해도 예외를 던지지 않고 빈 리스트를 반환하므로,
+# 분봉을 못 가져와도 기존 코스피/코스닥 카드(값·등락률)는 지금처럼 정상적으로 표시된다.
+
+_NAVER_INDEX_MINUTE_URL = "https://finance.naver.com/sise/sise_index_time.naver"
+_NAVER_INDEX_MINUTE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://finance.naver.com/sise/",
+}
+_NAVER_INDEX_MINUTE_MAX_PAGES = 20  # 페이지당 대략 수십 행 — 과도한 요청 방지용 상한(오늘 하루치면 충분)
+
+def _fetch_naver_index_minute_page_raw(index_code: str, page: int) -> str:
+    """[내부용/관리자 미리보기 전용] '지수 시간대별 시세' 페이지 1쪽의 원본 HTML을
+    그대로 반환한다. index_code는 'KOSPI' 또는 'KOSDAQ'. 실패 시 빈 문자열."""
+    try:
+        resp = requests.get(
+            _NAVER_INDEX_MINUTE_URL,
+            params={"code": index_code, "thistime": "", "page": page},
+            headers=_NAVER_INDEX_MINUTE_HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        resp.encoding = "euc-kr"  # 네이버 옛 페이지는 EUC-KR 인코딩을 쓰는 경우가 많음
+        return resp.text
+    except Exception as e:
+        logging.warning("네이버 분봉 페이지 조회 실패 [%s, page=%s]: %s", index_code, page, e)
+        return ""
+
+# [미검증, 2026-08-27] 페이지 구조가 예상과 다르면 이 정규식부터 고쳐야 한다.
+_MINUTE_ROW_RE = re.compile(
+    r'<td[^>]*class="date"[^>]*>\s*([\d:]+)\s*</td>\s*'
+    r'<td[^>]*class="number_1"[^>]*>\s*([\d,.]+)\s*</td>',
+    re.IGNORECASE,
+)
+
+def _parse_naver_index_minute_page(html: str) -> list[dict]:
+    """[내부용] 위 페이지 HTML에서 (시각, 지수 값) 행들을 뽑아 리스트로 반환한다.
+    페이지 구조가 예상과 달라 매치가 0건이면 빈 리스트를 반환 — 호출부에서 그 이상
+    페이지를 넘기지 않고 멈추는 신호로도 쓰인다."""
+    rows = []
+    for m in _MINUTE_ROW_RE.finditer(html):
+        시각, 값 = m.group(1), m.group(2)
+        try:
+            rows.append({"시각": 시각, "값": float(값.replace(",", ""))})
+        except ValueError:
+            continue
+    return rows
+
+@st.cache_data(ttl=180)
+def get_naver_index_minutes(index_code: str) -> list[dict]:
+    """오늘 코스피/코스닥 지수의 분(分) 단위 값을 오래된 순으로 반환한다 (3분 캐시 —
+    장중에는 자주 바뀌는 데이터라 시황 브리핑의 다른 지표(1시간 캐시)보다 짧게 잡음).
+    페이지는 최신→과거 순으로 나와서, 행의 시각이 오늘 장 시작(09:00)에 닿거나 빈 페이지가
+    나오면 그 이상은 어제 이전 데이터이므로 멈춘다.
+    실패해도 예외를 던지지 않고 빈 리스트를 반환 — 스파크라인만 생략되고 카드 자체(값·
+    등락률)는 정상 표시된다. [미검증, 2026-08-27 — 위 섹션 주석 참고]"""
+    all_rows: list[dict] = []
+    try:
+        for page in range(1, _NAVER_INDEX_MINUTE_MAX_PAGES + 1):
+            html = _fetch_naver_index_minute_page_raw(index_code, page)
+            if not html:
+                break
+            rows = _parse_naver_index_minute_page(html)
+            if not rows:
+                break
+            all_rows.extend(rows)
+            if any(r["시각"] <= "09:00" for r in rows):
+                break
+    except Exception as e:
+        logging.warning("네이버 분봉 조회 실패 [%s]: %s", index_code, e)
+        return []
+    all_rows.reverse()  # 과거 → 최신(오래된 순)으로 뒤집는다
+    return all_rows
+
 @st.cache_data(ttl=60)
 def get_prices(tickers: tuple) -> tuple[dict[str, float], str | None]:
     """현재가 조회. 국내 종목(.KS/.KQ)은 KRX 원천 데이터(pykrx)를 우선 쓰고, 실패하거나
@@ -3125,6 +3215,28 @@ def render_admin_panel():
                             st.caption("컨센서스 없음 또는 조회 실패")
 
                     st.divider()
+                    # [2026-08-27 추가] 시황 카드 스파크라인(분봉) 기능 개발 중 — 코스피/코스닥
+                    # 지수의 분봉 데이터가 실제로 잘 파싱되는지 배포 환경에서 확인하기 위한
+                    # 임시 미리보기. 이 세션(Claude 작업 환경)은 naver.com에 네트워크 접근이
+                    # 막혀 있어 실제 응답 구조를 직접 확인하지 못한 채로 작성됨 — 파싱된 행이
+                    # 0개로 나오면 "원본 응답 보기"로 실제 HTML을 확인해서 get_naver_index_minutes()
+                    # 위쪽의 _MINUTE_ROW_RE 정규식을 실제 구조에 맞게 고쳐야 한다.
+                    st.caption("코스피·코스닥 분봉(오늘 지수 흐름) 데이터가 잘 파싱되는지 확인합니다 (개발 중 임시 기능).")
+                    spark_index = st.selectbox("지수", ["KOSPI", "KOSDAQ"], key="admin_spark_index")
+                    show_spark_raw = st.checkbox("원본 응답 보기 (문제 발생 시 진단용)", key="admin_spark_raw")
+                    if st.button("📈 분봉 차트 미리보기(테스트)", key="admin_spark_preview", width="stretch"):
+                        with st.spinner("분봉 데이터 조회 중..."):
+                            minutes = get_naver_index_minutes(spark_index)
+                        if minutes:
+                            st.dataframe(pd.DataFrame(minutes), width="stretch", hide_index=True)
+                            st.caption(f"총 {len(minutes)}개 행 파싱됨 (오래된 순)")
+                        else:
+                            st.warning("파싱된 분봉 데이터가 없습니다. 아래 '원본 응답 보기'로 실제 페이지 구조를 확인해주세요.")
+                        if show_spark_raw:
+                            raw_html = _fetch_naver_index_minute_page_raw(spark_index, 1)
+                            st.code(raw_html[:3000] if raw_html else "(응답 없음 — 요청 자체가 실패했을 수 있습니다)", language="html")
+
+                    st.divider()
                     # [2026-08-19 추가] 시세 지연 진단 패널.
                     # Jone 제보: 보유종목 8개 전부(국내주식+ETF)에서 앱 등락률이 실제(증권사 앱)보다
                     # 일관되게 덜 하락하게 나옴(예: 삼성전자 앱 -7.45% vs 실제 -8.01%), 시세 새로고침을
@@ -3202,15 +3314,98 @@ def _change_badge_html(pct) -> str:
         f"padding:2px 6px;border-radius:6px;'>{arrow} {abs(pct):.2f}%</span>"
     )
 
-def _metric_card_html(label: str, value: str, pct=None) -> str:
-    """시황 카드 하나(라벨 + 값 + 등락 배지) HTML."""
-    return (
-        "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:12px;'>"
+def _metric_card_html(label: str, value: str, pct=None, spark_svg: str = "") -> str:
+    """시황 카드 하나(라벨 + 값 + 등락 배지, 선택적으로 오른쪽에 분봉 스파크라인) HTML.
+    [2026-08-27 추가] spark_svg가 있으면 카드를 좌우 flex 레이아웃으로 바꿔 오른쪽 빈
+    여백에 미니 차트를 넣는다. 빈 문자열이면(기본값) 기존과 완전히 동일하게 보인다 —
+    코스피·코스닥 외 나머지 지표 카드들은 이번 변경의 영향을 받지 않는다."""
+    left = (
+        "<div style='min-width:0;'>"
         f"<div style='font-size:12px;color:var(--text-secondary,#888);margin-bottom:4px;'>{label}</div>"
-        f"<div style='font-size:20px;font-weight:600;'>{value}</div>"
+        f"<div style='font-size:20px;font-weight:600;white-space:nowrap;'>{value}</div>"
         f"{_change_badge_html(pct)}"
         "</div>"
     )
+    if spark_svg:
+        return (
+            "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:12px;"
+            "display:flex;align-items:center;justify-content:space-between;gap:8px;'>"
+            f"{left}{spark_svg}"
+            "</div>"
+        )
+    return (
+        "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:12px;'>"
+        f"{left}"
+        "</div>"
+    )
+
+# [2026-08-27 추가] 코스피/코스닥 카드 오른쪽에 넣을 분봉 미니 차트(스파크라인) SVG.
+# 데이터 소스는 위 get_naver_index_minutes() — 실패·데이터부족 시 빈 문자열을 반환해서
+# 카드가 기존(차트 없는) 모습으로 자연스럽게 보이게 한다.
+def _sparkline_svg(values: list[float], baseline: float | None, up: bool,
+                    width: int = 72, height: int = 32) -> str:
+    """오늘 분봉 값 리스트로 미니 스파크라인 SVG를 만든다.
+    values: 시간순(오래된→최신) 지수 값 리스트. 2개 미만이면 빈 문자열 반환.
+    baseline: 전일 종가 — 있으면 점선 기준선을 그려서(Jone이 승인한 시안 참고) "오늘
+    지금까지 얼마나 움직였는지"가 한눈에 보이게 한다.
+    up: 등락 방향(등락률 ≥ 0이면 True) — 선 색상을 기존 등락 배지와 통일
+    (상승 #e0635e/하락 #5b9bd8, _UP_COLOR/_DOWN_COLOR 재사용)."""
+    if not values or len(values) < 2:
+        return ""
+    color = _UP_COLOR if up else _DOWN_COLOR
+    all_vals = values + ([baseline] if baseline is not None else [])
+    lo, hi = min(all_vals), max(all_vals)
+    span = (hi - lo) or 1.0
+    pad = 3
+
+    def _x(i):
+        return pad + i * (width - 2 * pad) / (len(values) - 1)
+
+    def _y(v):
+        return height - pad - (v - lo) / span * (height - 2 * pad)
+
+    pts = " ".join(f"{_x(i):.1f},{_y(v):.1f}" for i, v in enumerate(values))
+    base_line = ""
+    if baseline is not None:
+        by = _y(baseline)
+        base_line = (
+            f'<line x1="0" y1="{by:.1f}" x2="{width}" y2="{by:.1f}" '
+            f'stroke="#9aa0aa" stroke-width="1" stroke-dasharray="2,3" opacity="0.7"/>'
+        )
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'style="flex-shrink:0;">'
+        f'{base_line}'
+        f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.8" '
+        f'stroke-linecap="round" stroke-linejoin="round"/>'
+        f'</svg>'
+    )
+
+def _get_index_spark_svg(key: str, mo: dict) -> str:
+    """코스피/코스닥 카드용 분봉 스파크라인 SVG를 만든다. 실패하면 빈 문자열을 반환해서
+    카드는 지금처럼(차트 없이) 정상 표시된다 — 이 함수 자체가 예외를 밖으로 던지지 않는다.
+    baseline(전일 종가)은 get_market_overview()가 이미 계산해 둔 값·등락률로 역산한다
+    (오늘값 = 전일값 × (1+등락률/100)) — get_market_overview() 반환 구조는 그대로 두고
+    싶다는 방침(2026-08-27 결정) 때문에, 전일 종가를 새로 저장하지 않고 여기서 역산한다."""
+    code_map = {"코스피": "KOSPI", "코스닥": "KOSDAQ"}
+    naver_code = code_map.get(key)
+    if not naver_code:
+        return ""
+    try:
+        minutes = get_naver_index_minutes(naver_code)
+        values = [row["값"] for row in minutes if row.get("값") is not None]
+        if len(values) < 2:
+            return ""
+        v = mo.get(key) or {}
+        pct = v.get("등락률")
+        baseline = None
+        if pct is not None and v.get("값") is not None and (1 + pct / 100) != 0:
+            baseline = v["값"] / (1 + pct / 100)
+        up = (pct or 0) >= 0
+        return _sparkline_svg(values, baseline, up)
+    except Exception as e:
+        logging.warning("분봉 스파크라인 생성 실패 [%s]: %s", key, e)
+        return ""
 
 # [2026-08-19 추가] AI(Claude)가 만든 요약은 마크다운 문법(**굵게**, "- " 목록)을 그대로
 # 텍스트로 반환하는데, 이걸 그냥 <br>로만 줄바꿈 처리해서 커스텀 HTML 카드에 넣었더니
@@ -3261,22 +3456,25 @@ def render_daily_report(holdings_df: pd.DataFrame):
 
     st.markdown("##### 🌐 국내·해외 시황")
 
-    def _card_grid(keys, cols_per_row):
+    def _card_grid(keys, cols_per_row, spark=False):
         cols = st.columns(cols_per_row)
         i = 0
         for key in keys:
             v = mo.get(key)
             if not v or v.get("값") is None:
                 continue
+            # [2026-08-27 추가] spark=True인 카드(코스피/코스닥)만 오른쪽에 분봉
+            # 미니 차트를 붙인다. 나머지 지표는 spark_svg=""라 기존과 완전히 동일.
+            spark_svg = _get_index_spark_svg(key, mo) if spark else ""
             with cols[i % cols_per_row]:
                 st.markdown(
-                    _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률")),
+                    _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률"), spark_svg),
                     unsafe_allow_html=True,
                 )
             i += 1
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    _card_grid(["코스피", "코스닥"], 2)
+    _card_grid(["코스피", "코스닥"], 2, spark=True)
     _card_grid(["다우존스", "S&P500", "나스닥", "필라델피아반도체"], 4)
     _card_grid(["니케이225", "상하이종합", "항셍지수", "VIX"], 4)
     _card_grid(["원달러환율", "달러인덱스", "WTI"], 3)
