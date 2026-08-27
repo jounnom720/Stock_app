@@ -1773,7 +1773,7 @@ def get_market_overview() -> dict:
     return m
 
 # ============================================================
-# 시황 카드 스파크라인 — 코스피/코스닥 전용 (2026-08-27 추가, 같은 날 방식 전환)
+# 시황 카드 추세 미니 차트 — 전 지표 공통 (2026-08-27 추가, 같은 날 방식 전환)
 # ============================================================
 # [배경] Jone이 미래에셋증권 앱처럼 시황 카드 오른쪽 여백에 최근 추세를 보여주는 미니
 # 차트를 넣고 싶어함(2026-08-27). 처음엔 네이버 비공식 분봉(1분 단위) API로 "오늘 하루
@@ -1783,13 +1783,18 @@ def get_market_overview() -> dict:
 # 실시간 틱 누적 방식으로 추정). 같은 날 리버스엔지니어링을 접고, 처음 비교했던 두 방식
 # 중 ②번(일별 데이터로 재현)으로 전환함 — 새 비공식 API 없이 이미 앱이 안정적으로 쓰고
 # 있는 pykrx·야후 소스만으로 완성해서 안정성 리스크를 없앤다. "오늘 하루 장중 흐름"이
-# 아니라 "최근 며칠간 추세 속의 오늘"을 보여주는 형태로, 비교 목업에서 보여드렸던 옵션②와
-# 동일한 느낌이다.
+# 아니라 "최근 며칠간 추세 속의 오늘"을 보여주는 형태다.
+# [2026-08-27 확장] 처음엔 코스피/코스닥에만 적용했으나, 나머지 시황 카드(해외증시·환율·
+# 원자재·금리)도 전부 get_market_overview()의 _add() 헬퍼를 통해 이미 야후 파이낸스로
+# 조회하고 있어서 — 즉 "최근 며칠 종가"를 추가로 얻는 데 새로운 소스나 리스크가 전혀
+# 필요 없어서 — 전 지표로 확장함(Jone 요청).
 
+@st.cache_data(ttl=3600)
 def get_index_recent_closes(pykrx_code: str, yf_fallback_ticker: str, days: int = 10) -> list[float]:
-    """최근 N거래일 종가를 오래된→최신 순으로 반환한다 (스파크라인용). pykrx를 먼저
-    시도하고(원천 데이터라 더 신뢰도가 높음), 실패하면 야후로 대체한다 — 시황 브리핑의
-    다른 국내 지수 조회(_kr_index_last_two_closes)와 동일한 우선순위 방침을 그대로 따름.
+    """최근 N거래일 종가를 오래된→최신 순으로 반환한다 (스파크라인용, 1시간 캐시 — 다른
+    시황 지표와 동일한 캐시 주기). pykrx를 먼저 시도하고(원천 데이터라 더 신뢰도가 높음),
+    실패하면 야후로 대체한다 — 시황 브리핑의 다른 국내 지수 조회(_kr_index_last_two_closes)
+    와 동일한 우선순위 방침을 그대로 따름. 코스피/코스닥 전용.
     실패해도 예외를 던지지 않고 빈 리스트를 반환 — 스파크라인만 생략되고 카드 자체(값·
     등락률)는 정상 표시된다."""
     today = datetime.now(KST).strftime("%Y%m%d")
@@ -1808,6 +1813,31 @@ def get_index_recent_closes(pykrx_code: str, yf_fallback_ticker: str, days: int 
     except Exception as e:
         logging.warning("스파크라인용 야후 조회 실패 [%s]: %s", yf_fallback_ticker, e)
     return []
+
+@st.cache_data(ttl=3600)
+def get_yf_recent_closes(ticker: str, days: int = 10) -> list[float]:
+    """최근 N거래일 종가를 오래된→최신 순으로 반환한다 (스파크라인용, 1시간 캐시).
+    코스피/코스닥 외 나머지 시황 카드(해외증시·환율·원자재·금리) 전용 — 이 지표들은
+    get_market_overview()의 _add() 헬퍼도 전부 야후만 쓰므로 여기서도 야후만 쓴다.
+    실패해도 예외를 던지지 않고 빈 리스트를 반환."""
+    try:
+        hist = yf.Ticker(ticker).history(period=f"{days + 5}d")
+        closes = hist["Close"].dropna()
+        if len(closes) >= 2:
+            return [float(v) for v in closes.tail(days).tolist()]
+    except Exception as e:
+        logging.warning("스파크라인용 야후 조회 실패 [%s]: %s", ticker, e)
+    return []
+
+# get_market_overview()의 _add() 호출과 정확히 동일한 티커 — 같은 지표는 같은 데이터
+# 소스를 쓴다는 원칙을 유지한다.
+_YF_SPARK_TICKERS = {
+    "다우존스": "^DJI", "S&P500": "^GSPC", "나스닥": "^IXIC", "필라델피아반도체": "^SOX",
+    "니케이225": "^N225", "상하이종합": "000001.SS", "항셍지수": "^HSI", "VIX": "^VIX",
+    "원달러환율": "KRW=X", "달러인덱스": "DX-Y.NYB", "WTI": "CL=F", "브렌트유": "BZ=F",
+    "국제금": "GC=F", "미국채10년": "^TNX",
+}
+_KRX_SPARK_CODES = {"코스피": ("1001", "^KS11"), "코스닥": ("2001", "^KQ11")}
 
 @st.cache_data(ttl=60)
 def get_prices(tickers: tuple) -> tuple[dict[str, float], str | None]:
@@ -3172,21 +3202,26 @@ def render_admin_panel():
                             st.caption("컨센서스 없음 또는 조회 실패")
 
                     st.divider()
-                    # [2026-08-27 추가, 같은 날 방식 전환] 시황 카드 추세 미니 차트 기능 —
-                    # 네이버 비공식 분봉 API 대신 이미 검증된 pykrx/야후 소스로 전환했으므로
-                    # (위 get_index_recent_closes 주석 참고), 원본 응답 보기 같은 진단은
-                    # 필요 없고 값이 잘 나오는지만 간단히 확인하면 된다.
-                    st.caption("코스피·코스닥 카드에 들어갈 최근 거래일 종가 추세가 잘 나오는지 확인합니다 (개발 중 임시 기능).")
-                    spark_index = st.selectbox("지수", ["코스피", "코스닥"], key="admin_spark_index")
+                    # [2026-08-27 추가, 같은 날 방식 전환 및 전 지표 확장] 시황 카드 추세 미니
+                    # 차트 기능 — 네이버 비공식 분봉 API 대신 이미 검증된 pykrx/야후 소스로
+                    # 전환했으므로(위 get_index_recent_closes/get_yf_recent_closes 주석 참고),
+                    # 원본 응답 보기 같은 진단은 필요 없고 값이 잘 나오는지만 간단히 확인하면 된다.
+                    st.caption("시황 카드에 들어갈 최근 거래일 종가 추세가 잘 나오는지 확인합니다 (개발 중 임시 기능).")
+                    spark_index = st.selectbox(
+                        "지표", ["코스피", "코스닥"] + list(_YF_SPARK_TICKERS.keys()),
+                        key="admin_spark_index",
+                    )
                     if st.button("📈 추세 차트 미리보기(테스트)", key="admin_spark_preview", width="stretch"):
-                        code_map = {"코스피": ("1001", "^KS11"), "코스닥": ("2001", "^KQ11")}
                         with st.spinner("최근 거래일 종가 조회 중..."):
-                            closes = get_index_recent_closes(*code_map[spark_index])
+                            if spark_index in _KRX_SPARK_CODES:
+                                closes = get_index_recent_closes(*_KRX_SPARK_CODES[spark_index])
+                            else:
+                                closes = get_yf_recent_closes(_YF_SPARK_TICKERS[spark_index])
                         if closes:
                             st.dataframe(pd.DataFrame({"종가": closes}), width="stretch", hide_index=True)
                             st.caption(f"총 {len(closes)}개 거래일 (오래된 순, 마지막=오늘)")
                         else:
-                            st.warning("종가 데이터를 가져오지 못했습니다 (pykrx·야후 둘 다 실패).")
+                            st.warning("종가 데이터를 가져오지 못했습니다.")
 
                     st.divider()
                     # [2026-08-19 추가] 시세 지연 진단 패널.
@@ -3296,62 +3331,75 @@ def _metric_card_html(label: str, value: str, pct=None, spark_svg: str = "") -> 
 # 마지막 구간(전일→오늘)만 등락 색으로 강조하고 나머지는 회색으로 그려서, "오늘 하루
 # 장중 흐름"이 아니라 "최근 며칠 추세 속의 오늘"이라는 느낌을 준다(Jone에게 보여드린
 # 비교 목업의 옵션② 방식과 동일한 구성 — 점선은 전일/오늘 경계).
-def _daily_trend_svg(values: list[float], up: bool, width: int = 72, height: int = 32) -> str:
+def _daily_trend_svg(values: list[float], up: bool, width: int = 96, height: int = 36) -> str:
     """최근 N거래일 종가 리스트(오래된→최신, 마지막=오늘)로 미니 추세선 SVG를 만든다.
-    2개 미만이면 빈 문자열 반환. up: 등락 방향(등락률 ≥ 0이면 True) — 마지막 구간과 오늘
-    점의 색상을 기존 등락 배지와 통일(상승 #e0635e/하락 #5b9bd8, _UP_COLOR/_DOWN_COLOR 재사용)."""
+    2개 미만이면 빈 문자열 반환. up: 등락 방향(등락률 ≥ 0이면 True) — 마지막 구간·오늘
+    점·영역 채우기 색상을 기존 등락 배지와 통일(상승 #e0635e/하락 #5b9bd8,
+    _UP_COLOR/_DOWN_COLOR 재사용).
+    [2026-08-27 재작업] Jone 피드백("조잡하다")을 반영해 처음 버전보다 확실히 진하게 —
+    전일 종가 기준 점선(가로)·오늘 경계 점선(세로)·오늘 구간 아래 반투명 색 채우기·더 굵은
+    선·더 큰 오늘 점을 추가해 시안(비교 목업 옵션②)에 더 가깝게 맞췄다."""
     if not values or len(values) < 2:
         return ""
     color = _UP_COLOR if up else _DOWN_COLOR
     n = len(values)
     lo, hi = min(values), max(values)
     span = (hi - lo) or 1.0
-    pad = 3
+    pad_x, pad_y = 2, 5
 
     def _x(i):
-        return pad + i * (width - 2 * pad) / (n - 1)
+        return pad_x + i * (width - 2 * pad_x) / (n - 1)
 
     def _y(v):
-        return height - pad - (v - lo) / span * (height - 2 * pad)
+        return height - pad_y - (v - lo) / span * (height - 2 * pad_y)
 
-    pts_past = " ".join(f"{_x(i):.1f},{_y(v):.1f}" for i, v in enumerate(values[:-1]))
-    last_seg = f"{_x(n-2):.1f},{_y(values[-2]):.1f} {_x(n-1):.1f},{_y(values[-1]):.1f}"
-    boundary_x = _x(n - 2)
+    xs = [_x(i) for i in range(n)]
+    ys = [_y(v) for v in values]
+    pts_past = " ".join(f"{xs[i]:.1f},{ys[i]:.1f}" for i in range(n - 1))
+    last_seg = f"{xs[n-2]:.1f},{ys[n-2]:.1f} {xs[n-1]:.1f},{ys[n-1]:.1f}"
+    boundary_x = xs[n - 2]
+    prev_close_y = ys[n - 2]
+    area_pts = f"{xs[n-2]:.1f},{ys[n-2]:.1f} {xs[n-1]:.1f},{ys[n-1]:.1f} {xs[n-1]:.1f},{height:.1f} {xs[n-2]:.1f},{height:.1f}"
+
     dots = "".join(
-        f'<circle cx="{_x(i):.1f}" cy="{_y(v):.1f}" r="1.4" fill="#b7bac1"/>'
-        for i, v in enumerate(values[:-1])
+        f'<circle cx="{xs[i]:.1f}" cy="{ys[i]:.1f}" r="1.6" fill="#9aa0aa"/>'
+        for i in range(n - 1)
     )
-    dots += f'<circle cx="{_x(n-1):.1f}" cy="{_y(values[-1]):.1f}" r="2.2" fill="{color}"/>'
+    dots += f'<circle cx="{xs[n-1]:.1f}" cy="{ys[n-1]:.1f}" r="3.2" fill="{color}"/>'
     return (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        f'style="flex-shrink:0;">'
+        f'style="flex-shrink:0;overflow:visible;">'
+        f'<line x1="0" y1="{prev_close_y:.1f}" x2="{width}" y2="{prev_close_y:.1f}" '
+        f'stroke="#8b9098" stroke-width="1" stroke-dasharray="2,2" opacity="0.55"/>'
         f'<line x1="{boundary_x:.1f}" y1="0" x2="{boundary_x:.1f}" y2="{height}" '
-        f'stroke="#d9dbe0" stroke-width="1" stroke-dasharray="2,2"/>'
-        f'<polyline points="{pts_past}" fill="none" stroke="#b7bac1" stroke-width="1.5" '
+        f'stroke="#8b9098" stroke-width="1" stroke-dasharray="2,2" opacity="0.45"/>'
+        f'<polygon points="{area_pts}" fill="{color}" opacity="0.16"/>'
+        f'<polyline points="{pts_past}" fill="none" stroke="#9aa0aa" stroke-width="1.8" '
         f'stroke-linecap="round" stroke-linejoin="round"/>'
-        f'<polyline points="{last_seg}" fill="none" stroke="{color}" stroke-width="2" '
+        f'<polyline points="{last_seg}" fill="none" stroke="{color}" stroke-width="2.4" '
         f'stroke-linecap="round" stroke-linejoin="round"/>'
         f'{dots}'
         f'</svg>'
     )
 
-def _get_index_spark_svg(key: str, mo: dict) -> str:
-    """코스피/코스닥 카드용 추세 미니 차트 SVG를 만든다. 실패하면 빈 문자열을 반환해서
-    카드는 지금처럼(차트 없이) 정상 표시된다 — 이 함수 자체가 예외를 밖으로 던지지 않는다.
-    코드(pykrx 지수코드/야후 티커)는 get_market_overview()의 _kr_index_last_two_closes()
-    호출과 동일한 값을 그대로 재사용한다."""
-    code_map = {"코스피": ("1001", "^KS11"), "코스닥": ("2001", "^KQ11")}
-    codes = code_map.get(key)
-    if not codes:
-        return ""
+def _get_index_spark_svg(key: str, mo: dict, size: tuple[int, int] = (96, 36)) -> str:
+    """시황 카드용 추세 미니 차트 SVG를 만든다. 실패하면 빈 문자열을 반환해서 카드는
+    지금처럼(차트 없이) 정상 표시된다 — 이 함수 자체가 예외를 밖으로 던지지 않는다.
+    코스피/코스닥은 pykrx 우선(_KRX_SPARK_CODES), 나머지 지표는 get_market_overview()가
+    쓰는 것과 동일한 야후 티커(_YF_SPARK_TICKERS)를 그대로 재사용한다."""
     try:
-        values = get_index_recent_closes(*codes)
+        if key in _KRX_SPARK_CODES:
+            values = get_index_recent_closes(*_KRX_SPARK_CODES[key])
+        elif key in _YF_SPARK_TICKERS:
+            values = get_yf_recent_closes(_YF_SPARK_TICKERS[key])
+        else:
+            return ""
         if len(values) < 2:
             return ""
         v = mo.get(key) or {}
         pct = v.get("등락률")
         up = (pct or 0) >= 0
-        return _daily_trend_svg(values, up)
+        return _daily_trend_svg(values, up, width=size[0], height=size[1])
     except Exception as e:
         logging.warning("시황 카드 추세 차트 생성 실패 [%s]: %s", key, e)
         return ""
@@ -3405,16 +3453,17 @@ def render_daily_report(holdings_df: pd.DataFrame):
 
     st.markdown("##### 🌐 국내·해외 시황")
 
-    def _card_grid(keys, cols_per_row, spark=False):
+    def _card_grid(keys, cols_per_row, spark=False, spark_size=(76, 30)):
         cols = st.columns(cols_per_row)
         i = 0
         for key in keys:
             v = mo.get(key)
             if not v or v.get("값") is None:
                 continue
-            # [2026-08-27 추가] spark=True인 카드(코스피/코스닥)만 오른쪽에 분봉
-            # 미니 차트를 붙인다. 나머지 지표는 spark_svg=""라 기존과 완전히 동일.
-            spark_svg = _get_index_spark_svg(key, mo) if spark else ""
+            # [2026-08-27 확장] 처음엔 코스피/코스닥에만 붙였다가, 나머지 카드(해외증시·
+            # 환율·원자재·금리)도 전부 야후 소스로 이미 조회 중이라 새 리스크 없이 확장함
+            # (Jone 요청). 칸이 적어 카드가 좁은 3~4열 그룹은 차트를 더 작게 그린다.
+            spark_svg = _get_index_spark_svg(key, mo, size=spark_size) if spark else ""
             with cols[i % cols_per_row]:
                 st.markdown(
                     _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률"), spark_svg),
@@ -3423,11 +3472,11 @@ def render_daily_report(holdings_df: pd.DataFrame):
             i += 1
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    _card_grid(["코스피", "코스닥"], 2, spark=True)
-    _card_grid(["다우존스", "S&P500", "나스닥", "필라델피아반도체"], 4)
-    _card_grid(["니케이225", "상하이종합", "항셍지수", "VIX"], 4)
-    _card_grid(["원달러환율", "달러인덱스", "WTI"], 3)
-    _card_grid(["브렌트유", "국제금", "미국채10년"], 3)
+    _card_grid(["코스피", "코스닥"], 2, spark=True, spark_size=(120, 42))
+    _card_grid(["다우존스", "S&P500", "나스닥", "필라델피아반도체"], 4, spark=True, spark_size=(64, 28))
+    _card_grid(["니케이225", "상하이종합", "항셍지수", "VIX"], 4, spark=True, spark_size=(64, 28))
+    _card_grid(["원달러환율", "달러인덱스", "WTI"], 3, spark=True, spark_size=(78, 30))
+    _card_grid(["브렌트유", "국제금", "미국채10년"], 3, spark=True, spark_size=(78, 30))
 
     # ── 코스피/코스닥 수급 ──
     flow_rows = []
