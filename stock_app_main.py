@@ -3302,27 +3302,30 @@ def _change_badge_html(pct) -> str:
     )
 
 def _metric_card_html(label: str, value: str, pct=None, spark_svg: str = "") -> str:
-    """시황 카드 하나(라벨 + 값 + 등락 배지, 선택적으로 오른쪽에 분봉 스파크라인) HTML.
-    [2026-08-27 추가] spark_svg가 있으면 카드를 좌우 flex 레이아웃으로 바꿔 오른쪽 빈
-    여백에 미니 차트를 넣는다. 빈 문자열이면(기본값) 기존과 완전히 동일하게 보인다 —
-    코스피·코스닥 외 나머지 지표 카드들은 이번 변경의 영향을 받지 않는다."""
-    left = (
-        "<div style='min-width:0;'>"
-        f"<div style='font-size:12px;color:var(--text-secondary,#888);margin-bottom:4px;'>{label}</div>"
-        f"<div style='font-size:20px;font-weight:600;white-space:nowrap;'>{value}</div>"
+    """시황 카드 하나(라벨 + 값 + 등락 배지, 선택적으로 아래에 추세 미니 차트) HTML.
+    [2026-08-27, 정사각형 레이아웃으로 재작업] 처음엔 라벨/값을 왼쪽에 두고 차트를
+    오른쪽 여백에 붙이는 좌우 배치였는데, Jone이 증권앱 캡처처럼 정사각형에 가까운
+    카드로 한 줄에 더 많이 배치하고 싶다고 해서 세로 배치(라벨→값→배지→차트가 카드
+    전체 폭)로 바꿨다. 이렇게 하면 카드 폭을 줄여도(한 줄에 카드 수를 늘려도) 차트가
+    항상 카드 폭 전체를 쓰면서 자연스럽게 정사각형에 가까운 비율이 된다.
+    spark_svg가 빈 문자열이면(기본값) 차트 영역 없이 기존처럼 라벨/값/배지만 나온다."""
+    top = (
+        f"<div style='font-size:11px;color:var(--text-secondary,#888);margin-bottom:3px;"
+        f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{label}</div>"
+        f"<div style='font-size:18px;font-weight:700;white-space:nowrap;overflow:hidden;"
+        f"text-overflow:ellipsis;'>{value}</div>"
         f"{_change_badge_html(pct)}"
-        "</div>"
     )
     if spark_svg:
         return (
-            "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:12px;"
-            "display:flex;align-items:center;justify-content:space-between;gap:8px;'>"
-            f"{left}{spark_svg}"
+            "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:10px 12px;'>"
+            f"{top}"
+            f"<div style='margin-top:8px;width:100%;'>{spark_svg}</div>"
             "</div>"
         )
     return (
         "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:12px;'>"
-        f"{left}"
+        f"{top}"
         "</div>"
     )
 
@@ -3331,11 +3334,18 @@ def _metric_card_html(label: str, value: str, pct=None, spark_svg: str = "") -> 
 # 마지막 구간(전일→오늘)만 등락 색으로 강조하고 나머지는 회색으로 그려서, "오늘 하루
 # 장중 흐름"이 아니라 "최근 며칠 추세 속의 오늘"이라는 느낌을 준다(Jone에게 보여드린
 # 비교 목업의 옵션② 방식과 동일한 구성 — 점선은 전일/오늘 경계).
-def _daily_trend_svg(values: list[float], up: bool, width: int = 96, height: int = 36) -> str:
+# [2026-08-27, 정사각형 레이아웃으로 재작업] SVG의 width는 항상 "100%"로 그려서 카드
+# 폭에 맞춰 자동으로 늘어나게 하고(preserveAspectRatio="none"), 좌표 계산에만 쓰는
+# 내부 기준 폭(_VB_WIDTH)은 임의의 상수로 고정한다 — 실제 렌더링 크기와 무관.
+_VB_WIDTH = 200
+
+def _daily_trend_svg(values: list[float], up: bool, height: int = 40) -> str:
     """최근 N거래일 종가 리스트(오래된→최신, 마지막=오늘)로 미니 추세선 SVG를 만든다.
     2개 미만이면 빈 문자열 반환. up: 등락 방향(등락률 ≥ 0이면 True) — 마지막 구간·오늘
     점·영역 채우기 색상을 기존 등락 배지와 통일(상승 #e0635e/하락 #5b9bd8,
-    _UP_COLOR/_DOWN_COLOR 재사용).
+    _UP_COLOR/_DOWN_COLOR 재사용). 폭은 항상 카드 전체를 채운다(width="100%") — 카드가
+    정사각형에 가깝게 배치되도록(2026-08-27, Jone 요청) 한 줄에 카드를 몇 개 두든
+    차트가 자동으로 그 폭에 맞춰진다.
     [2026-08-27 재작업] Jone 피드백("조잡하다")을 반영해 처음 버전보다 확실히 진하게 —
     전일 종가 기준 점선(가로)·오늘 경계 점선(세로)·오늘 구간 아래 반투명 색 채우기·더 굵은
     선·더 큰 오늘 점을 추가해 시안(비교 목업 옵션②)에 더 가깝게 맞췄다."""
@@ -3345,7 +3355,8 @@ def _daily_trend_svg(values: list[float], up: bool, width: int = 96, height: int
     n = len(values)
     lo, hi = min(values), max(values)
     span = (hi - lo) or 1.0
-    pad_x, pad_y = 2, 5
+    width = _VB_WIDTH
+    pad_x, pad_y = 3, 5
 
     def _x(i):
         return pad_x + i * (width - 2 * pad_x) / (n - 1)
@@ -3362,27 +3373,27 @@ def _daily_trend_svg(values: list[float], up: bool, width: int = 96, height: int
     area_pts = f"{xs[n-2]:.1f},{ys[n-2]:.1f} {xs[n-1]:.1f},{ys[n-1]:.1f} {xs[n-1]:.1f},{height:.1f} {xs[n-2]:.1f},{height:.1f}"
 
     dots = "".join(
-        f'<circle cx="{xs[i]:.1f}" cy="{ys[i]:.1f}" r="1.6" fill="#9aa0aa"/>'
+        f'<circle cx="{xs[i]:.1f}" cy="{ys[i]:.1f}" r="1.8" fill="#9aa0aa"/>'
         for i in range(n - 1)
     )
-    dots += f'<circle cx="{xs[n-1]:.1f}" cy="{ys[n-1]:.1f}" r="3.2" fill="{color}"/>'
+    dots += f'<circle cx="{xs[n-1]:.1f}" cy="{ys[n-1]:.1f}" r="3.4" fill="{color}"/>'
     return (
-        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        f'style="flex-shrink:0;overflow:visible;">'
+        f'<svg width="100%" height="{height}" viewBox="0 0 {width} {height}" '
+        f'preserveAspectRatio="none" style="display:block;">'
         f'<line x1="0" y1="{prev_close_y:.1f}" x2="{width}" y2="{prev_close_y:.1f}" '
-        f'stroke="#8b9098" stroke-width="1" stroke-dasharray="2,2" opacity="0.55"/>'
+        f'stroke="#8b9098" stroke-width="1" stroke-dasharray="2,2" opacity="0.55" vector-effect="non-scaling-stroke"/>'
         f'<line x1="{boundary_x:.1f}" y1="0" x2="{boundary_x:.1f}" y2="{height}" '
-        f'stroke="#8b9098" stroke-width="1" stroke-dasharray="2,2" opacity="0.45"/>'
+        f'stroke="#8b9098" stroke-width="1" stroke-dasharray="2,2" opacity="0.45" vector-effect="non-scaling-stroke"/>'
         f'<polygon points="{area_pts}" fill="{color}" opacity="0.16"/>'
         f'<polyline points="{pts_past}" fill="none" stroke="#9aa0aa" stroke-width="1.8" '
-        f'stroke-linecap="round" stroke-linejoin="round"/>'
+        f'stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>'
         f'<polyline points="{last_seg}" fill="none" stroke="{color}" stroke-width="2.4" '
-        f'stroke-linecap="round" stroke-linejoin="round"/>'
+        f'stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>'
         f'{dots}'
         f'</svg>'
     )
 
-def _get_index_spark_svg(key: str, mo: dict, size: tuple[int, int] = (96, 36)) -> str:
+def _get_index_spark_svg(key: str, mo: dict, height: int = 40) -> str:
     """시황 카드용 추세 미니 차트 SVG를 만든다. 실패하면 빈 문자열을 반환해서 카드는
     지금처럼(차트 없이) 정상 표시된다 — 이 함수 자체가 예외를 밖으로 던지지 않는다.
     코스피/코스닥은 pykrx 우선(_KRX_SPARK_CODES), 나머지 지표는 get_market_overview()가
@@ -3399,7 +3410,7 @@ def _get_index_spark_svg(key: str, mo: dict, size: tuple[int, int] = (96, 36)) -
         v = mo.get(key) or {}
         pct = v.get("등락률")
         up = (pct or 0) >= 0
-        return _daily_trend_svg(values, up, width=size[0], height=size[1])
+        return _daily_trend_svg(values, up, height=height)
     except Exception as e:
         logging.warning("시황 카드 추세 차트 생성 실패 [%s]: %s", key, e)
         return ""
@@ -3453,17 +3464,30 @@ def render_daily_report(holdings_df: pd.DataFrame):
 
     st.markdown("##### 🌐 국내·해외 시황")
 
-    def _card_grid(keys, cols_per_row, spark=False, spark_size=(76, 30)):
+    # [2026-08-27, 정사각형 레이아웃으로 재작업] 처음엔 코스피/코스닥은 2열(큰 카드),
+    # 나머지는 3~4열로 그룹을 나눠서 그렸는데, Jone이 증권앱 캡처처럼 카드를 정사각형에
+    # 가깝게 줄이고 한 줄에 더 많이 배치하고 싶다고 해서, 그룹 구분 없이 표시 순서
+    # 그대로 하나의 그리드에 동일한 크기로 늘어놓는 방식으로 바꿨다. 카드가 세로 배치
+    # (라벨→값→배지→차트, 차트는 항상 카드 폭 100%)라 열 수를 늘려도 각 카드가
+    # 자연스럽게 정사각형에 가까운 비율을 유지한다.
+    ALL_MARKET_KEYS = [
+        "코스피", "코스닥",
+        "다우존스", "S&P500", "나스닥", "필라델피아반도체",
+        "니케이225", "상하이종합", "항셍지수", "VIX",
+        "원달러환율", "달러인덱스", "WTI", "브렌트유", "국제금", "미국채10년",
+    ]
+    MARKET_CARDS_PER_ROW = 4
+
+    def _card_grid(keys, cols_per_row, spark=True, spark_height=40):
         cols = st.columns(cols_per_row)
         i = 0
         for key in keys:
             v = mo.get(key)
             if not v or v.get("값") is None:
                 continue
-            # [2026-08-27 확장] 처음엔 코스피/코스닥에만 붙였다가, 나머지 카드(해외증시·
-            # 환율·원자재·금리)도 전부 야후 소스로 이미 조회 중이라 새 리스크 없이 확장함
-            # (Jone 요청). 칸이 적어 카드가 좁은 3~4열 그룹은 차트를 더 작게 그린다.
-            spark_svg = _get_index_spark_svg(key, mo, size=spark_size) if spark else ""
+            # [2026-08-27 확장] 코스피/코스닥뿐 아니라 나머지 카드(해외증시·환율·원자재·
+            # 금리)도 전부 야후 소스로 이미 조회 중이라 새 리스크 없이 전부 확장함(Jone 요청).
+            spark_svg = _get_index_spark_svg(key, mo, height=spark_height) if spark else ""
             with cols[i % cols_per_row]:
                 st.markdown(
                     _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률"), spark_svg),
@@ -3472,11 +3496,7 @@ def render_daily_report(holdings_df: pd.DataFrame):
             i += 1
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    _card_grid(["코스피", "코스닥"], 2, spark=True, spark_size=(120, 42))
-    _card_grid(["다우존스", "S&P500", "나스닥", "필라델피아반도체"], 4, spark=True, spark_size=(64, 28))
-    _card_grid(["니케이225", "상하이종합", "항셍지수", "VIX"], 4, spark=True, spark_size=(64, 28))
-    _card_grid(["원달러환율", "달러인덱스", "WTI"], 3, spark=True, spark_size=(78, 30))
-    _card_grid(["브렌트유", "국제금", "미국채10년"], 3, spark=True, spark_size=(78, 30))
+    _card_grid(ALL_MARKET_KEYS, MARKET_CARDS_PER_ROW)
 
     # ── 코스피/코스닥 수급 ──
     flow_rows = []
