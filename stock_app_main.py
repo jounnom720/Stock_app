@@ -53,10 +53,13 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.4"
+APP_VERSION = "v2.1.5"
 # [2026-08-19] v2.1.3 → v2.1.4: 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 추가.
 # 기존엔 장 시작 전(09:00 이전)만 안내했는데, 같은 원인(NXT 미반영)이 장 마감 후에도
 # 재현되는 게 Jone 실측(16:52, ETF는 일치·개별주식만 벌어짐)으로 확인되어 확장함.
+# [2026-08-27] v2.1.4 → v2.1.5: 시황 카드 추세 미니 차트(16개 지표 확장) + 정사각형 카드
+# 6열 레이아웃 + 앱 정보 팝업의 업데이트 내역(시트 기반) + 관리자 메뉴 업데이트 안내 이메일
+# 발송 기능 추가. 08-19 이후 여러 기능이 추가됐는데도 버전 번호가 안 올라가 있던 것도 함께 정리.
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -815,6 +818,94 @@ def load_accounts_df() -> pd.DataFrame:
         raise RuntimeError("화이트리스트 시트에 연결하지 못했습니다 (서비스 계정 인증 실패).")
     ws = _call_with_retry(spreadsheet.worksheet, "사용자계정")
     return pd.DataFrame(_call_with_retry(ws.get_all_records))
+
+@st.cache_data(ttl=1800)
+def get_version_history() -> list:
+    """화이트리스트 시트(`User management`) 안의 '버전정보' 탭에서 앱 업데이트 내역을 읽어온다.
+    같은 파일 안에 탭만 추가한 것이라 기존 서비스 계정 권한 그대로 접근 가능 — 새 시트를
+    따로 만들거나 공유 설정을 추가할 필요 없음.
+
+    [2026-08-27 신규] 업데이트 내역을 코드에 하드코딩하지 않고 시트에서 읽어오는 방식으로 도입.
+    관리자가 '버전정보' 탭에 행(버전/날짜/내용)만 추가하면 앱 재배포 없이 바로 반영된다
+    (캐시는 30분, 급하면 '데이터 관리' 탭의 '전체 캐시 초기화' 버튼으로 즉시 반영 가능).
+
+    '버전정보' 탭이 아직 없거나(WorksheetNotFound) 조회에 실패해도 화면에 에러를 띄우지
+    않고 조용히 빈 리스트를 반환한다 — 업데이트 내역은 부가 정보일 뿐, 이게 실패했다고
+    로그인 등 핵심 기능에 영향을 주면 안 되기 때문."""
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return []
+        ws = _call_with_retry(spreadsheet.worksheet, "버전정보")
+        records = _call_with_retry(ws.get_all_records)
+        return [r for r in records if str(r.get("버전", "")).strip() or str(r.get("내용", "")).strip()]
+    except gspread.exceptions.WorksheetNotFound:
+        return []
+    except Exception as e:
+        logging.warning("업데이트 내역(버전정보 시트) 조회 실패: %s", e)
+        return []
+
+def add_version_entry(version: str, when: str, content: str):
+    """관리자 메뉴에서 입력한 업데이트 내역 한 줄을 '버전정보' 시트에 추가한다.
+    [2026-08-27 신규] Jone 피드백 반영 — 업데이트 내용을 구글시트에 직접 들어가서 탭까지
+    만들고 입력하게 하는 대신, 이미 쓰고 있는 관리자 메뉴 안에서 한 번에 처리하도록 함.
+    '버전정보' 탭이 아직 없으면 자동으로 만들고 헤더(버전/날짜/내용)까지 넣어준다 —
+    구글시트를 직접 열어 탭을 새로 만드는 작업 자체가 필요 없다.
+    반환값: (성공 여부, 안내 메시지)"""
+    version = str(version).strip()
+    when = str(when).strip()
+    content = str(content).strip()
+    if not version or not content:
+        return False, "버전과 내용은 비워둘 수 없습니다."
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False, "화이트리스트 시트에 연결하지 못했습니다 (서비스 계정 인증 실패)."
+        try:
+            ws = _call_with_retry(spreadsheet.worksheet, "버전정보")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title="버전정보", rows=200, cols=3)
+            _call_with_retry(ws.append_row, ["버전", "날짜", "내용"])
+        _call_with_retry(ws.append_row, [version, when, content])
+        get_version_history.clear()
+        return True, "업데이트 내역이 저장되었습니다."
+    except Exception as e:
+        logging.warning("업데이트 내역 저장 실패: %s", e)
+        return False, f"저장 실패: {type(e).__name__} - {e}"
+
+def add_version_entries_bulk(raw_text: str):
+    """[2026-08-27 신규] 과거 업데이트 내역을 한 번에 채워 넣을 때 쓰는 일괄 추가 함수.
+    한 줄에 '버전 | 날짜 | 내용' 형식으로 여러 줄을 입력받아 한 번의 시트 쓰기로 전부 저장한다
+    (건별로 버튼을 여러 번 누르지 않아도 되도록). 한 줄이라도 형식이 잘못되면 아무것도
+    저장하지 않고(부분 저장으로 인한 뒤죽박죽 방지) 어느 줄이 문제인지 알려준다."""
+    rows = []
+    for i, line in enumerate(raw_text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3 or not parts[0] or not parts[2]:
+            return False, f"{i}번째 줄 형식 오류 (버전 | 날짜 | 내용 형식이어야 함): {line!r}"
+        version, when = parts[0], parts[1]
+        content = "|".join(parts[2:]).strip()
+        rows.append([version, when, content])
+    if not rows:
+        return False, "추가할 내용이 없습니다."
+    try:
+        spreadsheet = get_accounts_spreadsheet()
+        if spreadsheet is None:
+            return False, "화이트리스트 시트에 연결하지 못했습니다 (서비스 계정 인증 실패)."
+        try:
+            ws = _call_with_retry(spreadsheet.worksheet, "버전정보")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title="버전정보", rows=200, cols=3)
+            _call_with_retry(ws.append_row, ["버전", "날짜", "내용"])
+        _call_with_retry(ws.append_rows, rows)
+        get_version_history.clear()
+        return True, f"{len(rows)}건 저장되었습니다."
+    except Exception as e:
+        logging.warning("업데이트 내역 일괄 저장 실패: %s", e)
+        return False, f"저장 실패: {type(e).__name__} - {e}"
 
 def get_whitelist_status(email: str):
     """화이트리스트 시트에서 이메일로 계정 정보를 조회. 없으면 None, 있으면 해당 행(Series) 반환.
@@ -3100,6 +3191,56 @@ def render_admin_panel():
                         st.rerun()
 
                     st.divider()
+                    # [2026-08-27 추가] 업데이트 내역 관리 — "ℹ️ 앱 정보" 팝업(show_developer_info)에
+                    # 표시되는 업데이트 내역을 여기서 추가한다. 구글시트를 직접 열어 '버전정보' 탭을
+                    # 만들고 입력할 필요 없이, 이미 쓰고 있는 관리자 메뉴 안에서 한 번에 처리하도록
+                    # 도입함(Jone 피드백: "업데이트 내용을 내가 직접 입력하는거야?" → 시트 직접 편집
+                    # 대신 관리자 메뉴 폼으로 전환).
+                    st.caption("사용자에게 보여줄 업데이트 내역을 추가합니다 ('ℹ️ 앱 정보' 팝업에 표시됨).")
+                    with st.expander("📝 업데이트 내역 관리", expanded=False):
+                        existing_history = get_version_history()
+                        if existing_history:
+                            st.dataframe(pd.DataFrame(existing_history), width="stretch", hide_index=True)
+                            st.caption(f"총 {len(existing_history)}건 등록됨 (오래된 순)")
+                        else:
+                            st.caption("아직 등록된 업데이트 내역이 없습니다.")
+
+                        v_col1, v_col2 = st.columns([1, 1])
+                        with v_col1:
+                            new_version = st.text_input("버전", value=APP_VERSION, key="admin_version_input")
+                        with v_col2:
+                            new_date = st.text_input(
+                                "날짜", value=str(date.today()), key="admin_version_date",
+                                help="형식 자유 (예: 2026-08-27)",
+                            )
+                        new_content = st.text_area(
+                            "내용", key="admin_version_content", height=100,
+                            placeholder="예: 국내·해외 주요 시황 16개 지표에 추세 미니 차트 추가, 카드 레이아웃 6열로 개선",
+                        )
+                        if st.button("➕ 업데이트 내역 추가", key="admin_version_add", width="stretch"):
+                            ok, msg = add_version_entry(new_version, new_date, new_content)
+                            (st.success if ok else st.error)(msg)
+                            if ok:
+                                st.rerun()
+
+                        st.markdown("---")
+                        st.caption(
+                            "과거 업데이트 내역처럼 여러 건을 한 번에 넣고 싶으면 아래에 한 줄당 "
+                            "'버전 | 날짜 | 내용' 형식으로 입력하세요."
+                        )
+                        bulk_text = st.text_area(
+                            "여러 건 한 번에 추가",
+                            key="admin_version_bulk",
+                            height=140,
+                            placeholder="v2.1 | 2026-08-12 | \"오늘의 리포트\" 메뉴 신규 추가\nv2.1.1 | 2026-08-19 | 관리자 메뉴 위치 개선",
+                        )
+                        if st.button("📥 여러 건 한 번에 추가", key="admin_version_bulk_add", width="stretch"):
+                            ok, msg = add_version_entries_bulk(bulk_text)
+                            (st.success if ok else st.error)(msg)
+                            if ok:
+                                st.rerun()
+
+                    st.divider()
                     # [2026-08-12 추가] 일일 시황 브리핑 기능 개발 중 — 실제 값이 제대로
                     # 나오는지 배포 환경에서 직접 확인할 수 있도록 임시로 넣어둔 미리보기.
                     # 나중에 시황 섹션이 정식 화면(오늘의 브리핑 탭)으로 옮겨가면 이 버튼은
@@ -3271,14 +3412,48 @@ def render_admin_panel():
 
 
 # ============================================================
-# 개발자 정보 (모달 팝업)
+# 개발자 정보 (모달 팝업) / 업데이트 내역
 # ============================================================
+def _render_version_history_list():
+    """'버전정보' 시트 내용을 최신순으로 렌더링하는 공용 헬퍼.
+    [2026-08-27] 화이트리스트 시트의 '버전정보' 탭에서 읽어옴. 시트에는 오래된 항목이
+    위쪽에, 최신 항목이 아래쪽에 쌓인다고 가정하고(관리자가 매번 새 행을 맨 아래에
+    추가하는 자연스러운 방식) 화면에는 최신이 위로 오도록 뒤집어서 표시.
+    show_developer_info()의 "앱 정보" 팝업과 "데이터 관리" 탭의 "🆕 업데이트 내역 보기"
+    팝업이 이 함수를 함께 사용한다(같은 내용을 두 군데서 보여줌 — Jone 피드백: 이메일
+    발송보다 앱에서 언제든 확인할 수 있는 방식을 선호, 대시보드 하단에 묻혀 있는 "앱 정보"
+    버튼 하나보다는 자주 드나드는 "데이터 관리" 탭에도 노출하는 게 발견하기 쉬움)."""
+    version_history = get_version_history()
+    if not version_history:
+        st.caption("아직 등록된 업데이트 내역이 없습니다.")
+        return
+    for row in reversed(version_history):
+        ver = str(row.get("버전", "")).strip()
+        when = str(row.get("날짜", "")).strip()
+        content = str(row.get("내용", "")).strip()
+        header = " · ".join(x for x in (ver, when) if x)
+        if header:
+            st.markdown(f"**{header}**")
+        if content:
+            st.caption(content)
+
 @st.dialog("앱 정보")
 def show_developer_info():
     st.markdown("**개발: H.W Jone**")
     st.markdown(f"**버전: {APP_VERSION}**")
     st.markdown("**문의: hwcho@me.com**")
     st.caption("버그 제보나 기능 제안은 위 이메일로 보내주세요.")
+    st.markdown("---")
+    st.markdown("**업데이트 내역**")
+    _render_version_history_list()
+
+@st.dialog("🆕 업데이트 내역")
+def show_version_history_dialog():
+    """[2026-08-27 신규] "데이터 관리" 탭에서 언제든 열어볼 수 있는 업데이트 내역 전용 팝업.
+    이메일 발송 대신 채택한 방식 — 이메일은 한 번 놓치면 다시 찾아보기 번거롭지만, 이건
+    사용자가 원할 때마다 "데이터 관리" 탭에서 바로 열어볼 수 있음."""
+    st.caption(f"현재 버전: {APP_VERSION}")
+    _render_version_history_list()
 
 
 # [2026-08-19] 오늘의 리포트 화면 전용 배지(등락률) HTML 생성 헬퍼.
@@ -3476,9 +3651,9 @@ def render_daily_report(holdings_df: pd.DataFrame):
         "니케이225", "상하이종합", "항셍지수", "VIX",
         "원달러환율", "달러인덱스", "WTI", "브렌트유", "국제금", "미국채10년",
     ]
-    MARKET_CARDS_PER_ROW = 4
+    MARKET_CARDS_PER_ROW = 6  # [2026-08-27] Jone 요청으로 4 → 6열로 변경 — 카드가 더 좁아지므로 차트 높이도 같이 줄임(아래 spark_height)
 
-    def _card_grid(keys, cols_per_row, spark=True, spark_height=40):
+    def _card_grid(keys, cols_per_row, spark=True, spark_height=32):
         cols = st.columns(cols_per_row)
         i = 0
         for key in keys:
@@ -5465,6 +5640,17 @@ def _render_cashlog_section(cashlog_df):
 # 탭6: 데이터 관리
 # ============================================================
 def render_data_mgmt(nonstock_df):
+    # [2026-08-27 신규] 업데이트 내역 보기 — Jone 요청: 이메일 발송보다 사용자가 원할 때
+    # 언제든 확인할 수 있는 방식이 낫다고 판단해, 자주 드나드는 이 탭 맨 위에 버튼으로 노출.
+    # ("ℹ️ 앱 정보" 팝업에도 같은 내용이 있지만, 그건 대시보드 맨 아래에 있어 눈에 덜 띔.)
+    ver_col1, ver_col2 = st.columns([3, 1])
+    with ver_col1:
+        st.caption(f"현재 버전: {APP_VERSION}")
+    with ver_col2:
+        if st.button("🆕 업데이트 내역", key="data_mgmt_version_history_btn", width="stretch"):
+            show_version_history_dialog()
+    st.markdown("---")
+
     st.markdown('<div class="section-title">비주식자산 현황 (TDF · 현금성자산)</div>', unsafe_allow_html=True)
     st.caption("💡 대시보드의 현금성자산 금액은 이 시트 기준입니다. 잔액 변경 시 비주식자산 시트를 업데이트하세요.")
 
