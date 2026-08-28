@@ -53,13 +53,18 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.5"
+APP_VERSION = "v2.1.6"
 # [2026-08-19] v2.1.3 → v2.1.4: 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 추가.
 # 기존엔 장 시작 전(09:00 이전)만 안내했는데, 같은 원인(NXT 미반영)이 장 마감 후에도
 # 재현되는 게 Jone 실측(16:52, ETF는 일치·개별주식만 벌어짐)으로 확인되어 확장함.
 # [2026-08-27] v2.1.4 → v2.1.5: 시황 카드 추세 미니 차트(16개 지표 확장) + 정사각형 카드
-# 6열 레이아웃 + 앱 정보 팝업의 업데이트 내역(시트 기반) + 관리자 메뉴 업데이트 안내 이메일
-# 발송 기능 추가. 08-19 이후 여러 기능이 추가됐는데도 버전 번호가 안 올라가 있던 것도 함께 정리.
+# 6열 레이아웃 + 앱 정보 팝업 및 "데이터 관리" 탭의 업데이트 내역(시트 기반) 안내 기능 추가.
+# 08-19 이후 여러 기능이 추가됐는데도 버전 번호가 안 올라가 있던 것도 함께 정리.
+# (이메일 자동 발송 방식은 검토 후 철회 — 앱 내 상시 확인 버튼 방식으로 최종 결정됨)
+# [2026-08-28] v2.1.5 → v2.1.6: "데이터 관리" 탭에 사용안내서(PDF)를 새 탭에서 바로 열람할
+# 수 있는 버튼 추가. GitHub 저장소의 고정 경로(USER_GUIDE_URL)를 가리키므로, 이후 안내서
+# 내용이 바뀌어도 저장소의 같은 파일만 새로 올리면 되고 이 코드는 다시 손댈 필요 없음.
+USER_GUIDE_URL = "https://raw.githubusercontent.com/jounnom720/Stock_app/main/user_guide.pdf"
 
 st.set_page_config(
     page_title=f"통합자산관리 시스템 {APP_VERSION}",
@@ -5643,12 +5648,15 @@ def render_data_mgmt(nonstock_df):
     # [2026-08-27 신규] 업데이트 내역 보기 — Jone 요청: 이메일 발송보다 사용자가 원할 때
     # 언제든 확인할 수 있는 방식이 낫다고 판단해, 자주 드나드는 이 탭 맨 위에 버튼으로 노출.
     # ("ℹ️ 앱 정보" 팝업에도 같은 내용이 있지만, 그건 대시보드 맨 아래에 있어 눈에 덜 띔.)
-    ver_col1, ver_col2 = st.columns([3, 1])
+    # [2026-08-28 신규] 같은 자리에 사용안내서 보기 버튼 추가 — 새 탭에서 PDF를 바로 열람.
+    ver_col1, ver_col2, ver_col3 = st.columns([3, 1, 1])
     with ver_col1:
         st.caption(f"현재 버전: {APP_VERSION}")
     with ver_col2:
         if st.button("🆕 업데이트 내역", key="data_mgmt_version_history_btn", width="stretch"):
             show_version_history_dialog()
+    with ver_col3:
+        st.link_button("📖 사용안내서", USER_GUIDE_URL, width="stretch")
     st.markdown("---")
 
     st.markdown('<div class="section-title">비주식자산 현황 (TDF · 현금성자산)</div>', unsafe_allow_html=True)
