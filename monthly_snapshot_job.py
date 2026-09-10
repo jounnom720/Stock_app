@@ -364,7 +364,20 @@ def save_monthly_snapshot(spreadsheet, yearmonth: str, principal, eval_amount) -
 def load_df(spreadsheet, sheet_name: str) -> pd.DataFrame:
     try:
         ws = spreadsheet.worksheet(sheet_name)
-        return pd.DataFrame(ws.get_all_records())
+        df = pd.DataFrame(ws.get_all_records())
+        # [2026-09-10 수정] Google Sheets가 "042660"처럼 숫자로만 된 종목코드 셀을
+        # 자동으로 숫자(int)로 인식해 앞자리 0을 지워버리는 문제(-> 42660)가 있었다.
+        # 그 결과 get_asset_ticker()가 ASSET_MASTER에서 종목을 못 찾고 "42660.KS" 같은
+        # 잘못된 티커를 yfinance에 넘겨 "No data found, symbol may be delisted" 오류가
+        # 발생했다(2026-08-31 월별 스냅샷 실행 로그에서 발견). stock_app_main.py의
+        # load_sheet()가 쓰는 것과 동일한 zfill(6) 정규화를 여기에도 적용해 원인을 없앤다.
+        # (영문/숫자 혼합 코드인 "0148J0" 같은 경우는 isdigit()이 False가 되어 원래
+        # 문자열을 그대로 쓰므로 영향받지 않는다.)
+        if "종목코드" in df.columns:
+            df["종목코드"] = df["종목코드"].apply(
+                lambda x: str(int(x)).zfill(6) if str(x).strip().isdigit() else str(x).strip()
+            )
+        return df
     except gspread.exceptions.WorksheetNotFound:
         return pd.DataFrame()
 
