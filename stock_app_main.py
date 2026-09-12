@@ -53,7 +53,7 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.6"
+APP_VERSION = "v2.1.7"
 # [2026-08-19] v2.1.3 → v2.1.4: 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 추가.
 # 기존엔 장 시작 전(09:00 이전)만 안내했는데, 같은 원인(NXT 미반영)이 장 마감 후에도
 # 재현되는 게 Jone 실측(16:52, ETF는 일치·개별주식만 벌어짐)으로 확인되어 확장함.
@@ -1468,24 +1468,26 @@ _KRX_PYKRX_CODE_TO_MARKET = {"1001": "kospi", "2001": "kosdaq"}
 def _krx_official_index_quote(market: str, bas_dd: str) -> tuple[list[dict] | None, dict | None, str | None]:
     """KRX 공식 Open API로 특정 기준일자(bas_dd, YYYYMMDD 문자열)의 지수 시세를 조회한다.
     반환값은 (OutBlock_1 리스트 또는 None, 원본 응답 전체(dict) 또는 None, 오류메시지 또는 None).
-    [2026-09-12 최초 배포 후 수정] 배포 직후 관리자 진단 버튼으로 실제 확인한 결과, 최근
-    15일 전 구간(당연히 거래일이 여럿 포함된 범위) 전체에서 OutBlock_1이 계속 빈 리스트로만
-    나오는 현상이 발견됐다. 이는 "그날 데이터가 아직 없다"는 정상 케이스로는 설명되지 않는
-    패턴이라(과거 거래일까지 전부 비어 나올 수는 없음), 요청 자체(파라미터 형식·인증 방식 등)가
-    잘못됐거나 KRX가 에러 메시지를 OutBlock_1이 아닌 다른 키에 담아 보내고 있는데 이를
-    그냥 빈 리스트로 삼켜버렸을 가능성이 높다고 보고, 원본 응답 전체를 함께 반환하도록
-    수정함 — 원인을 추측으로 고치지 않고 실제 응답을 관리자 화면에서 직접 눈으로 보고
-    확인하기 위함(이 프로젝트가 과거 네이버 분봉 API 등에서 추정만으로 코드를 고쳤다가
-    틀렸던 사례를 반복하지 않기 위한 조치 — 위 섹션 설명 참고)."""
+    [2026-09-12 최초 배포 후 수정 — 원인 확인 및 해결] 배포 직후 관리자 진단 버튼으로 확인한
+    결과, 최근 거래일(평일) 여러 날에 대해서도 계속 `{"OutBlock_1": []}`만 돌아오는 현상이
+    발견됨. 처음엔 "확실한 과거 거래일"로 7일 전 날짜를 골라 재확인했는데 이마저도 비어서
+    한 번 더 당황했지만, 알고 보니 오늘(2026-09-12)이 토요일이라 정확히 7일 전도 같은
+    요일(토요일)이 되는 우연 때문에 그 재확인 자체가 휴장일끼리 비교한 것이었음(주말 데이터가
+    없는 건 정상). 다만 원래 문제(15일 역순 탐색에도 평일이 여럿 포함된 범위 전체에서 계속
+    빈 응답)는 이것으로 설명되지 않아 요청 형식 자체를 의심, 실제 이 정확히 동일한 엔드포인트
+    (`data-dbg.krx.co.kr/svc/apis/idx/kospi_dd_trd`)를 쓰는 공개 예제(블로그 등)를 찾아 대조한
+    결과, **요청 방식이 POST+요청바디(data=)가 아니라 GET+쿼리스트링(params=)이어야 함**을
+    확인함 — KRX 서버가 POST 바디의 필드는 그냥 무시하고 "필터 없음"으로 처리해 매번 빈
+    결과만 반환했던 것으로 추정. 요청 방식을 GET+params로 수정."""
     try:
         auth_key = st.secrets["krx"]["auth_key"]
     except Exception:
         return None, None, "KRX 공식 API 인증키 미설정 (secrets.toml에 [krx] auth_key 없음)"
     try:
-        resp = requests.post(
+        resp = requests.get(
             _KRX_INDEX_ENDPOINTS[market],
             headers={"AUTH_KEY": auth_key},
-            data={"basDd": bas_dd},
+            params={"basDd": bas_dd},
             timeout=10,
         )
         resp.raise_for_status()
@@ -3433,22 +3435,31 @@ def render_admin_panel():
                             st.caption("⚠ 코스피/코스닥 수급 데이터를 가져오지 못했습니다 (다음 금융 API 응답 실패).")
 
                     st.divider()
-                    # [2026-09-12 추가, 같은 날 배포 직후 수정] KRX 공식 Open API(코스피/코스닥
-                    # 지수) 원본 응답 확인용. 처음엔 오늘 날짜 하나만 조회해서 "OutBlock_1이
-                    # 비었다"까지만 보여줬는데, Jone이 실제로 배포해 눌러본 결과 오늘뿐 아니라
-                    # _krx_official_last_two_closes()가 15일을 거슬러 올라가도 단 하루도 못
-                    # 찾는 것으로 확인됨 — 과거 거래일까지 전부 비어 나오는 건 "당일 데이터 미집계"
-                    # 로는 설명되지 않는 패턴이라, 요청 형식 자체가 잘못됐거나 에러 메시지가
-                    # OutBlock_1이 아닌 다른 키에 담겨오는데 무시하고 있었을 가능성이 큼.
-                    # 그래서 (1) 오늘 날짜뿐 아니라 확실한 과거 거래일(7일 전)도 같이 테스트하고,
-                    # (2) OutBlock_1이 비었을 때 원본 응답 전체(JSON)를 그대로 보여주도록 바꿔서
-                    # 실제 원인(인증키 오류 메시지 등)을 추측 없이 눈으로 바로 확인할 수 있게 함.
+                    # [2026-09-12 추가, 같은 날 배포 직후 두 차례 수정]
+                    # 1차 수정: 오늘 날짜만 조회해서 "OutBlock_1이 비었다"까지만 보여줬는데,
+                    # 실제 배포 확인 결과 15일 역순 탐색에도 하루도 못 찾는 것으로 나와, 확실한
+                    # 과거 거래일도 같이 테스트하고 원본 응답 전체를 보여주도록 바꿈.
+                    # 2차 수정(원인 확정): 그런데 "7일 전" 날짜로 비교했더니 이마저 비어서 다시
+                    # 확인해보니, 그날(2026-09-12)이 토요일이라 정확히 7일 전도 같은 요일(토요일)이
+                    # 되는 우연 때문에 재확인 자체가 휴장일끼리 비교한 것이었음(주말은 원래 데이터가
+                    # 없는 게 정상). 그래서 고정 일수(7일) 대신 주말을 건너뛰고 실제 평일을 찾아
+                    # 테스트하도록 수정 — 이 실수가 재발하지 않도록 함. (원래 발견됐던 문제 자체는
+                    # 평일이 여럿 포함된 15일 범위에서도 재현됐던 것이라 이걸로 설명되지 않았고,
+                    # 실제 원인은 요청 방식이 POST가 아니라 GET+쿼리스트링이어야 했던 것으로 확인·
+                    # 수정함 — 위 _krx_official_index_quote() 문서 참고.)
                     st.caption("KRX 공식 API(코스피/코스닥 지수)가 실제로 응답하는지, IDX_NM(지수명) 값이 예상과 맞는지 확인합니다 (개발 중 임시 기능).")
                     if st.button("🇰🇷 KRX 공식 API 원본 응답 보기", key="admin_krx_official_raw", width="stretch"):
-                        today_bas_dd = datetime.now(KST).strftime("%Y%m%d")
-                        past_bas_dd = (datetime.now(KST) - timedelta(days=7)).strftime("%Y%m%d")
+                        today = datetime.now(KST)
+                        today_bas_dd = today.strftime("%Y%m%d")
+                        # 오늘부터 거슬러 올라가며 첫 평일(월~금)을 찾는다 — 고정 일수(예: 7일)를
+                        # 빼면 오늘 요일에 따라 우연히 또 주말/공휴일에 걸릴 수 있어(실제로 겪은
+                        # 문제) 이렇게 요일을 직접 확인하는 방식으로 바꿈.
+                        past_day = today - timedelta(days=1)
+                        while past_day.weekday() >= 5:  # 5=토요일, 6=일요일
+                            past_day -= timedelta(days=1)
+                        past_bas_dd = past_day.strftime("%Y%m%d")
                         for market_key, market_label in (("kospi", "코스피"), ("kosdaq", "코스닥")):
-                            for label, bas_dd in ((f"오늘({today_bas_dd})", today_bas_dd), (f"7일 전({past_bas_dd}, 확실한 과거 거래일)", past_bas_dd)):
+                            for label, bas_dd in ((f"오늘({today_bas_dd})", today_bas_dd), (f"가장 최근 평일({past_bas_dd})", past_bas_dd)):
                                 st.markdown(f"**{market_label} — {label}** (`{_KRX_INDEX_ENDPOINTS[market_key]}`)")
                                 with st.spinner(f"{market_label} 원본 응답 조회 중..."):
                                     rows, raw_body, err = _krx_official_index_quote(market_key, bas_dd)
