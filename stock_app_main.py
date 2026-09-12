@@ -1423,18 +1423,137 @@ def _yf_last_two_closes(ticker: str, period_days: int = 12) -> tuple[float | Non
         logging.warning("시황 지표 조회 실패 [%s]: %s", ticker, e)
     return None, None
 
+# ============================================================
+# 코스피/코스닥 지수 — KRX 공식 Open API (2026-09-12 추가)
+# ============================================================
+# [배경] 그동안 코스피/코스닥 지수는 pykrx 우선 → 실패 시 야후 파이낸스 대체 순서로만
+# 조회해왔다(바로 아래 _kr_index_last_two_closes, 2026-08-12 추가). pykrx의 지수 조회
+# 함수가 KRX 웹사이트 구조 변경으로 깨진 뒤로는 사실상 계속 야후 값만 쓰고 있던 상태였다.
+# Jone이 openapi.krx.co.kr에서 "KOSPI 시리즈 일별시세정보"·"KOSDAQ 시리즈 일별시세정보"
+# 서비스(무료, 인증키 발급일로부터 1년 유효, 10,000회/일 한도 — "지수" 카테고리 소속.
+# "유가증권/코스닥 일별매매정보"는 개별 종목용이라 다른 서비스이니 혼동 주의)를
+# 2026-09-12에 신청·승인받아, 원천 데이터인 이 공식 API를 최우선으로 쓰도록 전환한다.
+#
+# [API 방식의 제약] 종목별 매매정보 서비스와 달리 이 두 서비스는 특정 기준일자(basDd,
+# YYYYMMDD) "하루치"만 반환하는 방식이라(날짜 범위 조회 불가), pykrx/야후처럼 "최근 N일"을
+# 한 번에 못 받아온다. 그래서 오늘부터 하루씩 거슬러 올라가며 호출해서, 원하는 대표지수가
+# 실제로 들어있는 가장 최근 영업일 2개를 모을 때까지 반복하는 방식으로 구현한다(주말·
+# 공휴일이 겹쳐도 최대 15일까지 거슬러 올라가면 설·추석 연휴까지 충분히 커버됨).
+# get_market_overview() 자체가 1시간 캐시(ttl=3600)이므로, 이 반복 호출로 인한
+# 일일 호출량 부담은 무시할 수 있는 수준(하루 최대 몇십 회 수준, 한도는 10,000회).
+#
+# [필요 설정] secrets.toml에 아래 섹션이 없으면 이 API는 조용히 건너뛰고 곧바로 기존
+# pykrx→야후 순서로 자동 대체된다(앱이 죽지 않음 — 아래 _kr_index_last_two_closes 참고):
+#   [krx]
+#   auth_key = "openapi.krx.co.kr에서 발급받은 인증키"
+#
+# [지수명 관련 불확실성] OutBlock_1에는 코스피/코스닥 대표지수뿐 아니라 코스피200·
+# 코스피100 등 시리즈 내 여러 지수가 한 번에 담겨 나온다(계열 전체를 반환하는 서비스라서).
+# 정확한 대표지수의 IDX_NM 문자열이 실제로 "코스피"인지 다른 표기인지는 화면 캡처만으로는
+# 확정할 수 없었다(이 프로젝트가 과거 네이버 분봉 API 등에서 추정만으로 코드를 먼저 짰다가
+# 틀렸던 사례를 반복하지 않기 위해, 후보 이름 목록을 순서대로 시도하는 방어적 방식을 씀).
+# 관리자 "시스템" 탭에 이 실제 응답(IDX_NM 목록 포함)을 확인할 수 있는 미리보기 버튼을
+# 추가해뒀으니(아래 "🇰🇷 KRX 공식 API 원본 응답 보기"), 배포 후 실제 값으로 후보 목록이
+# 맞는지 반드시 확인할 것 — 틀렸다면 이 목록만 고치면 된다.
+_KRX_INDEX_ENDPOINTS = {
+    "kospi": "https://data-dbg.krx.co.kr/svc/apis/idx/kospi_dd_trd",
+    "kosdaq": "https://data-dbg.krx.co.kr/svc/apis/idx/kosdaq_dd_trd",
+}
+_KRX_INDEX_NAME_CANDIDATES = {
+    "kospi": ["코스피", "코스피지수"],
+    "kosdaq": ["코스닥", "코스닥지수", "코스닥종합지수"],
+}
+_KRX_PYKRX_CODE_TO_MARKET = {"1001": "kospi", "2001": "kosdaq"}
+
+def _krx_official_index_quote(market: str, bas_dd: str) -> tuple[list[dict] | None, str | None]:
+    """KRX 공식 Open API로 특정 기준일자(bas_dd, YYYYMMDD 문자열)의 지수 시세 원본
+    목록(OutBlock_1)을 반환한다. 그날 데이터가 없으면(주말·공휴일 등) 빈 리스트를,
+    인증키 미설정이나 통신 실패 등 진짜 오류면 (None, 오류메시지)를 반환한다."""
+    try:
+        auth_key = st.secrets["krx"]["auth_key"]
+    except Exception:
+        return None, "KRX 공식 API 인증키 미설정 (secrets.toml에 [krx] auth_key 없음)"
+    try:
+        resp = requests.post(
+            _KRX_INDEX_ENDPOINTS[market],
+            headers={"AUTH_KEY": auth_key},
+            data={"basDd": bas_dd},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("OutBlock_1", []), None
+    except Exception as e:
+        return None, str(e)
+
+def _krx_official_last_two_closes(market: str) -> tuple[float | None, float | None, str | None]:
+    """KRX 공식 Open API에서 코스피/코스닥 대표지수의 최근 종가 2개를 가져온다.
+    [2026-09-12 추가] 하루 단위 조회만 지원하는 API라, 오늘부터 하루씩 거슬러 올라가며
+    호출해 원하는 대표지수가 실제로 들어있는 최근 영업일 2개를 모은다(위 섹션 설명 참고).
+    성공하면 (오늘값, 전일값, None), 실패하면 (None, None, 진단용 오류메시지)."""
+    candidates = _KRX_INDEX_NAME_CANDIDATES[market]
+    closes: list[float] = []
+    matched_name: str | None = None
+    seen_names: set[str] = set()
+    day = datetime.now(KST)
+    for _ in range(15):  # 최대 15일 역순 탐색(설·추석 연휴까지 커버)
+        bas_dd = day.strftime("%Y%m%d")
+        rows, err = _krx_official_index_quote(market, bas_dd)
+        if rows is None:
+            return None, None, f"KRX 공식 API 조회 실패: {err}"
+        for row in rows:
+            seen_names.add(row.get("IDX_NM", ""))
+        if matched_name is None:
+            for name in candidates:
+                if any(row.get("IDX_NM") == name for row in rows):
+                    matched_name = name
+                    break
+        if matched_name is not None:
+            row = next((r for r in rows if r.get("IDX_NM") == matched_name), None)
+            if row is not None:
+                try:
+                    closes.append(float(str(row["CLSPRC_IDX"]).replace(",", "")))
+                except (KeyError, ValueError):
+                    pass
+        if len(closes) >= 2:
+            return closes[0], closes[1], None
+        day -= timedelta(days=1)
+    if matched_name is None:
+        return None, None, (
+            f"후보 지수명 {candidates} 중 어느 것도 15일 내 응답에서 못 찾음 — "
+            f"실제 IDX_NM 목록 예시: {sorted(n for n in seen_names if n)[:20]}"
+        )
+    return None, None, f"'{matched_name}' 지수를 15일 내 2개 미만({len(closes)}개)만 찾음"
+
 def _kr_index_last_two_closes(pykrx_code: str, yf_fallback_ticker: str, from_date: str, today: str) -> tuple[float | None, float | None, str | None]:
-    """코스피·코스닥 같은 국내 지수의 최근 종가 2개를 가져온다. pykrx를 먼저 시도하고
-    (원천 데이터라 더 신뢰도가 높음), 실패하면 야후 파이낸스로 자동 전환한다.
-    [2026-08-12 추가] pykrx의 지수 조회 함수(get_index_ohlcv_by_date)가 KRX 웹사이트
-    구조 변경으로 KeyError('지수명')를 내며 깨진 상태인 게 실제로 확인됐다(사용자 확인).
-    나중에 pykrx 쪽이 고쳐지면 자동으로 다시 pykrx 값을 쓰게 되고, 그전까지는 야후의
-    코스피/코스닥 지수 티커(^KS11/^KQ11)로 대체한다.
-    반환값 세 번째 항목은 실패 시 진단용 오류 메시지(성공하면 None)."""
+    """코스피·코스닥 같은 국내 지수의 최근 종가 2개를 가져온다.
+    [2026-09-12 수정] 우선순위를 KRX 공식 Open API → pykrx → 야후 파이낸스 순으로
+    변경함(기존엔 pykrx → 야후뿐이었음). 공식 API가 원천 데이터라 가장 신뢰도가 높고,
+    인증키 미설정이나 API 실패 시에는 기존 방식(pykrx→야후)으로 조용히 자동 대체되므로
+    이 변경으로 새로 생기는 실패 위험은 없음. 관련 배경은 바로 위 "KRX 공식 Open API"
+    섹션 참고.
+    [2026-08-12 추가 — 기존 로직] pykrx의 지수 조회 함수(get_index_ohlcv_by_date)가
+    KRX 웹사이트 구조 변경으로 KeyError('지수명')를 내며 깨진 상태인 게 실제로 확인됐다
+    (사용자 확인). 나중에 pykrx 쪽이 고쳐지면 자동으로 다시 pykrx 값을 쓰게 되고, 그전
+    까지는 야후의 코스피/코스닥 지수 티커(^KS11/^KQ11)로 대체한다.
+    반환값 세 번째 항목은 실패 시 진단용 오류 메시지(완전 성공하면 None, 대체 소스
+    사용 시에는 그 사실을 알리는 안내 메시지)."""
+    market = _KRX_PYKRX_CODE_TO_MARKET.get(pykrx_code)
+    if market is not None:
+        cur, prev, krx_err = _krx_official_last_two_closes(market)
+        if cur is not None:
+            return cur, prev, None
+        official_error = krx_err
+    else:
+        official_error = "알 수 없는 지수 코드(공식 API 매핑 없음)"
+
     try:
         df = krx_stock.get_index_ohlcv_by_date(from_date, today, pykrx_code)
         if len(df) >= 2:
-            return float(df["종가"].iloc[-1]), float(df["종가"].iloc[-2]), None
+            return (
+                float(df["종가"].iloc[-1]),
+                float(df["종가"].iloc[-2]),
+                f"KRX 공식 API 실패({official_error})해서 pykrx 대체값 사용 중",
+            )
         pykrx_error = f"pykrx 조회 결과 {len(df)}행 (2행 미만)"
     except Exception as e:
         pykrx_error = str(e)
@@ -1442,8 +1561,8 @@ def _kr_index_last_two_closes(pykrx_code: str, yf_fallback_ticker: str, from_dat
 
     cur, prev = _yf_last_two_closes(yf_fallback_ticker)
     if cur is not None:
-        return cur, prev, f"pykrx 실패({pykrx_error})해서 야후 대체값 사용 중"
-    return None, None, f"pykrx·야후 둘 다 실패 (pykrx: {pykrx_error})"
+        return cur, prev, f"KRX 공식 API·pykrx 모두 실패(공식:{official_error} / pykrx:{pykrx_error})해서 야후 대체값 사용 중"
+    return None, None, f"KRX 공식 API·pykrx·야후 모두 실패 (공식:{official_error} / pykrx:{pykrx_error})"
 
 # ============================================================
 # 일일 종목 리포트 — 공시·뉴스·애널리스트 리포트 수집 (2026-08-12 추가)
@@ -3303,6 +3422,31 @@ def render_admin_panel():
                             st.dataframe(styled_flow, width="stretch", hide_index=True)
                         else:
                             st.caption("⚠ 코스피/코스닥 수급 데이터를 가져오지 못했습니다 (다음 금융 API 응답 실패).")
+
+                    st.divider()
+                    # [2026-09-12 추가] KRX 공식 Open API(코스피/코스닥 지수) 원본 응답 확인용.
+                    # 위 "코스피/코스닥 지수 — KRX 공식 Open API" 섹션 설명대로, OutBlock_1에
+                    # 여러 지수(코스피200 등)가 함께 담겨 나오는데 대표지수의 정확한 IDX_NM
+                    # 표기를 화면 캡처만으로는 확정하지 못해 후보 이름 목록으로 방어적으로
+                    # 구현해뒀다. 이 버튼으로 실제 응답의 IDX_NM 목록을 직접 확인해서,
+                    # _KRX_INDEX_NAME_CANDIDATES가 실제와 맞는지 검증할 것.
+                    st.caption("KRX 공식 API(코스피/코스닥 지수)가 실제로 응답하는지, IDX_NM(지수명) 값이 예상과 맞는지 확인합니다 (개발 중 임시 기능).")
+                    if st.button("🇰🇷 KRX 공식 API 원본 응답 보기", key="admin_krx_official_raw", width="stretch"):
+                        today_bas_dd = datetime.now(KST).strftime("%Y%m%d")
+                        for market_key, market_label in (("kospi", "코스피"), ("kosdaq", "코스닥")):
+                            st.markdown(f"**{market_label}** (`{_KRX_INDEX_ENDPOINTS[market_key]}`, basDd={today_bas_dd})")
+                            with st.spinner(f"{market_label} 원본 응답 조회 중..."):
+                                rows, err = _krx_official_index_quote(market_key, today_bas_dd)
+                            if rows is None:
+                                st.error(f"조회 실패: {err}")
+                            elif not rows:
+                                st.warning("응답은 성공했지만 오늘(basDd) 데이터가 비어 있습니다 (주말·공휴일이거나 아직 당일 데이터 미집계일 수 있음).")
+                            else:
+                                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+                                st.caption(f"IDX_NM(지수명) 목록: {sorted({r.get('IDX_NM', '') for r in rows})}")
+                        cur_k2, prev_k2, err_k2 = _krx_official_last_two_closes("kospi")
+                        cur_q2, prev_q2, err_q2 = _krx_official_last_two_closes("kosdaq")
+                        st.caption(f"→ _krx_official_last_two_closes() 최종 결과 — 코스피: {cur_k2}, {prev_k2} (오류: {err_k2}) / 코스닥: {cur_q2}, {prev_q2} (오류: {err_q2})")
 
                     st.divider()
                     # [2026-08-12] 종목별 일일 리포트(공시+뉴스+애널리스트 리포트+컨센서스) 미리보기.
