@@ -1465,14 +1465,22 @@ _KRX_INDEX_NAME_CANDIDATES = {
 }
 _KRX_PYKRX_CODE_TO_MARKET = {"1001": "kospi", "2001": "kosdaq"}
 
-def _krx_official_index_quote(market: str, bas_dd: str) -> tuple[list[dict] | None, str | None]:
-    """KRX 공식 Open API로 특정 기준일자(bas_dd, YYYYMMDD 문자열)의 지수 시세 원본
-    목록(OutBlock_1)을 반환한다. 그날 데이터가 없으면(주말·공휴일 등) 빈 리스트를,
-    인증키 미설정이나 통신 실패 등 진짜 오류면 (None, 오류메시지)를 반환한다."""
+def _krx_official_index_quote(market: str, bas_dd: str) -> tuple[list[dict] | None, dict | None, str | None]:
+    """KRX 공식 Open API로 특정 기준일자(bas_dd, YYYYMMDD 문자열)의 지수 시세를 조회한다.
+    반환값은 (OutBlock_1 리스트 또는 None, 원본 응답 전체(dict) 또는 None, 오류메시지 또는 None).
+    [2026-09-12 최초 배포 후 수정] 배포 직후 관리자 진단 버튼으로 실제 확인한 결과, 최근
+    15일 전 구간(당연히 거래일이 여럿 포함된 범위) 전체에서 OutBlock_1이 계속 빈 리스트로만
+    나오는 현상이 발견됐다. 이는 "그날 데이터가 아직 없다"는 정상 케이스로는 설명되지 않는
+    패턴이라(과거 거래일까지 전부 비어 나올 수는 없음), 요청 자체(파라미터 형식·인증 방식 등)가
+    잘못됐거나 KRX가 에러 메시지를 OutBlock_1이 아닌 다른 키에 담아 보내고 있는데 이를
+    그냥 빈 리스트로 삼켜버렸을 가능성이 높다고 보고, 원본 응답 전체를 함께 반환하도록
+    수정함 — 원인을 추측으로 고치지 않고 실제 응답을 관리자 화면에서 직접 눈으로 보고
+    확인하기 위함(이 프로젝트가 과거 네이버 분봉 API 등에서 추정만으로 코드를 고쳤다가
+    틀렸던 사례를 반복하지 않기 위한 조치 — 위 섹션 설명 참고)."""
     try:
         auth_key = st.secrets["krx"]["auth_key"]
     except Exception:
-        return None, "KRX 공식 API 인증키 미설정 (secrets.toml에 [krx] auth_key 없음)"
+        return None, None, "KRX 공식 API 인증키 미설정 (secrets.toml에 [krx] auth_key 없음)"
     try:
         resp = requests.post(
             _KRX_INDEX_ENDPOINTS[market],
@@ -1481,9 +1489,10 @@ def _krx_official_index_quote(market: str, bas_dd: str) -> tuple[list[dict] | No
             timeout=10,
         )
         resp.raise_for_status()
-        return resp.json().get("OutBlock_1", []), None
+        body = resp.json()
+        return body.get("OutBlock_1", []), body, None
     except Exception as e:
-        return None, str(e)
+        return None, None, str(e)
 
 def _krx_official_last_two_closes(market: str) -> tuple[float | None, float | None, str | None]:
     """KRX 공식 Open API에서 코스피/코스닥 대표지수의 최근 종가 2개를 가져온다.
@@ -1497,7 +1506,7 @@ def _krx_official_last_two_closes(market: str) -> tuple[float | None, float | No
     day = datetime.now(KST)
     for _ in range(15):  # 최대 15일 역순 탐색(설·추석 연휴까지 커버)
         bas_dd = day.strftime("%Y%m%d")
-        rows, err = _krx_official_index_quote(market, bas_dd)
+        rows, _raw_body, err = _krx_official_index_quote(market, bas_dd)
         if rows is None:
             return None, None, f"KRX 공식 API 조회 실패: {err}"
         for row in rows:
@@ -3424,26 +3433,33 @@ def render_admin_panel():
                             st.caption("⚠ 코스피/코스닥 수급 데이터를 가져오지 못했습니다 (다음 금융 API 응답 실패).")
 
                     st.divider()
-                    # [2026-09-12 추가] KRX 공식 Open API(코스피/코스닥 지수) 원본 응답 확인용.
-                    # 위 "코스피/코스닥 지수 — KRX 공식 Open API" 섹션 설명대로, OutBlock_1에
-                    # 여러 지수(코스피200 등)가 함께 담겨 나오는데 대표지수의 정확한 IDX_NM
-                    # 표기를 화면 캡처만으로는 확정하지 못해 후보 이름 목록으로 방어적으로
-                    # 구현해뒀다. 이 버튼으로 실제 응답의 IDX_NM 목록을 직접 확인해서,
-                    # _KRX_INDEX_NAME_CANDIDATES가 실제와 맞는지 검증할 것.
+                    # [2026-09-12 추가, 같은 날 배포 직후 수정] KRX 공식 Open API(코스피/코스닥
+                    # 지수) 원본 응답 확인용. 처음엔 오늘 날짜 하나만 조회해서 "OutBlock_1이
+                    # 비었다"까지만 보여줬는데, Jone이 실제로 배포해 눌러본 결과 오늘뿐 아니라
+                    # _krx_official_last_two_closes()가 15일을 거슬러 올라가도 단 하루도 못
+                    # 찾는 것으로 확인됨 — 과거 거래일까지 전부 비어 나오는 건 "당일 데이터 미집계"
+                    # 로는 설명되지 않는 패턴이라, 요청 형식 자체가 잘못됐거나 에러 메시지가
+                    # OutBlock_1이 아닌 다른 키에 담겨오는데 무시하고 있었을 가능성이 큼.
+                    # 그래서 (1) 오늘 날짜뿐 아니라 확실한 과거 거래일(7일 전)도 같이 테스트하고,
+                    # (2) OutBlock_1이 비었을 때 원본 응답 전체(JSON)를 그대로 보여주도록 바꿔서
+                    # 실제 원인(인증키 오류 메시지 등)을 추측 없이 눈으로 바로 확인할 수 있게 함.
                     st.caption("KRX 공식 API(코스피/코스닥 지수)가 실제로 응답하는지, IDX_NM(지수명) 값이 예상과 맞는지 확인합니다 (개발 중 임시 기능).")
                     if st.button("🇰🇷 KRX 공식 API 원본 응답 보기", key="admin_krx_official_raw", width="stretch"):
                         today_bas_dd = datetime.now(KST).strftime("%Y%m%d")
+                        past_bas_dd = (datetime.now(KST) - timedelta(days=7)).strftime("%Y%m%d")
                         for market_key, market_label in (("kospi", "코스피"), ("kosdaq", "코스닥")):
-                            st.markdown(f"**{market_label}** (`{_KRX_INDEX_ENDPOINTS[market_key]}`, basDd={today_bas_dd})")
-                            with st.spinner(f"{market_label} 원본 응답 조회 중..."):
-                                rows, err = _krx_official_index_quote(market_key, today_bas_dd)
-                            if rows is None:
-                                st.error(f"조회 실패: {err}")
-                            elif not rows:
-                                st.warning("응답은 성공했지만 오늘(basDd) 데이터가 비어 있습니다 (주말·공휴일이거나 아직 당일 데이터 미집계일 수 있음).")
-                            else:
-                                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-                                st.caption(f"IDX_NM(지수명) 목록: {sorted({r.get('IDX_NM', '') for r in rows})}")
+                            for label, bas_dd in ((f"오늘({today_bas_dd})", today_bas_dd), (f"7일 전({past_bas_dd}, 확실한 과거 거래일)", past_bas_dd)):
+                                st.markdown(f"**{market_label} — {label}** (`{_KRX_INDEX_ENDPOINTS[market_key]}`)")
+                                with st.spinner(f"{market_label} 원본 응답 조회 중..."):
+                                    rows, raw_body, err = _krx_official_index_quote(market_key, bas_dd)
+                                if rows is None:
+                                    st.error(f"조회 실패(통신 오류): {err}")
+                                elif not rows:
+                                    st.warning("OutBlock_1이 비어 있습니다. 아래 원본 응답 전체를 확인하세요 — 에러 메시지가 다른 키에 담겨있을 수 있습니다.")
+                                    st.json(raw_body)
+                                else:
+                                    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+                                    st.caption(f"IDX_NM(지수명) 목록: {sorted({r.get('IDX_NM', '') for r in rows})}")
                         cur_k2, prev_k2, err_k2 = _krx_official_last_two_closes("kospi")
                         cur_q2, prev_q2, err_q2 = _krx_official_last_two_closes("kosdaq")
                         st.caption(f"→ _krx_official_last_two_closes() 최종 결과 — 코스피: {cur_k2}, {prev_k2} (오류: {err_k2}) / 코스닥: {cur_q2}, {prev_q2} (오류: {err_q2})")
