@@ -53,7 +53,7 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.8"
+APP_VERSION = "v2.1.9"
 # [2026-08-19] v2.1.3 → v2.1.4: 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 추가.
 # 기존엔 장 시작 전(09:00 이전)만 안내했는데, 같은 원인(NXT 미반영)이 장 마감 후에도
 # 재현되는 게 Jone 실측(16:52, ETF는 일치·개별주식만 벌어짐)으로 확인되어 확장함.
@@ -73,6 +73,15 @@ APP_VERSION = "v2.1.8"
 # 제외되므로(발표 기준) 정규장 종가와 대체로 일치한다는 기존 설명은 그대로 유효함. 참고로
 # KRX 자체 프리마켓(07:00~07:50) 도입은 2026-06-19 발표로 2027년 말로 재연기되어 아직
 # 시행되지 않았으므로, 장 시작 전 배너(is_before_krx_open)는 수정 대상이 아님.
+# [2026-09-24] v2.1.8 → v2.1.9: "🗞️ 오늘의 리포트" 탭에 "📋 보유종목 전체 요약" 섹션 신규
+# 추가 — 기존엔 종목을 하나씩 선택해야만 뉴스·컨센서스·AI 브리핑을 볼 수 있었는데(아래
+# "📰 보유 종목 리포트" 섹션, 그대로 유지), 보유종목 전체를 표 1개 + 종목별 압축 브리핑으로
+# 한 화면에서 훑어볼 수 있게 함(Jone 요청, 2026-09-23 대화). 새 데이터 소스는 추가하지
+# 않고 기존 파이프라인(get_daily_stock_report, get_naver_consensus, get_day_change)만
+# 재사용했고, 브리핑 생성 함수만 별도로 분리(generate_holdings_overview_briefing, 24시간
+# 캐시, 1~2줄 압축)해서 기존 "📰 보유 종목 리포트"의 1시간 캐시·3~5줄 브리핑 동작에는
+# 전혀 영향이 없다. 이메일 자동 발송은 과거 실패 이력(2026-08-28, GitHub Actions 무료
+# 크론의 예약 실행 신뢰성 문제)을 고려해 이번에는 추가하지 않기로 확정됨.
 USER_GUIDE_URL = "https://raw.githubusercontent.com/jounnom720/Stock_app/main/user_guide.pdf"
 
 st.set_page_config(
@@ -1859,6 +1868,81 @@ def generate_stock_daily_summary(code: str, name: str, report: dict) -> str:
         return text.strip()
     except Exception as e:
         logging.warning("일일 리포트 AI 요약 실패 [%s]: %s", code, e)
+        return ""
+
+@st.cache_data(ttl=86400)
+def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> str:
+    """[2026-09-24 신규] "📋 보유종목 전체 요약" 섹션 전용 — 8개 안팎의 보유종목을 한 화면에서
+    훑어볼 수 있도록 generate_stock_daily_summary()보다 훨씬 짧은(1~2줄) 브리핑을 만든다.
+    기존 함수(1시간 캐시, 3~5줄, 종목 상세 화면 전용)는 그대로 두고 완전히 별도 함수로
+    분리했다 — 상세 화면의 기존 동작·캐시에 전혀 영향을 주지 않기 위함. 전체 요약은 하루
+    한 번만 새로 만들어지면 충분하므로 캐시를 24시간으로 늘려 Anthropic API 호출 횟수도
+    줄인다(보유종목 수 × 하루 1회 수준).
+    Jone 요청(2026-09-23 대화)에 따라 임단협/파업, 주요 계약·수주, 실적 전망(가이던스)
+    변경처럼 보유자산에 직접 영향을 줄 수 있는 이슈를 우선 언급하도록 프롬프트에 명시했다.
+    체결강도·프로그램매매처럼 이 앱이 애초에 수집하지 않는 데이터는 프롬프트에도 없으므로
+    자연히 언급되지 않는다(추측 금지 규칙으로 이중 방지)."""
+    try:
+        api_key = st.secrets["anthropic"]["api_key"]
+    except Exception:
+        return ""
+
+    news_lines = "\n".join(
+        f"- [{n.get('날짜', '')}] {n.get('제목', '')}"
+        for n in report.get("뉴스", [])[:8]
+    ) or "없음"
+    disclosure_lines = "\n".join(
+        f"- [{d.get('날짜', '')}] {d.get('제목', '')}"
+        for d in report.get("공시", [])[:8]
+    ) or "없음"
+    consensus = report.get("컨센서스") or {}
+    consensus_line = (
+        f"투자의견 {consensus.get('투자의견_참고라벨', '-')}, 목표주가 {consensus.get('목표주가', '-')}원"
+        if consensus else "없음"
+    )
+
+    prompt = f"""아래는 {name}({code})에 대해 오늘 수집된 원본 데이터입니다. 보유종목 전체를
+한 화면에서 훑어보는 요약 화면에 들어갈 아주 짧은 브리핑을 한국어로 작성해주세요.
+
+[최근 뉴스]
+{news_lines}
+
+[최근 공시]
+{disclosure_lines}
+
+[컨센서스]
+{consensus_line}
+
+작성 규칙:
+- 딱 1~2개의 짧은 불릿 포인트로만 작성 (한 줄에 40자 내외)
+- 임단협/파업, 주요 계약·수주, 실적 전망(가이던스) 변경처럼 자산 가치에 영향을 줄 수 있는
+  이슈가 있으면 최우선으로 다룰 것. 그런 이슈가 없으면 가장 눈에 띄는 뉴스 1개만 요약할 것
+- 위 데이터에 없는 내용은 절대 추측해서 언급하지 말 것 (체결강도·프로그램매매 등 원본에
+  없는 수치·지표는 데이터가 있다고 언급하지도 말 것)
+- 투자 조언이나 매수/매도 권유는 하지 말고 사실 전달에 집중할 것
+- 마크다운 불릿(-) 형식으로만 출력하고, 다른 설명이나 인사말은 붙이지 말 것"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 200,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        return text.strip()
+    except Exception as e:
+        logging.warning("보유종목 전체 요약 브리핑 실패 [%s]: %s", code, e)
         return ""
 
 @st.cache_data(ttl=1800)
@@ -3901,6 +3985,95 @@ def render_daily_report(holdings_df: pd.DataFrame):
         )
 
     st.caption(f"기준시각: {mo.get('기준시각', '-')}")
+    st.divider()
+
+    # ── [2026-09-24 신규] 보유종목 전체 요약 ──
+    # Jone 요청(2026-09-23 대화): 종목을 하나씩 선택해야 보던 걸 보유종목 전체에 대해
+    # 한 번에 훑어볼 수 있는 표 + 종목별 압축 브리핑으로 추가. 기존 파이프라인
+    # (get_daily_stock_report, get_naver_consensus, get_day_change)을 그대로 재사용하고,
+    # 브리핑만 별도의 짧은 프롬프트 함수(generate_holdings_overview_briefing, 24시간 캐시)로
+    # 새로 만들었다 — 기존 "📰 보유 종목 리포트"(아래 섹션)의 1시간 캐시·3~5줄 브리핑
+    # 동작에는 영향 없음.
+    # [알려진 트레이드오프] 이 섹션의 expander는 Streamlit 특성상 접혀 있어도 안의 코드가
+    # 매 rerun마다 실행되므로, 하루 중 캐시가 처음 만들어지는 시점(그날 첫 접속)에는
+    # 보유종목 수만큼 Anthropic API 호출이 순차적으로 일어나 화면이 평소보다 몇 초~수십 초
+    # 더 걸릴 수 있다. 이후 같은 날 재방문은 캐시(24시간)를 그대로 써서 즉시 표시된다.
+    # 테스트해보고 첫 로딩이 체감상 너무 느리면, 펼쳤을 때만 생성하도록(session_state로
+    # 펼침 여부 추적) 다음 버전에서 지연 로딩으로 바꿀 수 있다.
+    st.markdown("##### 📋 보유종목 전체 요약")
+    if holdings_df.empty:
+        st.info("보유 중인 종목이 없어 전체 요약을 표시할 수 없습니다.")
+    else:
+        overview_stocks = holdings_df[["종목코드", "종목명"]].drop_duplicates().sort_values("종목명")
+        overview_tickers = tuple(sorted({
+            t for t in (get_asset_ticker(c) for c in overview_stocks["종목코드"]) if t
+        }))
+
+        with st.spinner("보유종목 전체 요약 불러오는 중..."):
+            day_change = get_day_change(overview_tickers) if overview_tickers else {}
+
+            overview_rows = []
+            for _, r in overview_stocks.iterrows():
+                ov_code, ov_name = r["종목코드"], r["종목명"]
+                ov_ticker = get_asset_ticker(ov_code)
+                dc = day_change.get(ov_ticker, {}) if ov_ticker else {}
+                ov_consensus = get_naver_consensus(ov_code) or {}
+                overview_rows.append({
+                    "종목코드": ov_code,
+                    "종목명": ov_name,
+                    "현재가": dc.get("current"),
+                    "등락률": dc.get("change_pct"),
+                    "목표주가": ov_consensus.get("목표주가"),
+                    "투자의견": ov_consensus.get("투자의견_참고라벨") or "-",
+                })
+
+        # 표 (위 "코스피·코스닥 수급" 표와 동일한 HTML 그리드 스타일 재사용)
+        def _ov_price_cell(v) -> str:
+            if v is None:
+                return "<div style='text-align:right;color:var(--text-secondary,#888);'>-</div>"
+            return f"<div style='text-align:right;'>{v:,.0f}원</div>"
+
+        def _ov_opinion_cell(v: str) -> str:
+            color = _UP_COLOR if v in ("적극매수", "매수") else _DOWN_COLOR if v in ("매도", "비중축소") else "inherit"
+            return f"<div style='text-align:right;color:{color};font-weight:600;'>{v}</div>"
+
+        overview_rows_html = "".join(
+            "<div style='display:grid;grid-template-columns:1.3fr 1fr 0.9fr 1fr 0.9fr;padding:8px 0;"
+            "border-top:1px solid rgba(128,128,128,0.15);font-size:14px;align-items:center;'>"
+            f"<div style='font-weight:600;'>{row['종목명']}</div>"
+            f"{_ov_price_cell(row['현재가'])}"
+            f"<div style='text-align:right;'>{_change_badge_html(row['등락률']) or '-'}</div>"
+            f"{_ov_price_cell(row['목표주가'])}"
+            f"{_ov_opinion_cell(row['투자의견'])}"
+            "</div>"
+            for row in overview_rows
+        )
+        st.markdown(
+            "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
+            "<div style='display:grid;grid-template-columns:1.3fr 1fr 0.9fr 1fr 0.9fr;padding:8px 0;"
+            "font-size:12px;color:var(--text-secondary,#888);'>"
+            "<div>종목명</div><div style='text-align:right;'>현재가</div>"
+            "<div style='text-align:right;'>등락률</div><div style='text-align:right;'>목표주가</div>"
+            "<div style='text-align:right;'>투자의견</div></div>"
+            f"{overview_rows_html}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption("목표주가·투자의견은 네이버 증권 컨센서스 기준(참고용)이며, ETF는 컨센서스가 없어 '-'로 표시됩니다.")
+
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+        # 종목별 압축 브리핑 (접기/펼치기)
+        for row in overview_rows:
+            ov_code, ov_name = row["종목코드"], row["종목명"]
+            with st.expander(f"✨ {ov_name} 압축 브리핑"):
+                ov_report = get_daily_stock_report(ov_code, ov_name)
+                with st.spinner(f"{ov_name} 요약 작성 중..."):
+                    ov_brief = generate_holdings_overview_briefing(ov_code, ov_name, ov_report)
+                if ov_brief:
+                    st.markdown(_brief_markdown_to_html(ov_brief), unsafe_allow_html=True)
+                else:
+                    st.caption("요약을 만들지 못했습니다 (Anthropic API 키 미설정 또는 일시적 오류).")
+
     st.divider()
 
     # ── 종목별 리포트 ──
