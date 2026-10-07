@@ -30,6 +30,8 @@ import hashlib
 import base64
 import time
 import secrets as pysecrets
+import csv  # 미래에셋 거래내역 CSV 가져오기용 (2026-10-08 추가)
+import io
 import requests  # DART corpCode.xml 다운로드용 (2026-08-12 추가)
 import zipfile
 import xml.etree.ElementTree as ET
@@ -53,7 +55,11 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.12"
+APP_VERSION = "v2.1.13"
+# [2026-10-08] v2.1.12 → v2.1.13: 거래이력 화면에 "미래에셋증권 거래내역 CSV 가져오기"
+# 추가 (베타). 실제 내보내기 파일로 구조·파싱 정확도를 직접 검증(41건 100% 정확 추출,
+# 제외돼야 할 225건도 정상 제외). 파서가 뽑은 값을 바로 저장하지 않고 미리보기에서
+# 사용자가 확인/체크 해제한 뒤 확정하는 2단계 구조.
 # [2026-10-08] v2.1.9 → v2.1.10: "보유종목 전체 요약" 표에 중요도(A/B/C)·판단(긍정/중립/
 # 부정) 열 추가. 기존 AI 브리핑 호출 1회 안에서 같이 받아오는 방식이라 API 호출 횟수
 # 증가 없음. "투자 행동" 제안은 기존 매매 무권유 원칙과 충돌해 의도적으로 제외.
@@ -176,6 +182,135 @@ def get_asset_type(code: str, name: str = "") -> str:
     if any(name_str.startswith(p.upper()) for p in ETF_BRAND_PREFIXES):
         return "ETF"
     return "주식"
+
+# ============================================================
+# 미래에셋증권 거래내역 CSV 가져오기 — [2026-10-08 추가]
+# ============================================================
+# 거래이력 수동 입력이 신규 사용자 진입장벽의 핵심이라는 Jone 판단(2026-10-08 대화)에
+# 따라, 스크린샷 AI 인식을 먼저 실측 테스트했으나(날짜·종목코드가 화면에 없고 반복
+# 캡처 부담이 큼) 적합하지 않다고 결론 내림. 그 대신 Jone이 실제 미래에셋증권 PC
+# 홈페이지/HTS "[0650] 거래내역 조회" 엑셀 내보내기 파일을 공유해줘서 직접 구조를
+# 분석했고, 아래 두 가지 고질적 특성을 실측으로 확인했다(Jone 확인: 원본 그대로, 가공
+# 안 함 — 즉 모든 사용자가 똑같이 겪을 문제):
+#   1. "거래금액"(총액) 컬럼이 큰 숫자를 엑셀이 날짜로 오인식해 깨진 값으로 내보내짐
+#      → 애초에 수량×단가로 재계산되는 값이라 쓰지 않고 무시한다.
+#   2. 일부 종목명(예: "...투자신탁(주식,재간접형)"처럼 이름 안에 쉼표가 있는 경우)이
+#      따옴표로 감싸지지 않은 채 CSV에 그대로 들어가 있어, 그 쉼표에서 열이 밀려
+#      이름이 잘린다 → 종목코드는 영향받지 않으므로(쉼표보다 앞 컬럼), 종목명은 CSV
+#      값을 신뢰하지 않고 ASSET_MASTER 매핑 또는 pykrx 재조회로 다시 채운다.
+# 반대로 날짜·거래종류·종목코드·수량·단가는 실측 결과 100% 정상이었다 — 이 5개만
+# 신뢰해서 파싱한다. 배당금입금·이체·계좌대체 등 매수/매도가 아닌 행은 거래이력 시트의
+# 스키마(종목 매매 전용)에 맞지 않아 건너뛴다.
+#
+# 파일 구조(실측 확인, 2026-10-08): 헤더가 2줄에 걸쳐 나뉘어 있고(상위/하위 컬럼명),
+# 거래 1건이 물리적으로 2줄(출금/입금 또는 출고/입고 한 쌍)로 기록된다. 1번째 줄에
+# 거래일자·거래종류·종목번호가, 2번째 줄에 수량·단가·종목명이 들어있다. 종목번호는
+# "A"+6자리(예: A005930) 형식 — 앞의 "A"만 떼면 이 앱이 쓰는 종목코드와 바로 호환된다.
+# [알려진 한계] 지금은 미래에셋증권의 이 특정 엑셀 양식 1종만 검증됐다. 다른 증권사나
+# 미래에셋의 다른 조회 옵션(기간·구분 등)으로 받은 파일은 헤더 구조가 다를 수 있어,
+# 파싱 실패 시 빈 결과 + 명확한 오류 메시지를 반환하도록 방어적으로 작성했다.
+
+_MIRAE_BUY_SELL_MAP = {"주식매수입고": "매수", "주식매도출고": "매도"}
+
+@st.cache_data(ttl=86400)
+def _lookup_krx_name_by_code(code: str) -> str:
+    """ASSET_MASTER에 없는 종목코드의 이름을 pykrx로 재조회 (24시간 캐시). CSV의 종목명이
+    쉼표 때문에 잘렸을 때의 2차 보완책 — 그래도 실패하면 빈 문자열(호출부가 "확인 필요"로
+    표시하고 최종 확인은 사용자가 미리보기 표에서 직접 하게 된다)."""
+    try:
+        name = krx_stock.get_market_ticker_name(str(code).strip())
+        return name or ""
+    except Exception as e:
+        logging.warning("pykrx 종목명 조회 실패 [%s]: %s", code, e)
+        return ""
+
+def resolve_stock_name(code: str, csv_name_raw: str = "") -> str:
+    """종목코드로 믿을 수 있는 종목명을 결정한다. 우선순위: ① ASSET_MASTER(이 앱이 이미
+    알고 있는 종목, 가장 신뢰도 높음) → ② CSV에 있던 이름이 잘린 흔적이 없어 보이면 그대로
+    사용 → ③ pykrx 재조회 → ④ 전부 실패하면 빈 문자열(호출부에서 "확인 필요"로 표시)."""
+    code = str(code).strip()
+    if code in ASSET_MASTER:
+        return ASSET_MASTER[code]["name"]
+    raw = str(csv_name_raw).strip()
+    # 쉼표 때문에 잘린 이름의 전형적인 흔적: 괄호가 안 닫혀 있음(예: "...투자신탁(주식")
+    looks_truncated = raw.count("(") > raw.count(")")
+    if raw and not looks_truncated:
+        return raw
+    return _lookup_krx_name_by_code(code) or raw  # pykrx도 실패하면 잘린 이름이라도 보여줌
+
+def parse_mirae_asset_csv(file_bytes: bytes) -> tuple[pd.DataFrame, dict]:
+    """미래에셋증권 "[0650] 거래내역 조회" 엑셀 내보내기(CSV)를 파싱해 거래이력 시트
+    형식(REQUIRED_SHEET_HEADERS["거래이력"] 순서)의 DataFrame으로 변환한다.
+    반환값: (파싱된 DataFrame, 통계 dict — {"매수": n, "매도": n, "제외": n, "제외사유": {...}})
+    형식이 예상과 다르면(헤더 불일치 등) 빈 DataFrame과 오류 메시지를 담은 통계를 반환한다 —
+    여기서 잘못 추측해서 엉뚱한 데이터를 만들어내는 것보다, 명확히 실패를 알리는 쪽을 택함."""
+    # 인코딩: 실측 파일은 CP949였고, 혹시 다른 환경(Mac 등)에서 UTF-8로 내보낼 가능성도
+    # 있어 순서대로 시도한다.
+    text = None
+    for enc in ("cp949", "utf-8-sig", "utf-8"):
+        try:
+            text = file_bytes.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return pd.DataFrame(), {"오류": "파일 인코딩을 인식하지 못했습니다 (CP949/UTF-8 모두 실패)."}
+
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except Exception as e:
+        return pd.DataFrame(), {"오류": f"CSV 형식을 읽는 중 오류가 발생했습니다: {e}"}
+
+    if len(rows) < 4 or rows[0][:2] != ["거래일자", "거래종류"] or rows[1][:2] != ["거래번호", "원거래번호"]:
+        return pd.DataFrame(), {
+            "오류": "예상한 미래에셋증권 거래내역 양식과 헤더가 다릅니다. "
+                    "\"[0650] 거래내역 조회\" 화면에서 받은 파일이 맞는지 확인해주세요."
+        }
+
+    parsed = []
+    skip_reasons: dict[str, int] = {}
+    i = 2
+    while i < len(rows) - 1:
+        row1, row2 = rows[i], rows[i + 1]
+        i += 2
+        if len(row1) < 5:
+            continue
+        거래종류 = row1[1].strip() if len(row1) > 1 else ""
+        구분 = _MIRAE_BUY_SELL_MAP.get(거래종류)
+        if 구분 is None:
+            skip_reasons[거래종류 or "(빈 값)"] = skip_reasons.get(거래종류 or "(빈 값)", 0) + 1
+            continue
+        종목번호 = row1[4].strip() if len(row1) > 4 else ""
+        if not re.fullmatch(r"A\d{6}", 종목번호):
+            skip_reasons["종목코드 인식 실패"] = skip_reasons.get("종목코드 인식 실패", 0) + 1
+            continue
+        종목코드 = 종목번호[1:]
+        거래일자 = row1[0].strip()
+        try:
+            수량 = int(str(row2[2]).replace(",", "").strip()) if len(row2) > 2 else 0
+            단가 = int(str(row2[3]).replace(",", "").strip()) if len(row2) > 3 else 0
+        except ValueError:
+            skip_reasons["수량/단가 숫자 인식 실패"] = skip_reasons.get("수량/단가 숫자 인식 실패", 0) + 1
+            continue
+        if 수량 <= 0 or 단가 <= 0:
+            skip_reasons["수량/단가 0 이하"] = skip_reasons.get("수량/단가 0 이하", 0) + 1
+            continue
+        종목명_raw = row2[4] if len(row2) > 4 else ""
+        종목명 = resolve_stock_name(종목코드, 종목명_raw)
+        parsed.append({
+            "종목코드": 종목코드, "종목명": 종목명 or "(확인 필요)", "거래일자": 거래일자,
+            "거래구분": 구분, "거래수량": 수량, "거래단가": 단가,
+            "운용사": "", "비고": "CSV 가져오기",
+        })
+
+    df = pd.DataFrame(parsed, columns=REQUIRED_SHEET_HEADERS["거래이력"])
+    stats = {
+        "매수": int((df["거래구분"] == "매수").sum()) if not df.empty else 0,
+        "매도": int((df["거래구분"] == "매도").sum()) if not df.empty else 0,
+        "제외": sum(skip_reasons.values()),
+        "제외사유": skip_reasons,
+    }
+    return df, stats
 
 # ============================================================
 # DART 공시 고유번호(corp_code) 자동 조회 — [2026-08-12 추가]
@@ -5833,6 +5968,75 @@ def render_technical_analysis(holdings_df: pd.DataFrame, trade_df: pd.DataFrame)
 def render_trades(trade_df):
     st.markdown('<div class="section-title">거래이력</div>', unsafe_allow_html=True)
     st.caption("🌐 해외(미국) 종목의 거래단가·거래금액은 구글시트에 입력하신 원래 통화(달러) 그대로 표시됩니다. 원화 환산 금액은 '보유 종목'·'통합 대시보드' 화면에서 확인하세요.")
+
+    # ── [2026-10-08 추가] 미래에셋증권 거래내역 CSV 가져오기 ──
+    # 거래이력을 한 줄씩 수동 입력해야 하는 게 신규 사용자의 가장 큰 진입장벽이라는
+    # Jone 판단(2026-10-08)에 따라 추가. 반드시 "미리보기 → 사용자가 직접 확인/수정 →
+    # 확정 버튼"의 2단계를 거친다 — 파서가 뽑은 값을 그대로 저장하지 않는다. 금액이
+    # 걸린 데이터라 이 원칙은 타협하지 않는다(위 parse_mirae_asset_csv 주석 참고).
+    with st.expander("📥 거래내역 CSV로 가져오기 (미래에셋증권, 베타)"):
+        st.caption(
+            "미래에셋증권 PC 홈페이지/HTS의 \"[0650] 거래내역 조회\" 화면에서 받은 CSV 파일을 "
+            "올리면 매수·매도 내역을 한 번에 불러옵니다. 아직 미래에셋증권 양식만 지원하며, "
+            "배당금·이체 등 매매가 아닌 내역은 자동으로 제외됩니다."
+        )
+        uploaded = st.file_uploader("CSV 파일 선택", type=["csv"], key="mirae_csv_uploader")
+        if uploaded is not None:
+            parsed_df, stats = parse_mirae_asset_csv(uploaded.getvalue())
+            if "오류" in stats:
+                st.error(f"⚠️ {stats['오류']}")
+            elif parsed_df.empty:
+                st.warning("매수·매도 거래를 찾지 못했습니다. 파일 내용을 확인해주세요.")
+            else:
+                st.success(f"매수 {stats['매수']}건, 매도 {stats['매도']}건을 찾았습니다 "
+                           f"(배당금·이체 등 {stats['제외']}건은 자동 제외).")
+                if stats["제외사유"]:
+                    st.caption("제외 사유: " + ", ".join(f"{k} {v}건" for k, v in stats["제외사유"].items()))
+
+                account_name = st.text_input(
+                    "이 거래들을 어느 계좌로 저장할까요? (운용사명)",
+                    value="미래에셋증권", key="mirae_csv_account_name",
+                )
+                st.caption("⬇️ 저장 전 내용을 꼭 확인해주세요. 종목명이 \"(확인 필요)\"로 나오면 직접 수정해주시고, 필요 없는 행은 체크 해제해주세요.")
+
+                preview_df = parsed_df.copy()
+                preview_df.insert(0, "저장", True)
+                edited = st.data_editor(
+                    preview_df, hide_index=True, width="stretch", key="mirae_csv_editor",
+                    column_config={
+                        "저장": st.column_config.CheckboxColumn("저장"),
+                        "거래수량": st.column_config.NumberColumn("거래수량", format="%d"),
+                        "거래단가": st.column_config.NumberColumn("거래단가", format="%d"),
+                    },
+                    disabled=["운용사", "비고"],
+                )
+
+                if st.button("✅ 선택한 거래 저장", key="mirae_csv_confirm"):
+                    to_save = edited[edited["저장"]].drop(columns=["저장"]).copy()
+                    if to_save.empty:
+                        st.warning("저장을 선택한 행이 없습니다.")
+                    elif not account_name.strip():
+                        st.warning("운용사명을 입력해주세요.")
+                    else:
+                        to_save["운용사"] = account_name.strip()
+                        spreadsheet_id = st.session_state.get("spreadsheet_id", "")
+                        spreadsheet = get_spreadsheet(spreadsheet_id)
+                        if spreadsheet is None:
+                            st.error("개인 시트를 열지 못했습니다. 잠시 후 다시 시도해주세요.")
+                        else:
+                            try:
+                                ws = spreadsheet.worksheet("거래이력")
+                                rows_to_write = to_save[REQUIRED_SHEET_HEADERS["거래이력"]].values.tolist()
+                                _call_with_retry(ws.append_rows, rows_to_write)
+                                load_sheet.clear()
+                                load_all_data.clear()
+                                st.success(f"{len(rows_to_write)}건을 거래이력에 저장했습니다. "
+                                           "화면 상단에서 다른 탭으로 이동했다가 돌아오면 반영된 걸 확인할 수 있습니다.")
+                            except gspread.exceptions.WorksheetNotFound:
+                                st.error("'거래이력' 시트를 찾을 수 없습니다.")
+                            except Exception as e:
+                                logging.warning("CSV 가져오기 저장 실패: %s", e)
+                                st.error(f"저장 중 오류가 발생했습니다: {e}")
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
