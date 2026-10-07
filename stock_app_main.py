@@ -55,11 +55,16 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.13"
+APP_VERSION = "v2.1.14"
 # [2026-10-08] v2.1.12 → v2.1.13: 거래이력 화면에 "미래에셋증권 거래내역 CSV 가져오기"
 # 추가 (베타). 실제 내보내기 파일로 구조·파싱 정확도를 직접 검증(41건 100% 정확 추출,
 # 제외돼야 할 225건도 정상 제외). 파서가 뽑은 값을 바로 저장하지 않고 미리보기에서
 # 사용자가 확인/체크 해제한 뒤 확정하는 2단계 구조.
+# v2.1.13 → v2.1.14: CSV 가져오기에 중복 자동 감지 추가. append_rows는 덮어쓰기가 아니라
+# 추가만 하므로 기존 데이터 삭제 위험은 없지만, 같은 파일을 두 번 올리는 등으로 중복이
+# 쌓이는 걸 막기 위해 (종목코드+거래일자+거래구분+거래수량+거래단가)가 기존 거래이력과
+# 완전히 같은 행은 '저장' 체크를 미리 꺼둠(완전 자동 삭제는 아니고, 사용자가 표에서
+# 최종 확인).
 # [2026-10-08] v2.1.9 → v2.1.10: "보유종목 전체 요약" 표에 중요도(A/B/C)·판단(긍정/중립/
 # 부정) 열 추가. 기존 AI 브리핑 호출 1회 안에서 같이 받아오는 방식이라 API 호출 횟수
 # 증가 없음. "투자 행동" 제안은 기존 매매 무권유 원칙과 충돌해 의도적으로 제외.
@@ -5997,19 +6002,56 @@ def render_trades(trade_df):
                     "이 거래들을 어느 계좌로 저장할까요? (운용사명)",
                     value="미래에셋증권", key="mirae_csv_account_name",
                 )
-                st.caption("⬇️ 저장 전 내용을 꼭 확인해주세요. 종목명이 \"(확인 필요)\"로 나오면 직접 수정해주시고, 필요 없는 행은 체크 해제해주세요.")
+
+                # [2026-10-08 추가, Jone 요청] 기존 거래이력과 (종목코드+거래일자+거래구분+
+                # 거래수량+거래단가)가 완전히 같은 행은 이미 입력돼 있을 가능성이 높다고 보고
+                # "저장" 체크를 미리 꺼둔다. append_rows는 덮어쓰기가 아니라 뒤에 새 행을
+                # 추가하는 것뿐이라 삭제 위험은 없지만, 같은 CSV를 실수로 두 번 올리거나
+                # 겹치는 기간을 여러 번 내려받아 올리면 중복이 쌓일 수 있어서 추가함.
+                # 완벽한 판별은 아니다(예: 같은 날 같은 종목을 정말로 같은 가격에 두 번 산
+                # 경우도 '중복'으로 오인될 수 있음) — 그래서 자동으로 지우지 않고 체크만
+                # 꺼두어, 사용자가 표에서 직접 보고 최종 판단하게 한다.
+                existing_keys = set()
+                if not trade_df.empty:
+                    for _, r in trade_df.iterrows():
+                        key = (
+                            str(r.get("종목코드", "")).strip(),
+                            str(r.get("거래일자", "")).strip()[:10],
+                            str(r.get("거래구분", "")).strip(),
+                            int(_safe_num(r.get("거래수량", 0))),
+                            int(_safe_num(r.get("거래단가", 0))),
+                        )
+                        existing_keys.add(key)
 
                 preview_df = parsed_df.copy()
-                preview_df.insert(0, "저장", True)
+                dup_flags = preview_df.apply(
+                    lambda r: (
+                        str(r["종목코드"]).strip(), str(r["거래일자"]).strip()[:10],
+                        str(r["거래구분"]).strip(), int(r["거래수량"]), int(r["거래단가"]),
+                    ) in existing_keys,
+                    axis=1,
+                )
+                preview_df.insert(0, "저장", ~dup_flags)
+                preview_df.insert(1, "중복 의심", dup_flags.map({True: "⚠️ 이미 있음", False: ""}))
+
+                n_dup = int(dup_flags.sum())
+                if n_dup:
+                    st.warning(f"⚠️ 기존 거래이력과 종목·날짜·구분·수량·단가가 완전히 같은 {n_dup}건을 찾아 "
+                               "'저장' 체크를 미리 꺼뒀습니다. 정말 같은 날 같은 가격에 두 번 거래하신 "
+                               "경우라면 표에서 직접 체크해주세요.")
+                st.caption("⬇️ 저장 전 내용을 꼭 확인해주세요. 종목명이 \"(확인 필요)\"로 나오면 직접 수정해주시고, 필요 없는 행은 체크 해제해주세요.")
+
                 edited = st.data_editor(
                     preview_df, hide_index=True, width="stretch", key="mirae_csv_editor",
                     column_config={
                         "저장": st.column_config.CheckboxColumn("저장"),
+                        "중복 의심": st.column_config.TextColumn("중복 의심", disabled=True),
                         "거래수량": st.column_config.NumberColumn("거래수량", format="%d"),
                         "거래단가": st.column_config.NumberColumn("거래단가", format="%d"),
                     },
                     disabled=["운용사", "비고"],
                 )
+                edited = edited.drop(columns=["중복 의심"])
 
                 if st.button("✅ 선택한 거래 저장", key="mirae_csv_confirm"):
                     to_save = edited[edited["저장"]].drop(columns=["저장"]).copy()
