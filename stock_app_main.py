@@ -53,10 +53,16 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.10"
+APP_VERSION = "v2.1.12"
 # [2026-10-08] v2.1.9 → v2.1.10: "보유종목 전체 요약" 표에 중요도(A/B/C)·판단(긍정/중립/
 # 부정) 열 추가. 기존 AI 브리핑 호출 1회 안에서 같이 받아오는 방식이라 API 호출 횟수
 # 증가 없음. "투자 행동" 제안은 기존 매매 무권유 원칙과 충돌해 의도적으로 제외.
+# v2.1.10 → v2.1.11: "판단" 이모티콘 범례를 표 아래 캡션으로 추가. 압축 브리핑을
+# "✨ 종목명 압축 브리핑"이 8번 반복되던 방식에서, 핵심 한 줄을 펼침 버튼 제목 자체로
+# 쓰는 방식으로 개선(펼치지 않아도 핵심이 보임).
+# v2.1.11 → v2.1.12: 시황 카드를 "시안B(압축 카드형)"로 교체 — Visualizer로 시안A(리스트형)
+# ·시안B(압축 카드형) 두 개를 먼저 보여드리고 Jone이 B를 선택. 스파크라인 제거, 카드
+# 패딩/폰트 축소, 한 줄 6열→8열.
 # [2026-08-19] v2.1.3 → v2.1.4: 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 추가.
 # 기존엔 장 시작 전(09:00 이전)만 안내했는데, 같은 원인(NXT 미반영)이 장 마감 후에도
 # 재현되는 게 Jone 실측(16:52, ETF는 일치·개별주식만 벌어짐)으로 확인되어 확장함.
@@ -3796,16 +3802,16 @@ def _change_badge_html(pct) -> str:
 
 def _metric_card_html(label: str, value: str, pct=None, spark_svg: str = "") -> str:
     """시황 카드 하나(라벨 + 값 + 등락 배지, 선택적으로 아래에 추세 미니 차트) HTML.
-    [2026-08-27, 정사각형 레이아웃으로 재작업] 처음엔 라벨/값을 왼쪽에 두고 차트를
-    오른쪽 여백에 붙이는 좌우 배치였는데, Jone이 증권앱 캡처처럼 정사각형에 가까운
-    카드로 한 줄에 더 많이 배치하고 싶다고 해서 세로 배치(라벨→값→배지→차트가 카드
-    전체 폭)로 바꿨다. 이렇게 하면 카드 폭을 줄여도(한 줄에 카드 수를 늘려도) 차트가
-    항상 카드 폭 전체를 쓰면서 자연스럽게 정사각형에 가까운 비율이 된다.
-    spark_svg가 빈 문자열이면(기본값) 차트 영역 없이 기존처럼 라벨/값/배지만 나온다."""
+    [2026-10-08 재설계, "시안B(압축 카드형)" 채택] Jone에게 리스트형(시안A)·압축
+    카드형(시안B) 두 시안을 먼저 보여드리고 B를 선택받아, 패딩·폰트를 한 단계씩 줄여
+    더 조밀하게 만들었다(10px→10px 12px→10px, 18px→16px, 한 줄 카드 수는 호출부에서
+    6→8열로 늘림). spark_svg 매개변수와 그 분기는 당장 호출부에서 안 쓰지만(시황
+    카드는 이제 스파크라인 없이 호출됨), 다른 화면에서 다시 필요할 수 있어 그대로
+    남겨뒀다 — 함수 시그니처를 유지해 호출부 변경을 최소화하기 위함이기도 하다."""
     top = (
-        f"<div style='font-size:11px;color:var(--text-secondary,#888);margin-bottom:3px;"
+        f"<div style='font-size:11px;color:var(--text-secondary,#888);margin-bottom:2px;"
         f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'>{label}</div>"
-        f"<div style='font-size:18px;font-weight:700;white-space:nowrap;overflow:hidden;"
+        f"<div style='font-size:16px;font-weight:700;white-space:nowrap;overflow:hidden;"
         f"text-overflow:ellipsis;'>{value}</div>"
         f"{_change_badge_html(pct)}"
     )
@@ -3817,7 +3823,7 @@ def _metric_card_html(label: str, value: str, pct=None, spark_svg: str = "") -> 
             "</div>"
         )
     return (
-        "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:12px;'>"
+        "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:10px;'>"
         f"{top}"
         "</div>"
     )
@@ -3957,33 +3963,30 @@ def render_daily_report(holdings_df: pd.DataFrame):
 
     st.markdown("##### 🌐 국내·해외 시황")
 
-    # [2026-08-27, 정사각형 레이아웃으로 재작업] 처음엔 코스피/코스닥은 2열(큰 카드),
-    # 나머지는 3~4열로 그룹을 나눠서 그렸는데, Jone이 증권앱 캡처처럼 카드를 정사각형에
-    # 가깝게 줄이고 한 줄에 더 많이 배치하고 싶다고 해서, 그룹 구분 없이 표시 순서
-    # 그대로 하나의 그리드에 동일한 크기로 늘어놓는 방식으로 바꿨다. 카드가 세로 배치
-    # (라벨→값→배지→차트, 차트는 항상 카드 폭 100%)라 열 수를 늘려도 각 카드가
-    # 자연스럽게 정사각형에 가까운 비율을 유지한다.
+    # [2026-10-08 재설계, Jone이 "시안B(압축 카드형)" 선택 — 네이버/증권플러스 스타일
+    # 시안 2개를 먼저 Visualizer로 보여드리고 고른 것] 기존 정사각형 카드(라벨→값→배지→
+    # 스파크라인, 한 줄 6개)에서 스파크라인을 빼고 카드를 더 작고 조밀하게 바꿔, 숫자
+    # 자체에 집중하고 한 줄에 더 많은 지표가 들어오게 했다. 추세 미니 차트 관련 함수
+    # (_daily_trend_svg, _get_index_spark_svg)는 당장 안 쓰지만, 나중에 다시 필요할 수
+    # 있어 코드는 그대로 남겨둔다(죽은 코드 아님 — 호출만 안 할 뿐).
     ALL_MARKET_KEYS = [
         "코스피", "코스닥",
         "다우존스", "S&P500", "나스닥", "필라델피아반도체",
         "니케이225", "상하이종합", "항셍지수", "VIX",
         "원달러환율", "달러인덱스", "WTI", "브렌트유", "국제금", "미국채10년",
     ]
-    MARKET_CARDS_PER_ROW = 6  # [2026-08-27] Jone 요청으로 4 → 6열로 변경 — 카드가 더 좁아지므로 차트 높이도 같이 줄임(아래 spark_height)
+    MARKET_CARDS_PER_ROW = 8  # [2026-10-08] 스파크라인을 빼서 카드가 작아진 만큼 6 → 8열로 늘림
 
-    def _card_grid(keys, cols_per_row, spark=True, spark_height=32):
+    def _card_grid(keys, cols_per_row):
         cols = st.columns(cols_per_row)
         i = 0
         for key in keys:
             v = mo.get(key)
             if not v or v.get("값") is None:
                 continue
-            # [2026-08-27 확장] 코스피/코스닥뿐 아니라 나머지 카드(해외증시·환율·원자재·
-            # 금리)도 전부 야후 소스로 이미 조회 중이라 새 리스크 없이 전부 확장함(Jone 요청).
-            spark_svg = _get_index_spark_svg(key, mo, height=spark_height) if spark else ""
             with cols[i % cols_per_row]:
                 st.markdown(
-                    _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률"), spark_svg),
+                    _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률")),
                     unsafe_allow_html=True,
                 )
             i += 1
@@ -4135,14 +4138,32 @@ def render_daily_report(holdings_df: pd.DataFrame):
             "목표주가·투자의견은 네이버 증권 컨센서스 기준(참고용)이며, ETF는 컨센서스가 없어 '-'로 표시됩니다. "
             "중요도·판단은 AI가 오늘 수집된 뉴스·공시만 보고 분류한 참고용 정보이며, 매매 신호가 아닙니다."
         )
+        # [2026-10-08 추가, Jone 요청] "판단" 열의 이모티콘 4종이 무슨 뜻인지 표 아래 범례로 명시.
+        st.caption("🟢 긍정 · 🟡 중립 · 🔴 부정 · ⚪ 판단 불가(데이터 부족 또는 AI 응답 실패)")
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        # 종목별 압축 브리핑 (접기/펼치기) — 위에서 이미 호출해둔 결과를 그대로 표시
+        # [2026-10-08 재설계, Jone 요청] 기존엔 종목마다 "✨ OOO 압축 브리핑"이라는 똑같은
+        # 제목이 8번 반복돼서 어떤 종목이 실제로 중요한지 펼쳐보기 전까진 알 수 없었다.
+        # 이제는 브리핑의 첫 번째 불릿(핵심 한 줄)을 펼침 버튼 제목 자체로 써서, 펼치지
+        # 않아도 핵심은 이미 보이고, 제목 자체가 "더 보기" 버튼 역할을 겸하게 했다.
+        def _headline_from_brief(body: str, max_len: int = 46) -> str:
+            """브리핑 본문(불릿 목록)에서 첫 번째 줄만 뽑아 펼침 버튼 제목으로 쓸 수 있게
+            다듬는다. 너무 길면 말줄임표로 자른다."""
+            for line in body.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    stripped = stripped[2:].strip()
+                if stripped:
+                    return stripped if len(stripped) <= max_len else stripped[:max_len].rstrip() + "…"
+            return ""
+
         for row in overview_rows:
             ov_code, ov_name = row["종목코드"], row["종목명"]
-            with st.expander(f"✨ {ov_name} 압축 브리핑"):
-                ov_brief_body = overview_briefs.get(ov_code, "")
+            ov_brief_body = overview_briefs.get(ov_code, "")
+            headline = _headline_from_brief(ov_brief_body)
+            label = f"{row['판단']} {ov_name} — {headline}" if headline else f"{row['판단']} {ov_name} (요약 없음)"
+            with st.expander(label):
                 if ov_brief_body:
                     st.markdown(_brief_markdown_to_html(ov_brief_body), unsafe_allow_html=True)
                 else:
