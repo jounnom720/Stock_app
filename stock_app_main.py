@@ -53,7 +53,10 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.9"
+APP_VERSION = "v2.1.10"
+# [2026-10-08] v2.1.9 → v2.1.10: "보유종목 전체 요약" 표에 중요도(A/B/C)·판단(긍정/중립/
+# 부정) 열 추가. 기존 AI 브리핑 호출 1회 안에서 같이 받아오는 방식이라 API 호출 횟수
+# 증가 없음. "투자 행동" 제안은 기존 매매 무권유 원칙과 충돌해 의도적으로 제외.
 # [2026-08-19] v2.1.3 → v2.1.4: 장 마감 후(15:30~20:00, NXT 애프터마켓) 안내 배너 추가.
 # 기존엔 장 시작 전(09:00 이전)만 안내했는데, 같은 원인(NXT 미반영)이 장 마감 후에도
 # 재현되는 게 Jone 실측(16:52, ETF는 일치·개별주식만 벌어짐)으로 확인되어 확장함.
@@ -1870,22 +1873,56 @@ def generate_stock_daily_summary(code: str, name: str, report: dict) -> str:
         logging.warning("일일 리포트 AI 요약 실패 [%s]: %s", code, e)
         return ""
 
+# [2026-10-08 추가] 중요도/판단 태그 해석표. ChatGPT가 제안한 "텔레그램 기반 투자 브리핑"
+# 형식 중 "중요도 A/B/C"·"판단 🟢긍정/🟡중립/🔴부정" 부분만 Jone이 채택(대화 2026-10-08).
+# "투자 행동"(보유/추가매도 등 매매 제안) 항목은 기존 설계 원칙("매수·매도 권유 안 함")과
+# 정면으로 부딪혀서 의도적으로 제외함 — generate_stock_daily_summary()의 "투자 조언이나
+# 매수/매도 권유는 하지 말 것" 규칙과 동일한 선을 여기서도 유지.
+_OVERVIEW_IMPORTANCE_LABELS = {"A": "A", "B": "B", "C": "C"}
+_OVERVIEW_SENTIMENT_EMOJI = {"긍정": "🟢", "중립": "🟡", "부정": "🔴"}
+
+def _parse_overview_briefing(raw_text: str) -> dict:
+    """generate_holdings_overview_briefing()의 원본 응답에서 "중요도: A" / "판단: 긍정"
+    헤더 2줄을 뽑아내고, 나머지(불릿 본문)는 그대로 돌려준다. AI가 형식을 안 지켰을 때도
+    화면이 깨지지 않도록 전부 안전하게 기본값으로 폴백한다."""
+    importance, sentiment = None, None
+    body_lines = []
+    for line in raw_text.split("\n"):
+        stripped = line.strip()
+        m_imp = re.match(r"중요도\s*[:：]\s*([ABC])", stripped)
+        m_sen = re.match(r"판단\s*[:：]\s*(긍정|중립|부정)", stripped)
+        if m_imp:
+            importance = _OVERVIEW_IMPORTANCE_LABELS.get(m_imp.group(1))
+        elif m_sen:
+            sentiment = _OVERVIEW_SENTIMENT_EMOJI.get(m_sen.group(1))
+        elif stripped:
+            body_lines.append(line)
+    return {
+        "중요도": importance or "-",
+        "판단": sentiment or "⚪",
+        "본문": "\n".join(body_lines).strip(),
+    }
+
 @st.cache_data(ttl=86400)
-def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> str:
-    """[2026-09-24 신규] "📋 보유종목 전체 요약" 섹션 전용 — 8개 안팎의 보유종목을 한 화면에서
-    훑어볼 수 있도록 generate_stock_daily_summary()보다 훨씬 짧은(1~2줄) 브리핑을 만든다.
-    기존 함수(1시간 캐시, 3~5줄, 종목 상세 화면 전용)는 그대로 두고 완전히 별도 함수로
-    분리했다 — 상세 화면의 기존 동작·캐시에 전혀 영향을 주지 않기 위함. 전체 요약은 하루
-    한 번만 새로 만들어지면 충분하므로 캐시를 24시간으로 늘려 Anthropic API 호출 횟수도
-    줄인다(보유종목 수 × 하루 1회 수준).
+def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> dict:
+    """[2026-09-24 신규, 2026-10-08 중요도·판단 태그 추가] "📋 보유종목 전체 요약" 섹션
+    전용 — 8개 안팎의 보유종목을 한 화면에서 훑어볼 수 있도록 generate_stock_daily_summary()
+    보다 훨씬 짧은(1~2줄) 브리핑을 만든다. 기존 함수(1시간 캐시, 3~5줄, 종목 상세 화면
+    전용)는 그대로 두고 완전히 별도 함수로 분리했다 — 상세 화면의 기존 동작·캐시에 전혀
+    영향을 주지 않기 위함. 전체 요약은 하루 한 번만 새로 만들어지면 충분하므로 캐시를
+    24시간으로 늘려 Anthropic API 호출 횟수도 줄인다(보유종목 수 × 하루 1회 수준).
     Jone 요청(2026-09-23 대화)에 따라 임단협/파업, 주요 계약·수주, 실적 전망(가이던스)
     변경처럼 보유자산에 직접 영향을 줄 수 있는 이슈를 우선 언급하도록 프롬프트에 명시했다.
     체결강도·프로그램매매처럼 이 앱이 애초에 수집하지 않는 데이터는 프롬프트에도 없으므로
-    자연히 언급되지 않는다(추측 금지 규칙으로 이중 방지)."""
+    자연히 언급되지 않는다(추측 금지 규칙으로 이중 방지).
+    [2026-10-08] 반환 타입을 str → dict로 변경: {"중요도", "판단", "본문"} 3개 키.
+    기존엔 브리핑 문장만 돌려줬는데, 이제 같은 AI 호출 안에서 중요도(A/B/C)·판단(긍정/
+    중립/부정)까지 같이 받아 파싱한다 — API 호출 횟수는 그대로이고 프롬프트에 두 줄만
+    추가한 것. 호출부(render_daily_report)도 이 dict 구조에 맞춰 함께 수정했다."""
     try:
         api_key = st.secrets["anthropic"]["api_key"]
     except Exception:
-        return ""
+        return {"중요도": "-", "판단": "⚪", "본문": ""}
 
     news_lines = "\n".join(
         f"- [{n.get('날짜', '')}] {n.get('제목', '')}"
@@ -1914,13 +1951,19 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> s
 {consensus_line}
 
 작성 규칙:
-- 딱 1~2개의 짧은 불릿 포인트로만 작성 (한 줄에 40자 내외)
+- 반드시 아래 형식 그대로, 정확히 이 순서로 출력할 것 (다른 설명이나 인사말 붙이지 말 것):
+중요도: (A, B, C 중 하나 — A=오늘 반드시 확인할 만큼 중요, B=참고할 만함, C=특이사항 없음)
+판단: (긍정, 중립, 부정 중 하나 — 위 데이터가 주가에 어떤 방향으로 영향을 줄 수 있는지)
+- (1~2개의 짧은 불릿 포인트, 한 줄에 40자 내외)
+- 중요도·판단은 반드시 위 데이터(뉴스·공시·컨센서스)에 실제로 있는 내용에 근거해서만 판단할 것.
+  특이사항이 없으면 중요도는 C, 판단은 중립으로 둘 것 — 데이터가 없는데 긍정/부정을 지어내지 말 것
 - 임단협/파업, 주요 계약·수주, 실적 전망(가이던스) 변경처럼 자산 가치에 영향을 줄 수 있는
-  이슈가 있으면 최우선으로 다룰 것. 그런 이슈가 없으면 가장 눈에 띄는 뉴스 1개만 요약할 것
+  이슈가 있으면 불릿에서 최우선으로 다룰 것. 그런 이슈가 없으면 가장 눈에 띄는 뉴스 1개만 요약할 것
 - 위 데이터에 없는 내용은 절대 추측해서 언급하지 말 것 (체결강도·프로그램매매 등 원본에
   없는 수치·지표는 데이터가 있다고 언급하지도 말 것)
-- 투자 조언이나 매수/매도 권유는 하지 말고 사실 전달에 집중할 것
-- 마크다운 불릿(-) 형식으로만 출력하고, 다른 설명이나 인사말은 붙이지 말 것"""
+- 투자 조언이나 매수/매도 권유, "보유 유지"·"매도 검토" 같은 행동 제안은 절대 하지 말고
+  사실 전달에만 집중할 것 — 중요도·판단은 "정보의 성격 분류"일 뿐 매매 신호가 아님
+- 불릿은 마크다운 불릿(-) 형식으로만 출력할 것"""
 
     try:
         resp = requests.post(
@@ -1932,7 +1975,7 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> s
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 200,
+                "max_tokens": 220,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=20,
@@ -1940,10 +1983,10 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> s
         resp.raise_for_status()
         data = resp.json()
         text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-        return text.strip()
+        return _parse_overview_briefing(text.strip())
     except Exception as e:
         logging.warning("보유종목 전체 요약 브리핑 실패 [%s]: %s", code, e)
-        return ""
+        return {"중요도": "-", "판단": "⚪", "본문": ""}
 
 @st.cache_data(ttl=1800)
 def _get_naver_raw(kind: str, item_code: str) -> dict:
@@ -4012,17 +4055,26 @@ def render_daily_report(holdings_df: pd.DataFrame):
         with st.spinner("보유종목 전체 요약 불러오는 중..."):
             day_change = get_day_change(overview_tickers) if overview_tickers else {}
 
+            # [2026-10-08] AI 브리핑 호출을 표 렌더링 전으로 당겨왔다 — 중요도·판단을
+            # 표 컬럼에도 쓰기 위함. 호출 횟수 자체는 그대로다(기존에도 아래 expander가
+            # Streamlit 특성상 펼침 여부와 무관하게 매 rerun마다 실행돼 왔음, 위 주석 참고).
             overview_rows = []
+            overview_briefs = {}  # 종목코드 → 브리핑 본문(expander용)
             for _, r in overview_stocks.iterrows():
                 ov_code, ov_name = r["종목코드"], r["종목명"]
                 ov_ticker = get_asset_ticker(ov_code)
                 dc = day_change.get(ov_ticker, {}) if ov_ticker else {}
                 ov_consensus = get_naver_consensus(ov_code) or {}
+                ov_report = get_daily_stock_report(ov_code, ov_name)
+                ov_brief = generate_holdings_overview_briefing(ov_code, ov_name, ov_report)
+                overview_briefs[ov_code] = ov_brief.get("본문", "")
                 overview_rows.append({
                     "종목코드": ov_code,
                     "종목명": ov_name,
                     "현재가": dc.get("current"),
                     "등락률": dc.get("change_pct"),
+                    "중요도": ov_brief.get("중요도", "-"),
+                    "판단": ov_brief.get("판단", "⚪"),
                     "목표주가": ov_consensus.get("목표주가"),
                     "투자의견": ov_consensus.get("투자의견_참고라벨") or "-",
                 })
@@ -4037,12 +4089,31 @@ def render_daily_report(holdings_df: pd.DataFrame):
             color = _UP_COLOR if v in ("적극매수", "매수") else _DOWN_COLOR if v in ("매도", "비중축소") else "inherit"
             return f"<div style='text-align:right;color:{color};font-weight:600;'>{v}</div>"
 
+        # [2026-10-08 추가] 중요도(A/B/C) 배지 — A는 눈에 띄게 강조, B/C는 차분하게.
+        _IMPORTANCE_STYLE = {
+            "A": (_UP_COLOR, "rgba(224,99,94,0.15)"),
+            "B": ("var(--text-secondary,#888)", "rgba(128,128,128,0.15)"),
+            "C": ("var(--text-secondary,#888)", "rgba(128,128,128,0.08)"),
+        }
+
+        def _ov_importance_cell(v: str) -> str:
+            color, bg = _IMPORTANCE_STYLE.get(v, ("var(--text-secondary,#888)", "rgba(128,128,128,0.08)"))
+            return (
+                f"<div style='text-align:center;'><span style='display:inline-block;padding:1px 8px;"
+                f"border-radius:6px;font-weight:700;color:{color};background:{bg};'>{v}</span></div>"
+            )
+
+        def _ov_sentiment_cell(v: str) -> str:
+            return f"<div style='text-align:center;font-size:15px;'>{v}</div>"
+
         overview_rows_html = "".join(
-            "<div style='display:grid;grid-template-columns:1.3fr 1fr 0.9fr 1fr 0.9fr;padding:8px 0;"
+            "<div style='display:grid;grid-template-columns:1.2fr 1fr 0.9fr 0.6fr 0.6fr 1fr 0.9fr;padding:8px 0;"
             "border-top:1px solid rgba(128,128,128,0.15);font-size:14px;align-items:center;'>"
             f"<div style='font-weight:600;'>{row['종목명']}</div>"
             f"{_ov_price_cell(row['현재가'])}"
             f"<div style='text-align:right;'>{_change_badge_html(row['등락률']) or '-'}</div>"
+            f"{_ov_importance_cell(row['중요도'])}"
+            f"{_ov_sentiment_cell(row['판단'])}"
             f"{_ov_price_cell(row['목표주가'])}"
             f"{_ov_opinion_cell(row['투자의견'])}"
             "</div>"
@@ -4050,27 +4121,30 @@ def render_daily_report(holdings_df: pd.DataFrame):
         )
         st.markdown(
             "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
-            "<div style='display:grid;grid-template-columns:1.3fr 1fr 0.9fr 1fr 0.9fr;padding:8px 0;"
+            "<div style='display:grid;grid-template-columns:1.2fr 1fr 0.9fr 0.6fr 0.6fr 1fr 0.9fr;padding:8px 0;"
             "font-size:12px;color:var(--text-secondary,#888);'>"
             "<div>종목명</div><div style='text-align:right;'>현재가</div>"
-            "<div style='text-align:right;'>등락률</div><div style='text-align:right;'>목표주가</div>"
+            "<div style='text-align:right;'>등락률</div>"
+            "<div style='text-align:center;'>중요도</div><div style='text-align:center;'>판단</div>"
+            "<div style='text-align:right;'>목표주가</div>"
             "<div style='text-align:right;'>투자의견</div></div>"
             f"{overview_rows_html}</div>",
             unsafe_allow_html=True,
         )
-        st.caption("목표주가·투자의견은 네이버 증권 컨센서스 기준(참고용)이며, ETF는 컨센서스가 없어 '-'로 표시됩니다.")
+        st.caption(
+            "목표주가·투자의견은 네이버 증권 컨센서스 기준(참고용)이며, ETF는 컨센서스가 없어 '-'로 표시됩니다. "
+            "중요도·판단은 AI가 오늘 수집된 뉴스·공시만 보고 분류한 참고용 정보이며, 매매 신호가 아닙니다."
+        )
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        # 종목별 압축 브리핑 (접기/펼치기)
+        # 종목별 압축 브리핑 (접기/펼치기) — 위에서 이미 호출해둔 결과를 그대로 표시
         for row in overview_rows:
             ov_code, ov_name = row["종목코드"], row["종목명"]
             with st.expander(f"✨ {ov_name} 압축 브리핑"):
-                ov_report = get_daily_stock_report(ov_code, ov_name)
-                with st.spinner(f"{ov_name} 요약 작성 중..."):
-                    ov_brief = generate_holdings_overview_briefing(ov_code, ov_name, ov_report)
-                if ov_brief:
-                    st.markdown(_brief_markdown_to_html(ov_brief), unsafe_allow_html=True)
+                ov_brief_body = overview_briefs.get(ov_code, "")
+                if ov_brief_body:
+                    st.markdown(_brief_markdown_to_html(ov_brief_body), unsafe_allow_html=True)
                 else:
                     st.caption("요약을 만들지 못했습니다 (Anthropic API 키 미설정 또는 일시적 오류).")
 
