@@ -57,7 +57,9 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.17"
+APP_VERSION = "v2.1.18"
+# [2026-10-09] v2.1.17 → v2.1.18: 휴장일 안내 문구를 "휴장일로 보입니다" → "휴장일입니다"로 단정(Jone 피드백).
+#  야후 조회가 실패해 pykrx로 휴장을 판단한 경우에도 직전 거래일 날짜를 pykrx로 구해 문구에 표시한다.
 # [2026-10-09] v2.1.16 → v2.1.17 (배포 후 Jone 피드백 반영):
 #  - 브리핑 팝업 UI: 섹션 여백 축소, 시황 카드를 팝업 폭 전체에 균등 배치(카드 확대), 보조 설명을 작은
 #    회색 글씨로 통일, 데이터 기준 박스에서 "오늘 휴장 여부·장 상태" 항목 숨김(아래 문장과 중복).
@@ -3359,6 +3361,22 @@ def _pykrx_has_today_bar(today_str: str) -> bool | None:
         logging.warning("휴장 교차확인(pykrx) 실패: %s", e)
         return None
 
+def _pykrx_last_bar_date(today: date) -> str:
+    """pykrx(삼성전자 005930 일봉)로 최근 거래일 날짜를 구한다(야후 조회 실패 시 기준일 보완용).
+    [v2.1.18] 야후가 실패한 휴장일에 기준일이 비어 "직전 거래일 10/8" 같은 날짜가 안 나오던 문제 보완.
+    실패하면 빈 문자열."""
+    try:
+        start = (today - timedelta(days=15)).strftime("%Y%m%d")
+        df = krx_stock.get_market_ohlcv_by_date(start, today.strftime("%Y%m%d"), "005930")
+        if df is not None and not df.empty:
+            if "종가" in df.columns:
+                df = df[df["종가"] > 0]
+            if not df.empty:
+                return _bar_date_str(df.index[-1])
+    except Exception as e:
+        logging.warning("최근 거래일 조회(pykrx) 실패: %s", e)
+    return ""
+
 @st.cache_data(ttl=600)
 def get_krx_market_day_status(_today_key: str) -> dict:
     """오늘의 국내 증시 상태를 판단한다 (10분 캐시, 인자 _today_key는 날짜가 바뀌면 캐시를 새로
@@ -3383,13 +3401,13 @@ def get_krx_market_day_status(_today_key: str) -> dict:
     if last_date is None:
         # 야후 조회 실패 → 주말이면 휴장, 평일 09:30 이후면 pykrx로만 판단, 그래도 모르면 None(확인 불가)
         if is_weekend:
-            return {"휴장": True, "기준일": "", "판단방법": "주말(코스피 일봉 조회 실패)"}
+            return {"휴장": True, "기준일": _pykrx_last_bar_date(today), "판단방법": "주말(코스피 일봉 조회 실패)"}
         if not after_open_check:
             return {"휴장": None, "기준일": "", "판단방법": "평일 09:30 이전(코스피 일봉 조회 실패)"}
         pykrx_today = _pykrx_has_today_bar(today.strftime("%Y%m%d"))
         if pykrx_today is None:
             return {"휴장": None, "기준일": "", "판단방법": "코스피 일봉·pykrx 모두 조회 실패 — 확인 불가"}
-        return {"휴장": not pykrx_today, "기준일": today_str if pykrx_today else "",
+        return {"휴장": not pykrx_today, "기준일": today_str if pykrx_today else _pykrx_last_bar_date(today),
                 "판단방법": "pykrx 오늘 시세 " + ("있음" if pykrx_today else "없음") + "(야후 코스피 일봉 조회 실패)"}
     if last_date == today_str:
         return {"휴장": False, "기준일": last_date, "판단방법": "코스피 일봉에 오늘 데이터 있음"}
@@ -3440,7 +3458,7 @@ def market_basis_sentence(status: dict) -> str:
         if base_day:
             return (f"오늘({today_label})은 국내 증시 휴장일입니다. 화면의 시세·등락률은 "
                     f"직전 거래일 {_fmt_md_weekday(base_day)} 종가 기준입니다.")
-        return f"오늘({today_label})은 국내 증시 휴장일로 보입니다. 화면의 시세는 직전 거래일 종가 기준입니다."
+        return f"오늘({today_label})은 국내 증시 휴장일입니다. 화면의 시세·등락률은 직전 거래일 종가 기준입니다."
     phase = status.get("상태")
     if phase == "장전":
         day = f" {_fmt_md_weekday(base_day)}" if base_day else ""
