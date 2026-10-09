@@ -57,7 +57,26 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.15"
+APP_VERSION = "v2.1.16"
+# [2026-10-09] v2.1.15 → v2.1.16: 10/9(한글날 휴장) 브리핑 팝업 오류 개선 + 범용 거래내역 가져오기.
+#  ① 휴장 판단 추가(get_krx_market_day_status): 공휴일을 하드코딩하지 않고 코스피 일봉(^KS11)의
+#     마지막 날짜를 오늘과 비교해 자동 판단(평일 09:30 이후 오늘 봉이 없으면 휴장, pykrx로 교차확인).
+#     직전 거래일 데이터를 "오늘"로 표시하던 문제를 고치고, 대시보드 배너·오늘의 리포트 상단·팝업에
+#     같은 "시세 기준일" 문구를 쓴다.
+#  ② 팝업을 "사실 먼저, AI 해석은 접힌 실험 기능"으로 개편. 팝업을 열 때 AI를 호출하지 않는다.
+#     기사는 원문 링크·언론사·날짜를 그대로 보여주고(같은 기사는 한 번만, 관련 종목 표시),
+#     공시는 최근 3일분만 링크로 보여준다. AI 해석(중요도·판단·확인할 것·AI 의견)은 토글을 켤
+#     때만 호출되며, AI에 입력된 기사 목록을 함께 보여줘 원문과 대조할 수 있게 했다.
+#     원인이었던 "기사 주체가 다른 회사인 기사"를 걸러내는 규칙과 "제목보다 강한 단정 표현 금지"
+#     규칙을 종목별 요약 프롬프트에 추가(효과는 실제 데이터로 확인 필요).
+#  ③ "하루 평가금액 변동": 시세 조회 실패로 평가금액이 매입금액으로 대체된 종목은 계산에서 빼고
+#     "-"로 표시. 계산 기준과 한계(소스 혼합·오늘 매매 미반영·TDF/현금 제외·NXT 미반영)를 팝업
+#     안 펼침 영역에 명시.
+#  ④ 거래내역 가져오기에 "기타 증권사(열 직접 지정)" 추가 — 사용자가 자기 파일의 열을 화면에서
+#     직접 지정하는 방식이라 관리자가 다른 사용자의 증권사 파일을 받을 필요가 없다(개인정보 원칙).
+#     파일은 그 사용자의 세션에서만 처리되고, 확정한 행만 본인 개인 시트에 추가된다. 미래에셋·범용
+#     공통으로 계좌명은 기존 목록에서 고르게 하고(오타로 계좌가 갈라지는 문제 방지), 중복 감지를
+#     강화(완전 일치 + 단가만 다른 경우 + 그 계좌의 기존 입력 기간 이내)했다. 날짜는 YYYY-MM-DD로 통일.
 # [2026-10-08] v2.1.14 → v2.1.15: "오늘의 투자 브리핑" 팝업 추가. 앱을 열면(세션당 하루 한 번)
 # 시황·가장 중요한 뉴스·내 보유종목(오늘 평가금액 변동 포함)·오늘 확인할 것·AI 의견을 한
 # 장으로 보여주고, 헤더의 "📊 오늘의 브리핑" 버튼으로 언제든 다시 열 수 있다. 종목별 AI
@@ -323,6 +342,387 @@ def parse_mirae_asset_csv(file_bytes: bytes) -> tuple[pd.DataFrame, dict]:
         "제외사유": skip_reasons,
     }
     return df, stats
+
+# ============================================================
+# 범용 거래내역 가져오기 (열 직접 지정) — [2026-10-09 신규, v2.1.16]
+# ============================================================
+# [배경] 미래에셋 전용 파서(parse_mirae_asset_csv)는 Jone 본인의 실제 파일로 양식을 검증해서 만들었다.
+# 다른 증권사 양식을 같은 방식으로 늘리려면 다른 사용자의 거래내역 파일을 관리자가 받아야 하는데,
+# 이는 "관리자도 사용자 데이터를 볼 수 없다"는 이 앱의 원칙(사용안내서 FAQ)에 어긋난다(Jone 지적,
+# 2026-10-09). 그래서 사용자가 자기 파일의 열을 화면에서 직접 지정하는 방식으로 만든다.
+#   - 파일은 그 사용자의 세션 안에서만 읽고, 앱이 따로 보관하지 않는다.
+#   - 확정한 행만 그 사용자의 개인 시트 '거래이력' 탭 끝에 추가된다(기존 행 수정·삭제 없음).
+# [한계] 거래 1건이 한 줄인 표 형식만 지원한다. 미래에셋 [0650]처럼 거래 1건이 두 줄로 나뉜
+# 양식은 전용 파서를 써야 한다. 종목코드 열이 없는(종목명만 있는) 파일은 지원하지 않는다 — 이름
+# 만으로 종목을 추측하면 금액이 걸린 데이터가 틀릴 위험이 있기 때문.
+_IMPORT_FIELD_GUESS = {
+    "거래일자": ("거래일자", "체결일자", "매매일자", "결제일자", "거래일", "일자", "날짜", "date"),
+    "거래구분": ("거래구분", "매매구분", "거래종류", "거래유형", "매수매도", "매수/매도", "구분", "적요", "type"),
+    "종목코드": ("종목코드", "종목번호", "단축코드", "상품코드", "코드", "티커", "ticker", "symbol"),
+    "종목명": ("종목명", "상품명", "종목", "name"),
+    "거래수량": ("거래수량", "체결수량", "매매수량", "수량", "qty", "quantity"),
+    "거래단가": ("거래단가", "체결단가", "매매단가", "단가", "체결가", "가격", "price"),
+}
+_IMPORT_REQUIRED_FIELDS = ("거래일자", "거래구분", "종목코드", "거래수량", "거래단가")
+_IMPORT_NEW_ACCOUNT_OPTION = "➕ 새 계좌 이름 직접 입력"
+
+def _decode_text_bytes(file_bytes: bytes) -> str | None:
+    """CSV 바이트를 CP949 → UTF-8(BOM) → UTF-8 순서로 디코딩(국내 증권사 파일은 대부분 CP949)."""
+    for enc in ("cp949", "utf-8-sig", "utf-8"):
+        try:
+            return file_bytes.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+def read_generic_trade_file(file_bytes: bytes, filename: str) -> tuple[list[list[str]], str | None]:
+    """CSV 또는 엑셀(.xlsx) 파일을 "문자열 2차원 목록"으로 읽는다. 반환: (행 목록, 오류메시지)."""
+    name = (filename or "").lower()
+    try:
+        if name.endswith(".xlsx"):
+            df = pd.read_excel(BytesIO(file_bytes), header=None, dtype=str, engine="openpyxl")
+            rows = df.fillna("").astype(str).values.tolist()
+        else:
+            text = _decode_text_bytes(file_bytes)
+            if text is None:
+                return [], "파일 인코딩을 인식하지 못했습니다 (CP949/UTF-8 모두 실패)."
+            rows = list(csv.reader(io.StringIO(text)))
+    except Exception as e:
+        return [], f"파일을 읽는 중 오류가 발생했습니다: {e}"
+    rows = [[str(c).strip() for c in r] for r in rows]
+    rows = [r for r in rows if any(c for c in r)]
+    if not rows:
+        return [], "파일에 내용이 없습니다."
+    return rows, None
+
+def _guess_header_row(rows: list[list[str]]) -> int:
+    """앞쪽 15줄 중 '글자로 된 칸이 3개 이상'인 첫 줄을 열 제목 줄로 추정(사용자가 바꿀 수 있음)."""
+    for i, r in enumerate(rows[:15]):
+        texts = [c for c in r if c and not re.fullmatch(r"[-+\d.,\s/:]+", c)]
+        if len(texts) >= 3:
+            return i
+    return 0
+
+def _build_import_table(rows: list[list[str]], header_idx: int) -> pd.DataFrame:
+    """header_idx 줄을 열 이름으로, 그 아래 줄들을 데이터로 하는 표를 만든다. 열 이름이 비었거나
+    겹치면 "열3", "수량(2)"처럼 고유하게 바꾼다."""
+    header = rows[header_idx]
+    width = max(len(r) for r in rows[header_idx:]) if rows[header_idx:] else len(header)
+    names, seen = [], {}
+    for j in range(width):
+        base = header[j].strip() if j < len(header) and header[j].strip() else f"열{j + 1}"
+        seen[base] = seen.get(base, 0) + 1
+        names.append(base if seen[base] == 1 else f"{base}({seen[base]})")
+    data = [r + [""] * (width - len(r)) for r in rows[header_idx + 1:]]
+    return pd.DataFrame(data, columns=names)
+
+def _guess_import_column(columns: list[str], field: str) -> str | None:
+    """열 이름으로 필드를 추정(완전 일치 → 포함 순). 추정이 틀릴 수 있어 화면에서 사용자가 확인한다."""
+    keys = _IMPORT_FIELD_GUESS.get(field, ())
+    norm = {c: re.sub(r"\s", "", c).lower() for c in columns}
+    for k in keys:
+        for c in columns:
+            if norm[c] == k.lower():
+                return c
+    for k in keys:
+        for c in columns:
+            if k.lower() in norm[c]:
+                return c
+    return None
+
+def normalize_import_date(v) -> str | None:
+    """"2026.10.08" · "2026/10/8" · "20261008" · "2026-10-08 00:00:00" → "2026-10-08". 실패하면 None."""
+    s = str(v or "").strip()
+    m = re.match(r"^(\d{4})[.\-/년\s]*(\d{1,2})[.\-/월\s]*(\d{1,2})", s)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+def normalize_import_code(v) -> str | None:
+    """종목코드 정리: "A005930"→"005930", 엑셀이 앞자리 0을 지운 "5930"·"5930.0"→"005930",
+    영문 포함 6자리 국내코드(예: "0091C0")·미국 티커("aapl"→"AAPL")는 대문자로. 인식 불가면 None."""
+    s = str(v or "").strip().strip("'\"=").strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".")[0]
+    if re.fullmatch(r"[Aa]\d{6}", s):
+        return s[1:]
+    if re.fullmatch(r"\d{1,6}", s):
+        return s.zfill(6)
+    if re.fullmatch(r"[0-9A-Za-z]{6}", s) and re.search(r"\d", s):
+        return s.upper()
+    if re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,9}", s):
+        return s.upper()
+    return None
+
+def _to_import_number(v) -> float | None:
+    """"1,234" · "1,234원" · "$230.50" · "  10 " → 숫자. 실패하면 None."""
+    s = re.sub(r"[,\s원$₩]", "", str(v or ""))
+    if s in ("", "-"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def _int_if_whole(x: float):
+    """정수로 떨어지면 int, 아니면 float 그대로(해외 주식 달러 단가·소수점 수량 보존)."""
+    return int(round(x)) if abs(x - round(x)) < 1e-9 else float(x)
+
+def parse_generic_trade_table(table: pd.DataFrame, mapping: dict, buy_values: list[str],
+                              sell_values: list[str]) -> tuple[pd.DataFrame, dict]:
+    """사용자가 지정한 열(mapping: 필드명→열이름)로 표를 거래이력 시트 형식으로 변환한다.
+    거래구분 열의 값 중 buy_values는 매수, sell_values는 매도로 보고 나머지 행은 건너뛴다.
+    반환: (DataFrame[REQUIRED_SHEET_HEADERS["거래이력"]], 통계 dict)"""
+    buy_set = {str(x).strip() for x in buy_values}
+    sell_set = {str(x).strip() for x in sell_values}
+    parsed, skip = [], {}
+
+    def _skip(reason: str):
+        skip[reason] = skip.get(reason, 0) + 1
+
+    name_col = mapping.get("종목명")
+    for _, r in table.iterrows():
+        kind = str(r[mapping["거래구분"]]).strip()
+        구분 = "매수" if kind in buy_set else "매도" if kind in sell_set else None
+        if 구분 is None:
+            _skip(f"매수·매도 아님({kind or '빈 값'})")
+            continue
+        d = normalize_import_date(r[mapping["거래일자"]])
+        if d is None:
+            _skip("날짜 인식 실패")
+            continue
+        code = normalize_import_code(r[mapping["종목코드"]])
+        if code is None:
+            _skip("종목코드 인식 실패")
+            continue
+        qty = _to_import_number(r[mapping["거래수량"]])
+        price = _to_import_number(r[mapping["거래단가"]])
+        if qty is None or price is None:
+            _skip("수량/단가 숫자 인식 실패")
+            continue
+        qty, price = abs(qty), abs(price)  # 매도를 음수로 적는 양식 대비(구분은 거래구분 열로만 판단)
+        if qty <= 0 or price <= 0:
+            _skip("수량/단가 0 이하")
+            continue
+        raw_name = str(r[name_col]).strip() if name_col else ""
+        parsed.append({
+            "종목코드": code, "종목명": resolve_stock_name(code, raw_name) or "(확인 필요)",
+            "거래일자": d, "거래구분": 구분, "거래수량": _int_if_whole(qty), "거래단가": _int_if_whole(price),
+            "운용사": "", "비고": "파일 가져오기",
+        })
+    df = pd.DataFrame(parsed, columns=REQUIRED_SHEET_HEADERS["거래이력"])
+    return df, {
+        "매수": int((df["거래구분"] == "매수").sum()) if not df.empty else 0,
+        "매도": int((df["거래구분"] == "매도").sum()) if not df.empty else 0,
+        "제외": sum(skip.values()), "제외사유": skip,
+    }
+
+def _to_sheet_value(v):
+    """numpy 숫자 등을 gspread가 받을 수 있는 파이썬 기본 타입으로 바꾼다."""
+    if hasattr(v, "item"):
+        try:
+            v = v.item()
+        except Exception:
+            pass
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return "" if v is None else v
+
+def _render_import_preview_and_save(parsed_df: pd.DataFrame, trade_df: pd.DataFrame, key_prefix: str,
+                                    default_account: str = ""):
+    """[2026-10-09, v2.1.16] 미래에셋·범용 가져오기가 공통으로 쓰는 "미리보기 → 확인 → 저장" 단계.
+    ① 계좌명: 기존 거래이력의 운용사 목록에서 고른다(새 계좌만 직접 입력) — 글자가 하나라도 다르면
+       다른 계좌로 갈라지는 문제 방지.
+    ② 중복 감지(자동 삭제가 아니라 '저장' 체크를 미리 꺼둘 뿐, 최종 판단은 사용자):
+       - 완전 일치: 종목·날짜·구분·수량·단가가 기존 행과 같음
+       - 단가만 다름: 종목·날짜·구분·수량이 같음(손으로 입력하며 단가를 반올림한 경우 등)
+       - 기존 입력 기간: 고른 계좌의 기존 마지막 거래일 이전·당일 거래(이미 입력했을 가능성)
+    ③ 날짜는 YYYY-MM-DD로 통일해서 저장한다(시트의 기존 날짜와 형식이 달라 중복 감지가 안 되는 문제 방지)."""
+    parsed_df = parsed_df.copy()
+    parsed_df["거래일자"] = parsed_df["거래일자"].apply(lambda v: normalize_import_date(v) or str(v).strip())
+
+    existing_accounts = []
+    if not trade_df.empty and "운용사" in trade_df.columns:
+        existing_accounts = sorted({str(a).strip() for a in trade_df["운용사"] if str(a).strip()})
+    # 기본 계좌가 정해지지 않은 경우(범용 가져오기)엔 기존 계좌를 임의로 미리 고르지 않고
+    # "(계좌를 선택하세요)"로 시작해, 사용자가 반드시 직접 고르게 한다(엉뚱한 계좌로 저장 방지).
+    placeholder = "(계좌를 선택하세요)"
+    if default_account in existing_accounts:
+        options = existing_accounts + [_IMPORT_NEW_ACCOUNT_OPTION]
+        idx = existing_accounts.index(default_account)
+    elif default_account or not existing_accounts:
+        options = existing_accounts + [_IMPORT_NEW_ACCOUNT_OPTION]
+        idx = len(options) - 1
+    else:
+        options = [placeholder] + existing_accounts + [_IMPORT_NEW_ACCOUNT_OPTION]
+        idx = 0
+    choice = st.selectbox("이 거래들을 어느 계좌(운용사)로 저장할까요?", options, index=idx,
+                          key=f"{key_prefix}_account_sel",
+                          help="기존 거래이력·비주식자산과 같은 계좌명을 써야 같은 계좌로 합쳐집니다.")
+    if choice == _IMPORT_NEW_ACCOUNT_OPTION:
+        account_name = st.text_input("새 계좌 이름", value=default_account, key=f"{key_prefix}_account_new").strip()
+    elif choice == placeholder:
+        account_name = ""
+    else:
+        account_name = choice
+
+    strict, loose, last_date = set(), set(), None
+    if not trade_df.empty:
+        for _, r in trade_df.iterrows():
+            code = normalize_import_code(r.get("종목코드", "")) or str(r.get("종목코드", "")).strip()
+            d = normalize_import_date(r.get("거래일자", "")) or str(r.get("거래일자", "")).strip()[:10]
+            kind = str(r.get("거래구분", "")).strip()
+            qty = round(_safe_num(r.get("거래수량", 0)), 4)
+            price = round(_safe_num(r.get("거래단가", 0)), 4)
+            strict.add((code, d, kind, qty, price))
+            loose.add((code, d, kind, qty))
+            if account_name and str(r.get("운용사", "")).strip() == account_name and normalize_import_date(d):
+                last_date = max(last_date, d) if last_date else d
+
+    def _flag(r) -> str:
+        key4 = (str(r["종목코드"]), str(r["거래일자"]), str(r["거래구분"]), round(float(r["거래수량"]), 4))
+        if key4 + (round(float(r["거래단가"]), 4),) in strict:
+            return "⚠️ 이미 있음"
+        if key4 in loose:
+            return "⚠️ 단가만 다른 거래 있음"
+        if last_date and str(r["거래일자"]) <= last_date:
+            return f"ℹ️ 기존 입력 기간(~{last_date})"
+        return ""
+
+    preview_df = parsed_df.copy()
+    flags = preview_df.apply(_flag, axis=1) if not preview_df.empty else pd.Series(dtype=str)
+    preview_df.insert(0, "저장", flags == "")
+    preview_df.insert(1, "중복 의심", flags)
+    n_flag = int((flags != "").sum())
+    if n_flag:
+        msg = f"⚠️ {n_flag}건은 이미 입력됐을 가능성이 있어 '저장' 체크를 미리 꺼뒀습니다."
+        if last_date:
+            msg += f" ('{account_name}' 계좌의 기존 거래이력은 {last_date}까지 있습니다.)"
+        st.warning(msg + " 표에서 확인 후 실제로 새로운 거래만 체크해주세요.")
+    st.caption("⬇️ 저장 전 내용을 꼭 확인해주세요. 종목명이 \"(확인 필요)\"로 나오면 직접 수정하고, 필요 없는 행은 체크를 해제하세요.")
+
+    editor_key = f"{key_prefix}_editor_{hashlib.md5(account_name.encode('utf-8')).hexdigest()[:6]}"
+    edited = st.data_editor(
+        preview_df, hide_index=True, width="stretch", key=editor_key,
+        column_config={
+            "저장": st.column_config.CheckboxColumn("저장"),
+            "중복 의심": st.column_config.TextColumn("중복 의심", disabled=True),
+            "거래수량": st.column_config.NumberColumn("거래수량"),
+            "거래단가": st.column_config.NumberColumn("거래단가"),
+        },
+        disabled=["운용사", "비고"],
+    )
+    edited = edited.drop(columns=["중복 의심"])
+
+    if st.button("✅ 선택한 거래 저장", key=f"{key_prefix}_confirm"):
+        to_save = edited[edited["저장"]].drop(columns=["저장"]).copy()
+        if to_save.empty:
+            st.warning("저장을 선택한 행이 없습니다.")
+            return
+        if not account_name:
+            st.warning("계좌(운용사) 이름을 입력해주세요.")
+            return
+        to_save["운용사"] = account_name
+        to_save["거래일자"] = to_save["거래일자"].apply(lambda v: normalize_import_date(v) or str(v).strip())
+        spreadsheet = get_spreadsheet(st.session_state.get("spreadsheet_id", ""))
+        if spreadsheet is None:
+            st.error("개인 시트를 열지 못했습니다. 잠시 후 다시 시도해주세요.")
+            return
+        try:
+            ws = spreadsheet.worksheet("거래이력")
+            rows_to_write = [[_to_sheet_value(v) for v in row]
+                             for row in to_save[REQUIRED_SHEET_HEADERS["거래이력"]].itertuples(index=False)]
+            _call_with_retry(ws.append_rows, rows_to_write)
+            load_sheet.clear()
+            load_all_data.clear()
+            st.success(f"{len(rows_to_write)}건을 '{account_name}' 계좌로 거래이력에 저장했습니다. "
+                       "화면 상단에서 다른 탭으로 이동했다가 돌아오면 반영된 걸 확인할 수 있습니다. "
+                       "잘못 저장했다면 구글시트 '거래이력' 탭에서 비고가 '가져오기'인 행을 지우면 됩니다.")
+        except gspread.exceptions.WorksheetNotFound:
+            st.error("'거래이력' 시트를 찾을 수 없습니다.")
+        except Exception as e:
+            logging.warning("거래내역 가져오기 저장 실패: %s", e)
+            st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+def _render_generic_trade_import(trade_df: pd.DataFrame):
+    """기타 증권사 파일: 업로드 → 열 제목 줄 확인 → 열 지정 → 매수/매도 값 지정 → 미리보기·저장."""
+    st.caption("거래 1건이 한 줄로 된 CSV·엑셀(.xlsx) 파일이면 어느 증권사든 쓸 수 있습니다. 파일은 앱에 따로 "
+               "보관되지 않고, 아래에서 확정한 행만 내 개인 구글시트 '거래이력' 탭에 추가됩니다.")
+    uploaded = st.file_uploader("CSV 또는 엑셀 파일 선택", type=["csv", "xlsx"], key="generic_trade_uploader")
+    if uploaded is None:
+        return
+    rows, err = read_generic_trade_file(uploaded.getvalue(), uploaded.name)
+    if err:
+        st.error(f"⚠️ {err}")
+        return
+
+    max_header = min(len(rows), 30)
+    header_no = st.number_input("열 제목(거래일자·종목코드 등)이 있는 줄 번호", min_value=1, max_value=max_header,
+                                value=min(_guess_header_row(rows) + 1, max_header), step=1,
+                                key="generic_trade_header_row")
+    table = _build_import_table(rows, int(header_no) - 1)
+    if table.empty:
+        st.warning("열 제목 줄 아래에 데이터가 없습니다. 줄 번호를 확인해주세요.")
+        return
+    st.caption("파일 앞부분 미리보기 (열 제목이 맞게 잡혔는지 확인하세요)")
+    st.dataframe(table.head(5), hide_index=True, width="stretch")
+
+    columns = list(table.columns)
+    st.markdown("**각 항목이 파일의 어느 열인지 지정해주세요**")
+    mapping = {}
+    field_cols = st.columns(3)
+    for i, field in enumerate(_IMPORT_REQUIRED_FIELDS + ("종목명",)):
+        required = field in _IMPORT_REQUIRED_FIELDS
+        placeholder = "(선택)" if required else "(없음 — 코드로 자동 조회)"
+        opts = [placeholder] + columns
+        guess = _guess_import_column(columns, field)
+        with field_cols[i % 3]:
+            sel = st.selectbox(field + (" *" if required else ""), opts,
+                               index=opts.index(guess) if guess in opts else 0, key=f"generic_map_{field}")
+        if sel != placeholder:
+            mapping[field] = sel
+    missing = [f for f in _IMPORT_REQUIRED_FIELDS if f not in mapping]
+    if missing:
+        st.info("필수 항목(*)을 지정해주세요: " + ", ".join(missing))
+        return
+    chosen = [mapping[f] for f in _IMPORT_REQUIRED_FIELDS]
+    if len(set(chosen)) != len(chosen):
+        st.warning("서로 다른 필수 항목에 같은 열이 지정됐습니다. 열 지정을 확인해주세요.")
+        return
+
+    kinds = [v for v in pd.unique(table[mapping["거래구분"]].astype(str).str.strip()) if v][:60]
+
+    def _default(word: str) -> list[str]:
+        return [v for v in kinds if word in v and not any(x in v for x in ("취소", "정정"))]
+
+    kc1, kc2 = st.columns(2)
+    with kc1:
+        buy_values = st.multiselect("'매수'로 볼 값", kinds, default=_default("매수"), key="generic_buy_values")
+    with kc2:
+        sell_values = st.multiselect("'매도'로 볼 값", [k for k in kinds if k not in buy_values],
+                                     default=[v for v in _default("매도") if v not in buy_values],
+                                     key="generic_sell_values")
+    st.caption("거래구분 열에 있는 값들입니다. 배당·입출금·이체처럼 매매가 아닌 값은 비워두면 자동으로 제외됩니다.")
+    if not buy_values and not sell_values:
+        st.info("매수 또는 매도로 볼 값을 하나 이상 골라주세요.")
+        return
+
+    parsed_df, stats = parse_generic_trade_table(table, mapping, buy_values, sell_values)
+    if parsed_df.empty:
+        st.warning("조건에 맞는 매수·매도 거래를 찾지 못했습니다. 열 지정과 매수/매도 값을 확인해주세요.")
+        if stats["제외사유"]:
+            st.caption("제외 사유: " + ", ".join(f"{k} {v}건" for k, v in stats["제외사유"].items()))
+        return
+    st.success(f"매수 {stats['매수']}건, 매도 {stats['매도']}건을 찾았습니다 (제외 {stats['제외']}건).")
+    if stats["제외사유"]:
+        st.caption("제외 사유: " + ", ".join(f"{k} {v}건" for k, v in stats["제외사유"].items()))
+    _render_import_preview_and_save(parsed_df, trade_df, key_prefix="generic_import")
+
 
 # ============================================================
 # DART 공시 고유번호(corp_code) 자동 조회 — [2026-08-12 추가]
@@ -2071,14 +2471,18 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> d
     [2026-10-08] 반환 타입을 str → dict로 변경: {"중요도", "판단", "본문"} 3개 키.
     기존엔 브리핑 문장만 돌려줬는데, 이제 같은 AI 호출 안에서 중요도(A/B/C)·판단(긍정/
     중립/부정)까지 같이 받아 파싱한다 — API 호출 횟수는 그대로이고 프롬프트에 두 줄만
-    추가한 것. 호출부(render_daily_report)도 이 dict 구조에 맞춰 함께 수정했다."""
+    추가한 것. 호출부(render_daily_report)도 이 dict 구조에 맞춰 함께 수정했다.
+    [2026-10-09, v2.1.16] 10/9 팝업에서 다른 회사(SK) 기사가 삼성전자로 귀속되고, 제목에 없는
+    "5년 계약"·"결렬" 같은 표현이 만들어진 문제로 "기사 주체 확인"·"과장 금지" 규칙을 추가하고
+    뉴스에 언론사를 함께 넘긴다(제목만 넘기는 구조는 그대로 — 본문 입력은 이번 범위 아님).
+    효과는 실제 데이터로 확인이 필요하다."""
     try:
         api_key = st.secrets["anthropic"]["api_key"]
     except Exception:
         return {"중요도": "-", "판단": "⚪", "본문": ""}
 
     news_lines = "\n".join(
-        f"- [{n.get('날짜', '')}] {n.get('제목', '')}"
+        f"- [{n.get('날짜', '')}] {n.get('언론사', '')}: {n.get('제목', '')}"
         for n in report.get("뉴스", [])[:8]
     ) or "없음"
     disclosure_lines = "\n".join(
@@ -2093,6 +2497,7 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> d
 
     prompt = f"""아래는 {name}({code})에 대해 오늘 수집된 원본 데이터입니다. 보유종목 전체를
 한 화면에서 훑어보는 요약 화면에 들어갈 아주 짧은 브리핑을 한국어로 작성해주세요.
+뉴스는 네이버 증권이 이 종목 관련으로 분류한 기사의 "제목"만 있고 본문은 없습니다.
 
 [최근 뉴스]
 {news_lines}
@@ -2116,7 +2521,14 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> d
   없는 수치·지표는 데이터가 있다고 언급하지도 말 것)
 - 투자 조언이나 매수/매도 권유, "보유 유지"·"매도 검토" 같은 행동 제안은 절대 하지 말고
   사실 전달에만 집중할 것 — 중요도·판단은 "정보의 성격 분류"일 뿐 매매 신호가 아님
-- 불릿은 마크다운 불릿(-) 형식으로만 출력할 것"""
+- 불릿은 마크다운 불릿(-) 형식으로만 출력할 것
+- [기사 주체 확인] 각 기사의 주체(주어)가 {name} 자체인지 먼저 확인할 것. 다른 회사·계열사·
+  경쟁사·그룹 총수 등이 주체인 기사(예: 다른 회사의 공장·투자·인사 소식)는, 제목에 {name}과의
+  직접적인 관련이 명시되어 있지 않으면 브리핑·중요도·판단 모두에서 제외할 것
+- [과장 금지] 제목에 없는 수치·기간·시점·계약조건(예: "5년 계약", "곧 발표")을 만들어내지 말 것.
+  "육박·약·추진·검토·미타결" 같은 표현을 "확정·체결·결렬·강경" 같은 더 강한 단정으로 바꾸지 말고
+  제목의 표현 수준을 그대로 유지할 것
+- 제목만으로 뜻이 불분명하면 그 기사는 언급하지 말 것"""
 
     try:
         resp = requests.post(
@@ -2174,7 +2586,10 @@ def _portfolio_summary_uncached(payload_json: str) -> dict:
   알려주는 수준으로만 작성(비중·당일 변동·브리핑 근거 사용). 특이사항이 없으면
   "오늘은 포트폴리오에 영향을 줄 만한 뚜렷한 변화가 없습니다."라고 쓸 것
 - 위 데이터에 없는 내용은 절대 추측하지 말 것
-- 매수·매도·보유 유지·비중 조절 같은 행동 제안이나 권유는 절대 하지 말 것"""
+- 매수·매도·보유 유지·비중 조절 같은 행동 제안이나 권유는 절대 하지 말 것
+- "시세기준"의 휴장이 true이면 오늘은 증시 휴장일이다. 등락률은 기준일(직전 거래일) 값이므로
+  "오늘 하락/상승"이라고 쓰지 말고 "직전 거래일(기준일)"이라고 쓸 것
+- 종목 브리핑에 적힌 표현보다 강한 단정(결렬·확정·강경 등)이나 새로운 수치·시점을 만들지 말 것"""
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -2508,6 +2923,18 @@ def get_current_price(code: str, prices: dict) -> float | None:
         return None
     return prices.get(ticker)
 
+def _bar_date_str(idx_value) -> str:
+    """야후 일봉 인덱스 값(Timestamp, 시간대 있음/없음)을 "YYYY-MM-DD" 문자열로 바꾼다.
+    [2026-10-09 추가] 등락률이 "어느 날의 종가 기준"인지 화면에 표시하기 위함 — 휴장일에
+    직전 거래일 등락률을 "오늘"로 오인하던 문제(v2.1.15)의 재발 방지. 실패하면 빈 문자열."""
+    try:
+        ts = pd.Timestamp(idx_value)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert(KST)
+        return ts.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
 def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
     """여러 티커의 (현재가, 전일종가) 기준 등락률을 일괄 조회하고, 실패한 티커만 개별 재시도.
     get_day_change()가 사용하는 핵심 로직.
@@ -2519,7 +2946,10 @@ def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
     일요일에도 값이 있어 그 행이 안 지워지지만, 코스피는 그 행이 비어있다(NaN) — 이렇게 되면
     코스피의 '전일 종가'가 실제로는 이틀 전 종가가 되어버리는 식으로 등락률이 완전히 틀어진다.
     그래서 반드시 티커(컬럼)별로 각자 결측치를 제거한 뒤, 그 티커 자신의 마지막 2개 값만
-    사용해야 한다 — 공유 인덱스에서 같은 위치(iloc)를 그대로 믿으면 안 된다."""
+    사용해야 한다 — 공유 인덱스에서 같은 위치(iloc)를 그대로 믿으면 안 된다.
+    [2026-10-09] 반환 dict에 "date"(마지막 종가의 날짜, YYYY-MM-DD)를 추가했다. 이 함수는 최근
+    종가 2개만 비교하므로 휴장일에는 직전 거래일의 등락률이 나온다 — 호출부가 이 날짜를 보고
+    "기준일"을 표시할 수 있게 하기 위함(값 계산 방식 자체는 그대로)."""
     result = {}
     try:
         ticker_str = " ".join(ticker_list)
@@ -2535,7 +2965,8 @@ def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
                         cur = float(col_series.iloc[-1])
                         prev = float(col_series.iloc[-2])
                         if prev != 0:
-                            result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100}
+                            result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100,
+                                         "date": _bar_date_str(col_series.index[-1])}
                 except Exception:
                     continue
     except Exception as e:
@@ -2549,7 +2980,8 @@ def _fetch_current_and_prev_close(ticker_list: list) -> dict[str, dict]:
             if len(closes) >= 2:
                 cur, prev = float(closes.iloc[-1]), float(closes.iloc[-2])
                 if prev != 0:
-                    result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100}
+                    result[t] = {"current": cur, "change_pct": (cur - prev) / prev * 100,
+                                 "date": _bar_date_str(closes.index[-1])}
         except Exception as e:
             logging.warning("개별 등락률 조회 실패 [%s]: %s", t, e)
     return result
@@ -2886,6 +3318,132 @@ def is_after_krx_close() -> bool:
     market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
     nxt_after_end = now.replace(hour=20, minute=0, second=0, microsecond=0)
     return market_close <= now < nxt_after_end
+
+# ============================================================
+# 휴장 판단 · 시세 기준일 — [2026-10-09 신규, v2.1.16]
+# ============================================================
+# [배경] 2026-10-09(한글날, 국내 증시 휴장)에 브리핑 팝업이 직전 거래일(10/8)의 등락률·평가금액
+# 변동을 "오늘"로 표시하는 오류가 있었다. 등락률 계산(_fetch_current_and_prev_close)은 "최근 종가
+# 2개"를 비교할 뿐이라 휴장일엔 자연히 직전 거래일 값이 나오는데, 화면이 그 날짜를 확인하지 않았다.
+# [방식 — Jone 확정] 공휴일 목록을 코드에 하드코딩하지 않는다(대체공휴일·임시공휴일을 놓치기 쉬움).
+# 대신 코스피 지수(^KS11) 일봉의 마지막 날짜가 오늘인지로 판단한다.
+#   - 오늘 봉이 있으면 → 개장일
+#   - 주말 → 휴장
+#   - 평일 09:30 이후인데 오늘 봉이 없으면 → 휴장. 단, 야후 데이터 지연으로 오판하지 않도록
+#     pykrx(삼성전자 005930 일봉)에 오늘 행이 있는지 한 번 더 확인해, 있으면 개장일로 본다.
+#   - 평일 09:30 이전 → 아직 판단할 수 없음(None). 시세는 어차피 직전 거래일 종가이므로
+#     "장 시작 전" 안내로 충분하다.
+#   - 조회가 전부 실패하면 요일·시간대로만 판단(주말=휴장, 평일=개장 가정)하고 그 사실을 표시.
+_KRX_STATUS_LABEL = {"휴장": "휴장일", "장전": "장 시작 전", "장중": "정규장 운영 중",
+                     "장후": "정규장 마감 후", "마감": "거래 종료"}
+
+def _pykrx_has_today_bar(today_str: str) -> bool | None:
+    """pykrx(네이버 경유)로 삼성전자 일봉에 오늘 행이 있는지 확인. 확인 불가면 None."""
+    try:
+        df = krx_stock.get_market_ohlcv_by_date(today_str, today_str, "005930")
+        if df is None:
+            return None
+        df = df[df["종가"] > 0] if "종가" in df.columns else df
+        return not df.empty
+    except Exception as e:
+        logging.warning("휴장 교차확인(pykrx) 실패: %s", e)
+        return None
+
+@st.cache_data(ttl=600)
+def get_krx_market_day_status(_today_key: str) -> dict:
+    """오늘의 국내 증시 상태를 판단한다 (10분 캐시, 인자 _today_key는 날짜가 바뀌면 캐시를 새로
+    만들기 위한 키 — 호출부는 get_market_day_status()를 쓰면 된다).
+    반환: {"휴장": True/False/None, "기준일": "YYYY-MM-DD" 또는 "", "판단방법": str}
+    - 기준일: 화면 시세·등락률이 가리키는 마지막 거래일(코스피 일봉 마지막 날짜)."""
+    now = datetime.now(KST)
+    today = now.date()
+    is_weekend = today.weekday() >= 5
+    after_open_check = now >= now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+    last_date = None
+    try:
+        hist = yf.Ticker("^KS11").history(period="10d")
+        closes = hist["Close"].dropna()
+        if not closes.empty:
+            last_date = _bar_date_str(closes.index[-1]) or None
+    except Exception as e:
+        logging.warning("휴장 판단용 코스피 일봉 조회 실패: %s", e)
+
+    today_str = today.strftime("%Y-%m-%d")
+    if last_date is None:
+        # 야후 조회 실패 → 주말이면 휴장, 평일 09:30 이후면 pykrx로만 판단, 그래도 모르면 None(확인 불가)
+        if is_weekend:
+            return {"휴장": True, "기준일": "", "판단방법": "주말(코스피 일봉 조회 실패)"}
+        if not after_open_check:
+            return {"휴장": None, "기준일": "", "판단방법": "평일 09:30 이전(코스피 일봉 조회 실패)"}
+        pykrx_today = _pykrx_has_today_bar(today.strftime("%Y%m%d"))
+        if pykrx_today is None:
+            return {"휴장": None, "기준일": "", "판단방법": "코스피 일봉·pykrx 모두 조회 실패 — 확인 불가"}
+        return {"휴장": not pykrx_today, "기준일": today_str if pykrx_today else "",
+                "판단방법": "pykrx 오늘 시세 " + ("있음" if pykrx_today else "없음") + "(야후 코스피 일봉 조회 실패)"}
+    if last_date == today_str:
+        return {"휴장": False, "기준일": last_date, "판단방법": "코스피 일봉에 오늘 데이터 있음"}
+    if is_weekend:
+        return {"휴장": True, "기준일": last_date, "판단방법": "주말"}
+    if not after_open_check:
+        return {"휴장": None, "기준일": last_date, "판단방법": "평일 09:30 이전이라 아직 판단 전"}
+    # 평일 09:30 이후인데 야후 일봉에 오늘이 없음 → pykrx로 교차확인
+    pykrx_today = _pykrx_has_today_bar(today.strftime("%Y%m%d"))
+    if pykrx_today:
+        return {"휴장": False, "기준일": today_str,
+                "판단방법": "pykrx에 오늘 시세 있음(야후 코스피 일봉 지연)"}
+    return {"휴장": True, "기준일": last_date,
+            "판단방법": "평일 09:30 이후 코스피 일봉에 오늘 데이터 없음"}
+
+def get_market_day_status() -> dict:
+    """get_krx_market_day_status()에 장 시간대 구분("상태")과 조회시각을 붙여서 반환한다.
+    상태: 휴장 / 장전(~09:00) / 장중(~15:30) / 장후(~20:00) / 마감(20:00~)"""
+    now = datetime.now(KST)
+    base = dict(get_krx_market_day_status(now.strftime("%Y-%m-%d")))
+    if base.get("휴장") is True:
+        phase = "휴장"
+    elif now.hour < 9:
+        phase = "장전"
+    elif now < now.replace(hour=15, minute=30, second=0, microsecond=0):
+        phase = "장중"
+    elif now.hour < 20:
+        phase = "장후"
+    else:
+        phase = "마감"
+    base["상태"] = phase
+    base["조회시각"] = now.strftime("%Y-%m-%d %H:%M")
+    return base
+
+def _fmt_md_weekday(date_str: str) -> str:
+    """"2026-10-08" → "10/8(목)". 형식이 아니면 원래 문자열."""
+    try:
+        d = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+        return f"{d.month}/{d.day}({'월화수목금토일'[d.weekday()]})"
+    except Exception:
+        return str(date_str) or "-"
+
+def market_basis_sentence(status: dict) -> str:
+    """대시보드 배너·오늘의 리포트 상단·브리핑 팝업에서 공통으로 쓰는 "시세 기준" 문장."""
+    base_day = status.get("기준일", "")
+    today_label = _fmt_md_weekday(datetime.now(KST).strftime("%Y-%m-%d"))
+    if status.get("휴장") is True:
+        if base_day:
+            return (f"오늘({today_label})은 국내 증시 휴장일입니다. 화면의 시세·등락률은 "
+                    f"직전 거래일 {_fmt_md_weekday(base_day)} 종가 기준입니다.")
+        return f"오늘({today_label})은 국내 증시 휴장일로 보입니다. 화면의 시세는 직전 거래일 종가 기준입니다."
+    phase = status.get("상태")
+    if phase == "장전":
+        day = f" {_fmt_md_weekday(base_day)}" if base_day else ""
+        return f"정규장 시작(09:00) 전입니다. 화면의 시세·등락률은 직전 거래일{day} 종가 기준입니다."
+    if phase in ("장후", "마감") and status.get("휴장") is None:
+        return ("오늘 개장 여부를 확인하지 못했습니다(시세 서버 조회 실패). "
+                "휴장일이라면 화면의 시세·등락률은 직전 거래일 종가 기준입니다.")
+    if phase == "장중" and status.get("휴장") is None:
+        return ("정규장 시작 직후라 오늘 개장 여부를 아직 확인하지 못했습니다(09:30 이후 자동 판단). "
+                "휴장일이라면 화면의 시세는 직전 거래일 종가입니다.")
+    if phase == "장중":
+        return "정규장 운영 중입니다. 시세는 일정 주기로 갱신되며 실시간과 차이가 있을 수 있습니다."
+    return f"정규장이 마감되었습니다. 화면의 시세·등락률은 오늘({today_label}) 정규장 종가 기준입니다."
 
 def _safe_date_str(v, fmt: str = "%Y-%m-%d") -> str:
     """pandas Timestamp를 안전하게 문자열로 변환. NaT(날짜 파싱 실패)이면 '-'를 반환해
@@ -4182,6 +4740,11 @@ def render_daily_report(holdings_df: pd.DataFrame):
     전면 재설계함. st.metric 대신 커스텀 HTML 카드/배지를 써서 상승=빨강/하락=파랑을
     앱 전체와 통일했다."""
     st.markdown('<div class="section-title">오늘의 시황 · 종목 리포트</div>', unsafe_allow_html=True)
+    # [2026-10-09, v2.1.16] 상단에 시세 기준 문구(휴장 여부 포함) — 대시보드 배너·브리핑 팝업과 동일.
+    _rep_status = get_market_day_status()
+    (st.info if _rep_status.get("휴장") is True else st.caption)(
+        "📅 " + market_basis_sentence(_rep_status) + f" (조회 {_rep_status['조회시각']})"
+    )
     st.caption("공시(DART)·뉴스·애널리스트 리포트는 참고용 정보이며, 투자 판단의 근거로 쓰기엔 부족할 수 있습니다.")
 
     # ── 시황 ──
@@ -4519,6 +5082,11 @@ _BRIEF_STARS = {"A": "★★★★★", "B": "★★★", "C": "★"}
 _BRIEF_IMPORTANCE_RANK = {"A": 3, "B": 2, "C": 1}
 _BRIEF_SENTIMENT_LABEL = {"🟢": "긍정", "🟡": "중립", "🔴": "부정", "⚪": "판단 불가"}
 _WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
+# [2026-10-09, v2.1.16] 팝업의 "최근 기사·최근 공시"를 몇 일 전까지 보여줄지(오늘 포함 달력 기준
+# 오늘-3일까지)와 종목당 최대 기사 수. 연휴가 길면 기사가 적게 보일 수 있다.
+_BRIEF_RECENT_DAYS = 3
+_BRIEF_NEWS_PER_STOCK = 3
+_BRIEF_NEWS_VISIBLE = 10  # 이보다 많으면 나머지는 "더 보기" 펼침 안에 넣는다
 
 def _market_phase_bucket() -> str:
     """AI 종합 캐시 키에 쓰는 장 시간대(서울시간 기준). 시황 문장이 아침 장전 수치로 하루 종일
@@ -4545,33 +5113,6 @@ def _delta_color(delta) -> str:
         return "var(--text-secondary,#888)"
     return _UP_COLOR if delta > 0 else _DOWN_COLOR
 
-def _build_morning_briefing_rows(holdings_df: pd.DataFrame) -> tuple[list[dict], float]:
-    """보유종목(종목코드 단위로 계좌 합산)별 브리핑 행과 총 평가금액을 만든다. 뉴스·공시·AI
-    브리핑은 모두 캐시된 함수 호출이라 이미 만들어진 값이면 즉시 돌아온다."""
-    grouped = holdings_df.groupby(["종목코드", "종목명"], as_index=False)["평가금액"].sum()
-    grouped = grouped[grouped["평가금액"] > 0].reset_index(drop=True)
-    if grouped.empty:
-        return [], 0.0
-    total_value = float(grouped["평가금액"].sum())
-    tickers = tuple(sorted({t for t in (get_asset_ticker(c) for c in grouped["종목코드"]) if t}))
-    day_change = get_day_change(tickers) if tickers else {}
-
-    rows = []
-    for _, r in grouped.iterrows():
-        code, name, value = r["종목코드"], r["종목명"], float(r["평가금액"])
-        ticker = get_asset_ticker(code)
-        pct = (day_change.get(ticker, {}) if ticker else {}).get("change_pct")
-        brief = generate_holdings_overview_briefing(code, name, get_daily_stock_report(code, name))
-        # 오늘 평가금액 변동 = 현재 평가금액 − (현재 평가금액 ÷ (1 + 등락률)) — 시세 기준 근사값
-        delta = value - value / (1 + pct / 100) if pct is not None and pct > -100 else None
-        rows.append({
-            "코드": code, "종목명": name, "비중": value / total_value * 100,
-            "등락률": pct, "변동액": delta,
-            "중요도": brief.get("중요도", "-"), "판단": brief.get("판단", "⚪"),
-            "본문": brief.get("본문", ""),
-        })
-    return rows, total_value
-
 def _brief_bullets(body: str) -> list[str]:
     """브리핑 본문(마크다운 불릿)에서 불릿 문장들만 뽑아낸다."""
     out = []
@@ -4587,22 +5128,111 @@ def _esc(text) -> str:
     """AI·외부 사이트에서 온 문자열을 HTML에 넣기 전에 이스케이프(HTML 주입 방지)."""
     return html_lib.escape(str(text))
 
+def _safe_href(url) -> str:
+    """외부 링크는 http(s)만 허용하고 속성값으로 이스케이프한다(그 외는 빈 문자열)."""
+    u = str(url or "").strip()
+    return html_lib.escape(u, quote=True) if u.startswith(("http://", "https://")) else ""
+
 def _briefing_section_title(text: str) -> str:
     return f"<div style='font-size:15px;font-weight:700;margin:18px 0 8px;'>{text}</div>"
 
-@st.dialog("📊 오늘의 투자 브리핑", width="large")
-def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
-    now = datetime.now(KST)
-    st.caption(f"{now:%Y.%m.%d} ({_WEEKDAY_KO[now.weekday()]}) · 시황·뉴스·리포트 종합 (주식·ETF 기준)")
+def _parse_date_prefix(value) -> date | None:
+    """"2026-10-08 14:20" / "20261008" / "2026.10.08" 등 앞부분의 날짜만 읽는다. 실패하면 None."""
+    digits = re.sub(r"\D", "", str(value or ""))[:8]
+    if len(digits) != 8:
+        return None
+    try:
+        return datetime.strptime(digits, "%Y%m%d").date()
+    except ValueError:
+        return None
 
-    if holdings_df.empty:
-        st.info("보유 중인 종목이 없어 브리핑을 만들 수 없습니다.")
-        return
+def _build_morning_briefing_rows(holdings_df: pd.DataFrame) -> tuple[list[dict], float]:
+    """보유종목(종목코드 단위로 계좌 합산)별 숫자 행과 총 평가금액을 만든다.
+    [2026-10-09, v2.1.16] AI 호출을 완전히 뺐다(팝업을 열 때 AI를 부르지 않는다는 원칙). 각 행에는
+    뉴스·공시 원본(report, 30분 캐시)만 담아 두고, AI 해석은 토글을 켤 때만 따로 만든다.
+    - 등락률 기준일(기준일): 야후 일봉 마지막 날짜. 휴장일엔 직전 거래일이 된다.
+    - 시세 조회 실패로 평가금액이 매입금액으로 대체된 종목(시세반영=False)은 변동액을 계산하지
+      않는다(None → 화면 "-"). 예전엔 이 대체값으로도 계산해서 틀린 숫자가 섞였다."""
+    df = holdings_df.copy()
+    if "시세반영" not in df.columns:
+        df["시세반영"] = True
+    grouped = df.groupby(["종목코드", "종목명"], as_index=False).agg(
+        평가금액=("평가금액", "sum"), 시세반영=("시세반영", "all"))
+    grouped = grouped[grouped["평가금액"] > 0].reset_index(drop=True)
+    if grouped.empty:
+        return [], 0.0
+    total_value = float(grouped["평가금액"].sum())
+    tickers = tuple(sorted({t for t in (get_asset_ticker(c) for c in grouped["종목코드"]) if t}))
+    day_change = get_day_change(tickers) if tickers else {}
 
-    with st.spinner("오늘의 브리핑을 준비하고 있어요... (하루 첫 실행은 조금 걸릴 수 있습니다)"):
-        rows, total_value = _build_morning_briefing_rows(holdings_df)
-        mo = get_market_overview()
+    rows = []
+    for _, r in grouped.iterrows():
+        code, name, value = r["종목코드"], r["종목명"], float(r["평가금액"])
+        priced = bool(r["시세반영"])
+        ticker = get_asset_ticker(code)
+        dc = (day_change.get(ticker, {}) if ticker else {}) or {}
+        pct = dc.get("change_pct")
+        # 하루 평가금액 변동 = 현재 평가금액 − (현재 평가금액 ÷ (1 + 등락률)) — 근사값(계산 기준은 팝업 안내 참고)
+        delta = (value - value / (1 + pct / 100)) if (priced and pct is not None and pct > -100) else None
+        rows.append({
+            "코드": code, "종목명": name, "평가금액": value, "비중": value / total_value * 100,
+            "등락률": pct, "기준일": dc.get("date", ""), "변동액": delta, "시세반영": priced,
+            "report": get_daily_stock_report(code, name),
+        })
+    return rows, total_value
 
+def _collect_recent_news(rows: list[dict], days: int = _BRIEF_RECENT_DAYS,
+                         per_stock: int = _BRIEF_NEWS_PER_STOCK) -> list[dict]:
+    """보유종목별 뉴스에서 최근 N일 기사만 모아, 같은 기사(같은 링크·같은 제목)는 한 번만 남기고
+    "관련 종목"으로 묶는다. 최신순 정렬. AI를 거치지 않은 원본 그대로다."""
+    cutoff = datetime.now(KST).date() - timedelta(days=days)
+    merged: dict[str, dict] = {}
+    for r in rows:
+        items = [n for n in (r["report"].get("뉴스") or [])
+                 if (_parse_date_prefix(n.get("날짜")) or date.min) >= cutoff]
+        items.sort(key=lambda n: str(n.get("날짜", "")), reverse=True)
+        for n in items[:per_stock]:
+            key = (n.get("링크") or "").strip() or (n.get("제목") or "").strip()
+            if not key:
+                continue
+            if key not in merged:
+                merged[key] = {**n, "관련종목": []}
+            if r["종목명"] not in merged[key]["관련종목"]:
+                merged[key]["관련종목"].append(r["종목명"])
+    return sorted(merged.values(), key=lambda n: str(n.get("날짜", "")), reverse=True)
+
+def _collect_recent_disclosures(rows: list[dict], days: int = _BRIEF_RECENT_DAYS) -> list[dict]:
+    """보유종목별 DART 공시(이미 14일치를 30분 캐시로 받아둔 것)에서 최근 N일분만 고른다."""
+    cutoff = datetime.now(KST).date() - timedelta(days=days)
+    out = []
+    for r in rows:
+        for d in (r["report"].get("공시") or []):
+            if (_parse_date_prefix(d.get("날짜")) or date.min) >= cutoff:
+                out.append({**d, "종목명": r["종목명"]})
+    return sorted(out, key=lambda d: str(d.get("날짜", "")), reverse=True)
+
+def _news_item_html(n: dict, show_related: bool = True) -> str:
+    href = _safe_href(n.get("링크"))
+    title = _esc(n.get("제목", "(제목 없음)"))
+    title_html = (f"<a href='{href}' target='_blank' rel='noopener noreferrer' "
+                  f"style='color:inherit;'>{title}</a>") if href else title
+    meta = [m for m in (_esc(n.get("언론사", "")), _esc(n.get("날짜", ""))) if m]
+    if show_related and n.get("관련종목"):
+        meta.append("관련 종목: " + ", ".join(_esc(x) for x in n["관련종목"]))
+    return ("<div style='padding:7px 0;border-top:1px solid rgba(128,128,128,0.15);'>"
+            f"<div style='font-size:13.5px;'>{title_html}</div>"
+            f"<div style='font-size:11.5px;color:var(--text-secondary,#888);margin-top:2px;'>"
+            f"{' · '.join(meta)}</div></div>")
+
+def _render_briefing_ai_section(rows: list[dict], mo: dict, status: dict, now: datetime):
+    """[2026-10-09, v2.1.16] AI 해석 — 토글을 켰을 때만 호출된다. 종목별 요약(24시간 캐시)과
+    포트폴리오 종합(장 시간대별 캐시)을 만들고, 각 종목에 AI에 실제로 입력된 기사·공시 목록을
+    원문 링크로 함께 보여줘 사용자가 대조할 수 있게 한다."""
+    st.warning("⚠️ 실험 기능입니다. AI는 기사 **제목만** 보고 요약하므로 틀리거나 과장될 수 있습니다. "
+               "판단 전 반드시 각 종목의 '근거 기사' 원문을 확인하세요. 매수·매도 권유가 아닙니다.")
+    with st.spinner("AI 해석을 만드는 중... (하루 첫 실행은 종목 수만큼 시간이 걸립니다)"):
+        briefs = {r["코드"]: generate_holdings_overview_briefing(r["코드"], r["종목명"], r["report"])
+                  for r in rows}
         market_payload = {}
         for key in ("코스피", "코스닥", "나스닥", "S&P500", "필라델피아반도체", "원달러환율", "VIX"):
             v = mo.get(key)
@@ -4614,30 +5244,121 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
         flow = mo.get("코스피_수급")
         if flow:
             market_payload["코스피수급_억원"] = {k: round((flow.get(k) or 0) / 1e8) for k in ("외국인", "기관", "개인")}
-
         payload = {
             "날짜": f"{now:%Y-%m-%d}",
+            "시세기준": {"휴장": status.get("휴장") is True, "기준일": status.get("기준일", ""),
+                     "장상태": status.get("상태", "")},
             "시황": market_payload,
             "보유종목": [
                 {"종목명": r["종목명"], "비중_퍼센트": round(r["비중"], 1),
-                 "당일등락률": round(r["등락률"], 2) if r["등락률"] is not None else None,
-                 "중요도": r["중요도"], "판단": _BRIEF_SENTIMENT_LABEL.get(r["판단"], "판단 불가"),
-                 "브리핑": r["본문"]}
+                 "기준일등락률": round(r["등락률"], 2) if r["등락률"] is not None else None,
+                 "중요도": briefs[r["코드"]].get("중요도", "-"),
+                 "판단": _BRIEF_SENTIMENT_LABEL.get(briefs[r["코드"]].get("판단"), "판단 불가"),
+                 "브리핑": briefs[r["코드"]].get("본문", "")}
                 for r in rows
             ],
         }
-        # 캐시 키: 같은 날·같은 장 시간대·같은 종목별 브리핑 내용이면 AI 종합을 재사용
         fingerprint = hashlib.md5(
-            "|".join(f"{r['코드']}{r['중요도']}{r['판단']}{r['본문']}" for r in rows).encode("utf-8")
+            "|".join(f"{r['코드']}{briefs[r['코드']].get('중요도')}{briefs[r['코드']].get('판단')}"
+                     f"{briefs[r['코드']].get('본문')}" for r in rows).encode("utf-8")
         ).hexdigest()[:12]
+        holiday_tag = "휴장" if status.get("휴장") is True else "개장"
         summary = generate_portfolio_briefing_summary(
-            payload, f"{now:%Y-%m-%d}|{_market_phase_bucket()}|{fingerprint}"
+            payload, f"{now:%Y-%m-%d}|{_market_phase_bucket()}|{holiday_tag}|{fingerprint}"
         )
 
-    ai_ok = any(r["중요도"] in _BRIEF_IMPORTANCE_RANK for r in rows)
+    if not any(b.get("중요도") in _BRIEF_IMPORTANCE_RANK for b in briefs.values()):
+        st.caption("AI 해석을 만들지 못했습니다 (API 키 미설정 또는 일시적 오류). 위의 기사·공시 원문은 정상입니다.")
+        return
 
-    # ── 시황 ──
-    st.markdown(_briefing_section_title("🌐 오늘의 시황"), unsafe_allow_html=True)
+    if summary.get("시황"):
+        st.markdown(f"<div style='font-size:13.5px;margin:4px 0 8px;'>💬 {_esc(summary['시황'])}</div>",
+                    unsafe_allow_html=True)
+    if summary.get("확인할것"):
+        st.markdown(
+            "<div style='font-size:13.5px;line-height:1.7;'><b>확인해볼 것</b><br>"
+            + "".join(f"• {_esc(c)}<br>" for c in summary["확인할것"]) + "</div>",
+            unsafe_allow_html=True,
+        )
+    if summary.get("의견"):
+        st.markdown(
+            "<div style='padding:10px 12px;border-radius:10px;background:rgba(46,116,181,0.10);"
+            f"font-size:13.5px;line-height:1.7;margin:8px 0;'>🤖 {_esc(summary['의견'])}</div>",
+            unsafe_allow_html=True,
+        )
+
+    ordered = sorted(rows, key=lambda r: (-_BRIEF_IMPORTANCE_RANK.get(briefs[r["코드"]].get("중요도"), 0),
+                                         -abs(r["변동액"] or 0)))
+    for r in ordered:
+        b = briefs[r["코드"]]
+        imp = b.get("중요도", "-")
+        senti = b.get("판단", "⚪")
+        label = (f"{senti} {r['종목명']} · 중요도 {imp} {_BRIEF_STARS.get(imp, '')} · "
+                 f"{_BRIEF_SENTIMENT_LABEL.get(senti, '판단 불가')}")
+        with st.expander(label):
+            bullets = _brief_bullets(b.get("본문", ""))
+            if bullets:
+                st.markdown("".join(f"<div style='font-size:13.5px;'>• {_esc(x)}</div>" for x in bullets),
+                            unsafe_allow_html=True)
+            else:
+                st.caption("요약 없음")
+            used_news = (r["report"].get("뉴스") or [])[:8]       # generate_holdings_overview_briefing 입력과 동일
+            used_disc = (r["report"].get("공시") or [])[:8]
+            st.markdown("<div style='font-size:12px;font-weight:600;margin-top:8px;'>근거 기사 (AI에 입력된 제목 전체)</div>",
+                        unsafe_allow_html=True)
+            if used_news:
+                st.markdown("".join(_news_item_html(n, show_related=False) for n in used_news),
+                            unsafe_allow_html=True)
+            else:
+                st.caption("입력된 기사 없음")
+            if used_disc:
+                st.markdown("<div style='font-size:12px;font-weight:600;margin-top:8px;'>입력된 공시</div>"
+                            + "".join(_news_item_html({"제목": d.get("제목"), "링크": d.get("링크"),
+                                                       "언론사": d.get("제출인"), "날짜": d.get("날짜")},
+                                                      show_related=False) for d in used_disc),
+                            unsafe_allow_html=True)
+    st.caption("중요도·판단은 AI가 기사 제목·공시만 보고 붙인 참고용 분류이며, 아직 보정되지 않아 긍정(🟢) 쪽으로 "
+               "치우칠 수 있습니다. 'AI에 입력된 제목 전체'는 AI가 본 자료이고, 그중 무엇을 근거로 썼는지는 "
+               "AI 문장과 직접 대조해야 합니다.")
+
+@st.dialog("📊 오늘의 투자 브리핑", width="large")
+def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
+    """[2026-10-09, v2.1.16 개편] "사실 먼저, AI 해석은 접힌 실험 기능". 팝업을 열 때는 AI를 호출하지
+    않고 숫자·원문 링크만 보여준다. 순서: ①데이터 기준 ②시황 ③내 보유종목 ④최근 기사 ⑤최근 공시
+    ⑥AI 해석(토글). 다이얼로그는 Streamlit에서 fragment처럼 동작해, 토글을 켜도 팝업 안만 다시
+    그려지고 팝업이 닫히지 않는다. 토글은 팝업을 새로 열 때마다 호출부에서 꺼진 상태로 초기화한다."""
+    now = datetime.now(KST)
+    if holdings_df.empty:
+        st.info("보유 중인 종목이 없어 브리핑을 만들 수 없습니다.")
+        return
+
+    with st.spinner("시세·기사·공시를 불러오는 중..."):
+        status = get_market_day_status()
+        rows, total_value = _build_morning_briefing_rows(holdings_df)
+        mo = get_market_overview()
+
+    base_day = status.get("기준일", "")
+    is_holiday = status.get("휴장") is True
+
+    # ── ① 데이터 기준 ──
+    holiday_text = ("예 — 휴장일" if is_holiday else
+                    "아니오" if status.get("휴장") is False else
+                    "확인 불가" if "실패" in status.get("판단방법", "") else "확인 전(09:30 이후 판단)")
+    box_bg = "rgba(229,183,59,0.14)" if is_holiday else "rgba(128,128,128,0.08)"
+    st.markdown(
+        f"<div style='background:{box_bg};border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.7;'>"
+        f"<div style='font-weight:700;margin-bottom:2px;'>📅 데이터 기준</div>"
+        f"조회 시각 <b>{_esc(status.get('조회시각', ''))}</b> · "
+        f"시세 기준일 <b>{_esc(_fmt_md_weekday(base_day) if base_day else '-')}</b> · "
+        f"오늘 휴장 여부 <b>{_esc(holiday_text)}</b> · 장 상태 {_esc(_KRX_STATUS_LABEL.get(status.get('상태'), '-'))}<br>"
+        f"<span>{_esc(market_basis_sentence(status))}</span><br>"
+        f"<span style='font-size:11.5px;color:var(--text-secondary,#888);'>휴장 판단 근거: "
+        f"{_esc(status.get('판단방법', '-'))}</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── ② 시황 ──
+    st.markdown(_briefing_section_title("🌐 시황"), unsafe_allow_html=True)
     chips = []
     for key in ("코스피", "코스닥", "나스닥", "S&P500", "필라델피아반도체", "원달러환율"):
         v = mo.get(key)
@@ -4650,10 +5371,9 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
             f"{_change_badge_html(v.get('등락률'))}</div>"
         )
     if chips:
-        st.markdown(
-            "<div style='display:flex;flex-wrap:wrap;gap:8px;'>" + "".join(chips) + "</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<div style='display:flex;flex-wrap:wrap;gap:8px;'>" + "".join(chips) + "</div>",
+                    unsafe_allow_html=True)
+    flow = mo.get("코스피_수급")
     if flow:
         parts = []
         for k in ("외국인", "기관", "개인"):
@@ -4665,92 +5385,98 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
             f"코스피 수급(억원, {_esc(flow.get('날짜', ''))}) · " + " · ".join(parts) + "</div>",
             unsafe_allow_html=True,
         )
-    if summary.get("시황"):
-        st.markdown(
-            f"<div style='font-size:13px;margin-top:8px;'>💬 {_esc(summary['시황'])}</div>",
-            unsafe_allow_html=True,
-        )
+    st.caption("등락률은 각 지표의 마지막 거래일 종가 기준입니다(국내 휴장일엔 직전 거래일, 해외 지수는 현지 날짜 기준). "
+               f"시황 조회 {mo.get('기준시각', '-')}")
 
-    # ── 오늘 가장 중요한 뉴스 ──
-    # 정렬: ① AI가 매긴 중요도(A>B>C) ② 오늘 평가금액 변동 크기 — AI가 대부분 B로만 분류해도
-    # "내 자산에 오늘 실제로 영향이 컸던 종목"이 위로 오도록 객관적인 숫자를 2차 기준으로 쓴다.
-    st.markdown(_briefing_section_title("🔥 오늘 가장 중요한 뉴스"), unsafe_allow_html=True)
-    candidates = [r for r in rows if r["중요도"] in ("A", "B")]
-    candidates.sort(key=lambda r: (-_BRIEF_IMPORTANCE_RANK[r["중요도"]], -abs(r["변동액"] or 0)))
-    if not ai_ok:
-        st.caption("AI 브리핑을 불러오지 못했습니다 (API 키 미설정 또는 일시적 오류). 아래 시세 정보는 정상입니다.")
-    elif not candidates:
-        st.caption("오늘은 특별히 중요한 뉴스가 없습니다 (모든 보유종목이 중요도 C).")
-    circled = ["①", "②", "③"]
-    for i, r in enumerate(candidates[:3]):
-        bullets = [_esc(b) for b in _brief_bullets(r["본문"])]
-        headline = bullets[0] if bullets else "(요약 없음)"
-        extra = "".join(f"<div style='font-size:13px;margin-top:2px;'>→ {b}</div>" for b in bullets[1:])
-        senti = _BRIEF_SENTIMENT_LABEL.get(r["판단"], "판단 불가")
-        st.markdown(
-            "<div style='padding:10px 12px;border-radius:10px;background:rgba(128,128,128,0.08);margin-bottom:8px;'>"
-            f"<div style='font-weight:700;'>{circled[i]} {_esc(r['종목명'])} "
-            f"<span style='color:#e5b73b;font-weight:400;'>{_BRIEF_STARS[r['중요도']]}</span> {r['판단']}</div>"
-            f"<div style='font-size:13.5px;margin-top:4px;'>{headline}</div>{extra}"
-            "<div style='font-size:12px;margin-top:6px;color:var(--text-secondary,#888);'>"
-            f"→ 보유자 관점: {senti} · 비중 {r['비중']:.0f}% · 오늘 평가금액 "
-            f"<span style='color:{_delta_color(r['변동액'])};font-weight:600;'>{_fmt_won_delta(r['변동액'])}</span>"
-            "</div></div>",
-            unsafe_allow_html=True,
-        )
-
-    # ── 내 보유종목 ──
-    st.markdown(_briefing_section_title("📈 내 보유종목"), unsafe_allow_html=True)
-    grid = "1.5fr 0.9fr 1.1fr 0.9fr"
+    # ── ③ 내 보유종목 (숫자만, 판단 열 없음) ──
+    st.markdown(_briefing_section_title("📈 내 보유종목 (주식·ETF)"), unsafe_allow_html=True)
+    grid = "1.6fr 1fr 1.2fr"
     body_rows = []
+    mismatch = False
     for r in sorted(rows, key=lambda x: -x["비중"]):
+        mark = ""
+        if base_day and r["기준일"] and r["기준일"] != base_day:
+            mark, mismatch = " *", True
+        pct_html = _change_badge_html(r["등락률"]) or "-"
+        delta_html = _fmt_won_delta(r["변동액"]) if r["시세반영"] else "- <span style='font-size:11px;'>(시세 없음)</span>"
         body_rows.append(
             f"<div style='display:grid;grid-template-columns:{grid};padding:7px 0;"
             "border-top:1px solid rgba(128,128,128,0.15);font-size:13.5px;align-items:center;'>"
-            f"<div style='font-weight:600;'>{_esc(r['종목명'])} "
+            f"<div style='font-weight:600;'>{_esc(r['종목명'])}{mark} "
             f"<span style='font-weight:400;font-size:11px;color:var(--text-secondary,#888);'>{r['비중']:.0f}%</span></div>"
-            f"<div style='text-align:right;'>{_change_badge_html(r['등락률']) or '-'}</div>"
-            f"<div style='text-align:right;color:{_delta_color(r['변동액'])};font-weight:600;'>{_fmt_won_delta(r['변동액'])}</div>"
-            f"<div style='text-align:center;'>{r['판단']} {_BRIEF_SENTIMENT_LABEL.get(r['판단'], '')}</div></div>"
+            f"<div style='text-align:right;'>{pct_html}</div>"
+            f"<div style='text-align:right;color:{_delta_color(r['변동액'])};font-weight:600;'>{delta_html}</div></div>"
         )
-    valid = [r["변동액"] for r in rows if r["변동액"] is not None]
-    total_delta = sum(valid) if valid else None
-    total_pct = (total_delta / (total_value - total_delta) * 100) if total_delta is not None and total_value != total_delta else None
+    valid = [r for r in rows if r["변동액"] is not None]
+    total_delta = sum(r["변동액"] for r in valid) if valid else None
+    valid_value = sum(r["평가금액"] for r in valid)
+    total_pct = (total_delta / (valid_value - total_delta) * 100) if (total_delta is not None and valid_value != total_delta) else None
     total_row = ""
     if total_delta is not None:
         total_row = (
             f"<div style='display:grid;grid-template-columns:{grid};padding:8px 0 4px;"
             "border-top:2px solid rgba(128,128,128,0.3);font-size:13.5px;font-weight:700;align-items:center;'>"
-            "<div>합계</div>"
+            f"<div>합계 <span style='font-weight:400;font-size:11px;'>({len(valid)}/{len(rows)}종목)</span></div>"
             f"<div style='text-align:right;'>{_change_badge_html(total_pct) or '-'}</div>"
-            f"<div style='text-align:right;color:{_delta_color(total_delta)};'>{_fmt_won_delta(total_delta)}</div><div></div></div>"
+            f"<div style='text-align:right;color:{_delta_color(total_delta)};'>{_fmt_won_delta(total_delta)}</div></div>"
         )
+    delta_header = f"하루 평가금액 변동 ({_fmt_md_weekday(base_day)})" if base_day else "하루 평가금액 변동"
     st.markdown(
         "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
         f"<div style='display:grid;grid-template-columns:{grid};padding:8px 0;font-size:12px;"
-        "color:var(--text-secondary,#888);'><div>종목(비중)</div><div style='text-align:right;'>당일 등락</div>"
-        "<div style='text-align:right;'>오늘 평가금액 변동</div><div style='text-align:center;'>판단</div></div>"
+        "color:var(--text-secondary,#888);'><div>종목(비중)</div><div style='text-align:right;'>등락률</div>"
+        f"<div style='text-align:right;'>{_esc(delta_header)}</div></div>"
         + "".join(body_rows) + total_row + "</div>",
         unsafe_allow_html=True,
     )
-    st.caption("🟢 긍정 · 🟡 중립 · 🔴 부정 · ⚪ 판단 불가 — AI가 오늘 수집된 뉴스·공시만 보고 분류한 참고용 정보입니다. "
-               "평가금액 변동은 현재 시세 기준 근사값입니다.")
+    if mismatch:
+        st.caption("* 표시 종목은 등락률의 기준일이 위 '시세 기준일'과 다릅니다(데이터 지연 등).")
+    if is_holiday:
+        st.caption(f"오늘은 휴장일이라 등락률·변동은 직전 거래일({_fmt_md_weekday(base_day)}) 기준입니다. 오늘 변동이 아닙니다.")
+    with st.expander("ℹ️ 하루 평가금액 변동은 이렇게 계산합니다"):
+        st.markdown(
+            "- **계산식**: 현재 평가금액 − 현재 평가금액 ÷ (1 + 등락률). 전일 종가로 되돌렸을 때와의 차이를 근사한 값입니다.\n"
+            "- **평가금액**: 현재가(국내는 pykrx/네이버, 해외·실패 시 야후) × 보유수량. **등락률**: 야후 일봉의 마지막 두 종가 비교. "
+            "두 값의 출처가 달라 몇 원~몇백 원 단위 오차가 날 수 있습니다.\n"
+            "- **오늘 매매 미반영**: 오늘 사거나 판 수량은 '어제도 같은 수량을 갖고 있었다'고 가정해 계산합니다.\n"
+            "- **시세 없음**: 시세 조회에 실패한 종목은 평가금액이 매입금액으로 대체되므로 계산에서 뺍니다(합계에도 미포함).\n"
+            "- **제외 자산**: TDF·펀드·현금성자산(비주식자산 탭)은 포함하지 않습니다.\n"
+            "- **시간외 미반영**: NXT·KRX 애프터마켓 등 정규장 밖 시세는 반영되지 않습니다.\n"
+            "- **휴장일**: 등락률이 직전 거래일 값이므로, 표의 변동도 직전 거래일의 변동입니다."
+        )
 
-    # ── 오늘 확인할 것 / AI 의견 ──
-    if summary.get("확인할것"):
-        st.markdown(_briefing_section_title("⚠️ 오늘 확인할 것"), unsafe_allow_html=True)
-        st.markdown(
-            "<div style='font-size:13.5px;line-height:1.7;'>"
-            + "".join(f"• {_esc(c)}<br>" for c in summary["확인할것"]) + "</div>",
-            unsafe_allow_html=True,
-        )
-    if summary.get("의견"):
-        st.markdown(_briefing_section_title("🤖 AI 의견"), unsafe_allow_html=True)
-        st.markdown(
-            "<div style='padding:12px 14px;border-radius:10px;background:rgba(46,116,181,0.10);"
-            f"font-size:14px;line-height:1.7;'>“{_esc(summary['의견'])}”</div>",
-            unsafe_allow_html=True,
-        )
+    # ── ④ 최근 기사 (원문 그대로) ──
+    st.markdown(_briefing_section_title(f"📰 최근 기사 ({_BRIEF_RECENT_DAYS}일 이내)"), unsafe_allow_html=True)
+    news = _collect_recent_news(rows)
+    if news:
+        st.markdown("".join(_news_item_html(n) for n in news[:_BRIEF_NEWS_VISIBLE]), unsafe_allow_html=True)
+        if len(news) > _BRIEF_NEWS_VISIBLE:
+            with st.expander(f"기사 {len(news) - _BRIEF_NEWS_VISIBLE}건 더 보기"):
+                st.markdown("".join(_news_item_html(n) for n in news[_BRIEF_NEWS_VISIBLE:]), unsafe_allow_html=True)
+        st.caption(f"종목당 최근 {_BRIEF_NEWS_PER_STOCK}건까지, 같은 기사는 한 번만 표시합니다. '관련 종목'은 네이버 증권이 "
+                   "그 종목 뉴스로 분류했다는 뜻이며, 기사의 주인공이 다른 회사일 수 있으니 원문을 확인하세요.")
+    else:
+        st.caption(f"최근 {_BRIEF_RECENT_DAYS}일 이내 기사가 없거나 불러오지 못했습니다.")
+
+    # ── ⑤ 최근 공시 ──
+    st.markdown(_briefing_section_title(f"📢 최근 공시 ({_BRIEF_RECENT_DAYS}일 이내, DART)"), unsafe_allow_html=True)
+    discs = _collect_recent_disclosures(rows)
+    if discs:
+        st.markdown("".join(
+            _news_item_html({"제목": f"[{d['종목명']}] {d.get('제목', '')}", "링크": d.get("링크"),
+                             "언론사": d.get("제출인"), "날짜": d.get("날짜")}, show_related=False)
+            for d in discs[:15]), unsafe_allow_html=True)
+    else:
+        st.caption(f"최근 {_BRIEF_RECENT_DAYS}일 이내 공시가 없습니다. (ETF는 DART 공시 대상이 아니라 항상 비어 있습니다)")
+
+    # ── ⑥ AI 해석 (실험 기능, 켤 때만 호출) ──
+    st.markdown(_briefing_section_title("🤖 AI 해석 (실험 기능)"), unsafe_allow_html=True)
+    if st.toggle("AI 해석 보기", key="briefing_ai_toggle",
+                 help="켜면 AI(Claude)가 위 기사 제목·공시를 요약합니다. 끄면 AI를 호출하지 않습니다."):
+        _render_briefing_ai_section(rows, mo, status, now)
+    else:
+        st.caption("꺼져 있으면 AI를 호출하지 않습니다. 켜면 종목별 중요도·판단·요약, 확인해볼 것, AI 의견을 "
+                   "근거 기사 링크와 함께 보여줍니다(틀릴 수 있음).")
 
     st.caption("※ 매매 판단은 사용자 결정입니다. 이 브리핑은 참고용이며, 자세한 내용은 '🗞️ 오늘의 리포트' 탭에서 확인하세요.")
     if st.button("닫기", key="morning_briefing_close"):
@@ -4810,6 +5536,7 @@ def main(spreadsheet_id: str):
     # (자리는 위에서 st.columns로 미리 확보해 시세 새로고침 버튼 옆에 나란히 보이게 했다).
     with col_brief:
         if st.button("📊 오늘의 브리핑", key="morning_briefing_btn"):
+            st.session_state["briefing_ai_toggle"] = False  # [v2.1.16] 팝업을 열 때는 AI 해석을 항상 꺼둔다
             show_morning_briefing_dialog(holdings_df)
 
     # 시세 반영 현황 표시 (조회 실패 시 경고)
@@ -4867,6 +5594,7 @@ def main(spreadsheet_id: str):
     today_key = datetime.now(KST).strftime("%Y-%m-%d")
     if not holdings_df.empty and st.session_state.get("morning_briefing_shown") != today_key:
         st.session_state["morning_briefing_shown"] = today_key
+        st.session_state["briefing_ai_toggle"] = False  # [v2.1.16] 자동 팝업도 AI 해석은 꺼진 상태로 연다
         show_morning_briefing_dialog(holdings_df)
 
 
@@ -5107,7 +5835,12 @@ def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None
     # 이 앱이 애프터마켓 실시간가 자체를 가져오는 건 별도 조사가 필요해 아직 미착수(관리자와
     # 논의 후 보류) — pykrx가 이 신설 애프터마켓 체결가를 제공하는지도 미확인 상태라, 관리자
     # "시스템" 탭의 "시세 지연 진단" 도구로 16:00~20:00 사이 실제 값을 확인해볼 필요가 있음.
-    if is_before_krx_open():
+    # [2026-10-09, v2.1.16] 휴장일 판단 추가 — 휴장일엔 시간대 배너 대신 "휴장일, 직전 거래일 종가
+    # 기준" 안내를 보여준다(브리핑 팝업·오늘의 리포트와 같은 문장, market_basis_sentence 참고).
+    market_status = get_market_day_status()
+    if market_status.get("휴장") is True:
+        st.info("📅 " + market_basis_sentence(market_status))
+    elif is_before_krx_open():
         st.warning(
             "⏰ 지금은 KRX 정규장 개장(09:00) 전입니다. 화면의 시세는 **전일 종가**이며, "
             "NXT 프리마켓 등 실시간 시세는 아직 반영되지 않습니다. 실시간 가격은 증권사 앱을 참고해주세요."
@@ -6331,111 +7064,42 @@ def render_trades(trade_df):
     st.markdown('<div class="section-title">거래이력</div>', unsafe_allow_html=True)
     st.caption("🌐 해외(미국) 종목의 거래단가·거래금액은 구글시트에 입력하신 원래 통화(달러) 그대로 표시됩니다. 원화 환산 금액은 '보유 종목'·'통합 대시보드' 화면에서 확인하세요.")
 
-    # ── [2026-10-08 추가] 미래에셋증권 거래내역 CSV 가져오기 ──
+    # ── [2026-10-08 추가, 2026-10-09 v2.1.16 확장] 거래내역 파일 가져오기 ──
     # 거래이력을 한 줄씩 수동 입력해야 하는 게 신규 사용자의 가장 큰 진입장벽이라는
     # Jone 판단(2026-10-08)에 따라 추가. 반드시 "미리보기 → 사용자가 직접 확인/수정 →
     # 확정 버튼"의 2단계를 거친다 — 파서가 뽑은 값을 그대로 저장하지 않는다. 금액이
     # 걸린 데이터라 이 원칙은 타협하지 않는다(위 parse_mirae_asset_csv 주석 참고).
-    with st.expander("📥 거래내역 CSV로 가져오기 (미래에셋증권, 베타)"):
-        st.caption(
-            "미래에셋증권 PC 홈페이지/HTS의 \"[0650] 거래내역 조회\" 화면에서 받은 CSV 파일을 "
-            "올리면 매수·매도 내역을 한 번에 불러옵니다. 아직 미래에셋증권 양식만 지원하며, "
-            "배당금·이체 등 매매가 아닌 내역은 자동으로 제외됩니다."
+    # [v2.1.16] "기타 증권사(열 직접 지정)" 방식 추가 — 관리자가 다른 사용자의 증권사 파일을
+    # 받지 않고도 어느 증권사든 지원하기 위함(위 "범용 거래내역 가져오기" 섹션 주석 참고).
+    # 미리보기·중복 감지·저장은 두 방식이 _render_import_preview_and_save()를 공통으로 쓴다.
+    with st.expander("📥 거래내역 파일로 가져오기 (베타)"):
+        st.caption("가져온 거래는 지금처럼 내 개인 구글시트의 '거래이력' 탭 맨 아래에 추가됩니다. 시트는 그대로이며 "
+                   "기존 행은 수정·삭제되지 않습니다. 시트에 직접 입력하는 기존 방식도 그대로 쓸 수 있습니다.")
+        import_mode = st.radio(
+            "파일 종류", ["미래에셋증권 [0650] 거래내역 (CSV)", "기타 증권사 (열 직접 지정, CSV·엑셀)"],
+            horizontal=True, key="trade_import_mode",
         )
-        uploaded = st.file_uploader("CSV 파일 선택", type=["csv"], key="mirae_csv_uploader")
-        if uploaded is not None:
-            parsed_df, stats = parse_mirae_asset_csv(uploaded.getvalue())
-            if "오류" in stats:
-                st.error(f"⚠️ {stats['오류']}")
-            elif parsed_df.empty:
-                st.warning("매수·매도 거래를 찾지 못했습니다. 파일 내용을 확인해주세요.")
-            else:
-                st.success(f"매수 {stats['매수']}건, 매도 {stats['매도']}건을 찾았습니다 "
-                           f"(배당금·이체 등 {stats['제외']}건은 자동 제외).")
-                if stats["제외사유"]:
-                    st.caption("제외 사유: " + ", ".join(f"{k} {v}건" for k, v in stats["제외사유"].items()))
-
-                account_name = st.text_input(
-                    "이 거래들을 어느 계좌로 저장할까요? (운용사명)",
-                    value="미래에셋증권", key="mirae_csv_account_name",
-                )
-
-                # [2026-10-08 추가, Jone 요청] 기존 거래이력과 (종목코드+거래일자+거래구분+
-                # 거래수량+거래단가)가 완전히 같은 행은 이미 입력돼 있을 가능성이 높다고 보고
-                # "저장" 체크를 미리 꺼둔다. append_rows는 덮어쓰기가 아니라 뒤에 새 행을
-                # 추가하는 것뿐이라 삭제 위험은 없지만, 같은 CSV를 실수로 두 번 올리거나
-                # 겹치는 기간을 여러 번 내려받아 올리면 중복이 쌓일 수 있어서 추가함.
-                # 완벽한 판별은 아니다(예: 같은 날 같은 종목을 정말로 같은 가격에 두 번 산
-                # 경우도 '중복'으로 오인될 수 있음) — 그래서 자동으로 지우지 않고 체크만
-                # 꺼두어, 사용자가 표에서 직접 보고 최종 판단하게 한다.
-                existing_keys = set()
-                if not trade_df.empty:
-                    for _, r in trade_df.iterrows():
-                        key = (
-                            str(r.get("종목코드", "")).strip(),
-                            str(r.get("거래일자", "")).strip()[:10],
-                            str(r.get("거래구분", "")).strip(),
-                            int(_safe_num(r.get("거래수량", 0))),
-                            int(_safe_num(r.get("거래단가", 0))),
-                        )
-                        existing_keys.add(key)
-
-                preview_df = parsed_df.copy()
-                dup_flags = preview_df.apply(
-                    lambda r: (
-                        str(r["종목코드"]).strip(), str(r["거래일자"]).strip()[:10],
-                        str(r["거래구분"]).strip(), int(r["거래수량"]), int(r["거래단가"]),
-                    ) in existing_keys,
-                    axis=1,
-                )
-                preview_df.insert(0, "저장", ~dup_flags)
-                preview_df.insert(1, "중복 의심", dup_flags.map({True: "⚠️ 이미 있음", False: ""}))
-
-                n_dup = int(dup_flags.sum())
-                if n_dup:
-                    st.warning(f"⚠️ 기존 거래이력과 종목·날짜·구분·수량·단가가 완전히 같은 {n_dup}건을 찾아 "
-                               "'저장' 체크를 미리 꺼뒀습니다. 정말 같은 날 같은 가격에 두 번 거래하신 "
-                               "경우라면 표에서 직접 체크해주세요.")
-                st.caption("⬇️ 저장 전 내용을 꼭 확인해주세요. 종목명이 \"(확인 필요)\"로 나오면 직접 수정해주시고, 필요 없는 행은 체크 해제해주세요.")
-
-                edited = st.data_editor(
-                    preview_df, hide_index=True, width="stretch", key="mirae_csv_editor",
-                    column_config={
-                        "저장": st.column_config.CheckboxColumn("저장"),
-                        "중복 의심": st.column_config.TextColumn("중복 의심", disabled=True),
-                        "거래수량": st.column_config.NumberColumn("거래수량", format="%d"),
-                        "거래단가": st.column_config.NumberColumn("거래단가", format="%d"),
-                    },
-                    disabled=["운용사", "비고"],
-                )
-                edited = edited.drop(columns=["중복 의심"])
-
-                if st.button("✅ 선택한 거래 저장", key="mirae_csv_confirm"):
-                    to_save = edited[edited["저장"]].drop(columns=["저장"]).copy()
-                    if to_save.empty:
-                        st.warning("저장을 선택한 행이 없습니다.")
-                    elif not account_name.strip():
-                        st.warning("운용사명을 입력해주세요.")
-                    else:
-                        to_save["운용사"] = account_name.strip()
-                        spreadsheet_id = st.session_state.get("spreadsheet_id", "")
-                        spreadsheet = get_spreadsheet(spreadsheet_id)
-                        if spreadsheet is None:
-                            st.error("개인 시트를 열지 못했습니다. 잠시 후 다시 시도해주세요.")
-                        else:
-                            try:
-                                ws = spreadsheet.worksheet("거래이력")
-                                rows_to_write = to_save[REQUIRED_SHEET_HEADERS["거래이력"]].values.tolist()
-                                _call_with_retry(ws.append_rows, rows_to_write)
-                                load_sheet.clear()
-                                load_all_data.clear()
-                                st.success(f"{len(rows_to_write)}건을 거래이력에 저장했습니다. "
-                                           "화면 상단에서 다른 탭으로 이동했다가 돌아오면 반영된 걸 확인할 수 있습니다.")
-                            except gspread.exceptions.WorksheetNotFound:
-                                st.error("'거래이력' 시트를 찾을 수 없습니다.")
-                            except Exception as e:
-                                logging.warning("CSV 가져오기 저장 실패: %s", e)
-                                st.error(f"저장 중 오류가 발생했습니다: {e}")
+        if import_mode.startswith("미래에셋"):
+            st.caption(
+                "미래에셋증권 PC 홈페이지/HTS의 \"[0650] 거래내역 조회\" 화면에서 받은 CSV 파일을 "
+                "올리면 매수·매도 내역을 한 번에 불러옵니다. 배당금·이체 등 매매가 아닌 내역은 자동으로 제외됩니다."
+            )
+            uploaded = st.file_uploader("CSV 파일 선택", type=["csv"], key="mirae_csv_uploader")
+            if uploaded is not None:
+                parsed_df, stats = parse_mirae_asset_csv(uploaded.getvalue())
+                if "오류" in stats:
+                    st.error(f"⚠️ {stats['오류']}")
+                elif parsed_df.empty:
+                    st.warning("매수·매도 거래를 찾지 못했습니다. 파일 내용을 확인해주세요.")
+                else:
+                    st.success(f"매수 {stats['매수']}건, 매도 {stats['매도']}건을 찾았습니다 "
+                               f"(배당금·이체 등 {stats['제외']}건은 자동 제외).")
+                    if stats["제외사유"]:
+                        st.caption("제외 사유: " + ", ".join(f"{k} {v}건" for k, v in stats["제외사유"].items()))
+                    _render_import_preview_and_save(parsed_df, trade_df, key_prefix="mirae_csv",
+                                                    default_account="미래에셋증권")
+        else:
+            _render_generic_trade_import(trade_df)
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
