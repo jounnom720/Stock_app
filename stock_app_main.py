@@ -57,7 +57,12 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.16"
+APP_VERSION = "v2.1.17"
+# [2026-10-09] v2.1.16 → v2.1.17 (배포 후 Jone 피드백 반영):
+#  - 브리핑 팝업 UI: 섹션 여백 축소, 시황 카드를 팝업 폭 전체에 균등 배치(카드 확대), 보조 설명을 작은
+#    회색 글씨로 통일, 데이터 기준 박스에서 "오늘 휴장 여부·장 상태" 항목 숨김(아래 문장과 중복).
+#  - 거래내역 가져오기: "미래에셋/기타" 선택 라디오를 없애고 업로더 하나로 통일. 미래에셋 [0650] 양식은
+#    자동 인식, 그 외는 열 직접 지정(미래에셋을 기준 양식처럼 보이게 하지 않음).
 # [2026-10-09] v2.1.15 → v2.1.16: 10/9(한글날 휴장) 브리핑 팝업 오류 개선 + 범용 거래내역 가져오기.
 #  ① 휴장 판단 추가(get_krx_market_day_status): 공휴일을 하드코딩하지 않고 코스피 일봉(^KS11)의
 #     마지막 날짜를 오늘과 비교해 자동 판단(평일 09:30 이후 오늘 봉이 없으면 휴장, pykrx로 교차확인).
@@ -649,13 +654,21 @@ def _render_import_preview_and_save(parsed_df: pd.DataFrame, trade_df: pd.DataFr
             logging.warning("거래내역 가져오기 저장 실패: %s", e)
             st.error(f"저장 중 오류가 발생했습니다: {e}")
 
-def _render_generic_trade_import(trade_df: pd.DataFrame):
-    """기타 증권사 파일: 업로드 → 열 제목 줄 확인 → 열 지정 → 매수/매도 값 지정 → 미리보기·저장."""
-    st.caption("거래 1건이 한 줄로 된 CSV·엑셀(.xlsx) 파일이면 어느 증권사든 쓸 수 있습니다. 파일은 앱에 따로 "
-               "보관되지 않고, 아래에서 확정한 행만 내 개인 구글시트 '거래이력' 탭에 추가됩니다.")
-    uploaded = st.file_uploader("CSV 또는 엑셀 파일 선택", type=["csv", "xlsx"], key="generic_trade_uploader")
-    if uploaded is None:
-        return
+def _is_mirae_0650_csv(file_bytes: bytes) -> bool:
+    """미래에셋증권 [0650] 거래내역 CSV 양식인지(헤더 2줄 구조) 확인한다 — 자동 인식용.
+    parse_mirae_asset_csv()의 헤더 검사와 같은 기준이다."""
+    text = _decode_text_bytes(file_bytes)
+    if text is None:
+        return False
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except Exception:
+        return False
+    return len(rows) >= 4 and rows[0][:2] == ["거래일자", "거래종류"] and rows[1][:2] == ["거래번호", "원거래번호"]
+
+def _render_generic_trade_import(trade_df: pd.DataFrame, uploaded):
+    """한 줄=거래 1건인 파일: 열 제목 줄 확인 → 열 지정 → 매수/매도 값 지정 → 미리보기·저장.
+    [v2.1.17] 업로드 위젯은 호출부(render_trades)의 공통 업로더 하나로 합쳤다."""
     rows, err = read_generic_trade_file(uploaded.getvalue(), uploaded.name)
     if err:
         st.error(f"⚠️ {err}")
@@ -3334,9 +3347,6 @@ def is_after_krx_close() -> bool:
 #   - 평일 09:30 이전 → 아직 판단할 수 없음(None). 시세는 어차피 직전 거래일 종가이므로
 #     "장 시작 전" 안내로 충분하다.
 #   - 조회가 전부 실패하면 요일·시간대로만 판단(주말=휴장, 평일=개장 가정)하고 그 사실을 표시.
-_KRX_STATUS_LABEL = {"휴장": "휴장일", "장전": "장 시작 전", "장중": "정규장 운영 중",
-                     "장후": "정규장 마감 후", "마감": "거래 종료"}
-
 def _pykrx_has_today_bar(today_str: str) -> bool | None:
     """pykrx(네이버 경유)로 삼성전자 일봉에 오늘 행이 있는지 확인. 확인 불가면 None."""
     try:
@@ -5134,7 +5144,13 @@ def _safe_href(url) -> str:
     return html_lib.escape(u, quote=True) if u.startswith(("http://", "https://")) else ""
 
 def _briefing_section_title(text: str) -> str:
-    return f"<div style='font-size:15px;font-weight:700;margin:18px 0 8px;'>{text}</div>"
+    # [v2.1.17] 섹션 사이 여백 축소(Jone 피드백: 여백 과다)
+    return f"<div style='font-size:15px;font-weight:700;margin:6px 0 4px;'>{text}</div>"
+
+def _briefing_note(text: str) -> str:
+    """[v2.1.17] 팝업 안 보조 설명 — st.caption이 다이얼로그에서 크게 보여 작은 회색 글씨로 직접 그린다."""
+    return (f"<div style='font-size:11.5px;line-height:1.5;color:var(--text-secondary,#888);margin:4px 0 2px;'>"
+            f"{text}</div>")
 
 def _parse_date_prefix(value) -> date | None:
     """"2026-10-08 14:20" / "20261008" / "2026.10.08" 등 앞부분의 날짜만 읽는다. 실패하면 None."""
@@ -5340,17 +5356,13 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
     base_day = status.get("기준일", "")
     is_holiday = status.get("휴장") is True
 
-    # ── ① 데이터 기준 ──
-    holiday_text = ("예 — 휴장일" if is_holiday else
-                    "아니오" if status.get("휴장") is False else
-                    "확인 불가" if "실패" in status.get("판단방법", "") else "확인 전(09:30 이후 판단)")
+    # ── ① 데이터 기준 ── ([v2.1.17] "오늘 휴장 여부·장 상태" 항목은 아래 문장과 중복이라 숨김 — Jone 피드백)
     box_bg = "rgba(229,183,59,0.14)" if is_holiday else "rgba(128,128,128,0.08)"
     st.markdown(
         f"<div style='background:{box_bg};border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.7;'>"
         f"<div style='font-weight:700;margin-bottom:2px;'>📅 데이터 기준</div>"
         f"조회 시각 <b>{_esc(status.get('조회시각', ''))}</b> · "
-        f"시세 기준일 <b>{_esc(_fmt_md_weekday(base_day) if base_day else '-')}</b> · "
-        f"오늘 휴장 여부 <b>{_esc(holiday_text)}</b> · 장 상태 {_esc(_KRX_STATUS_LABEL.get(status.get('상태'), '-'))}<br>"
+        f"시세 기준일 <b>{_esc(_fmt_md_weekday(base_day) if base_day else '-')}</b><br>"
         f"<span>{_esc(market_basis_sentence(status))}</span><br>"
         f"<span style='font-size:11.5px;color:var(--text-secondary,#888);'>휴장 판단 근거: "
         f"{_esc(status.get('판단방법', '-'))}</span></div>",
@@ -5365,14 +5377,16 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
         if not v or v.get("값") is None:
             continue
         chips.append(
-            "<div style='background:rgba(128,128,128,0.08);border-radius:8px;padding:6px 10px;min-width:104px;'>"
-            f"<div style='font-size:11px;color:var(--text-secondary,#888);'>{_esc(key)}</div>"
-            f"<div style='font-size:14px;font-weight:700;'>{v['값']:,.2f}</div>"
+            "<div style='background:rgba(128,128,128,0.08);border-radius:8px;padding:8px 12px;'>"
+            f"<div style='font-size:11.5px;color:var(--text-secondary,#888);'>{_esc(key)}</div>"
+            f"<div style='font-size:16px;font-weight:700;'>{v['값']:,.2f}</div>"
             f"{_change_badge_html(v.get('등락률'))}</div>"
         )
     if chips:
-        st.markdown("<div style='display:flex;flex-wrap:wrap;gap:8px;'>" + "".join(chips) + "</div>",
-                    unsafe_allow_html=True)
+        # [v2.1.17] 카드가 왼쪽에 몰려 오른쪽이 비던 문제 → 그리드로 팝업 폭 전체를 균등하게 채움
+        # (좁은 화면에서는 한 줄에 들어가는 만큼 자동 줄바꿈)
+        st.markdown("<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;'>"
+                    + "".join(chips) + "</div>", unsafe_allow_html=True)
     flow = mo.get("코스피_수급")
     if flow:
         parts = []
@@ -5385,12 +5399,12 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
             f"코스피 수급(억원, {_esc(flow.get('날짜', ''))}) · " + " · ".join(parts) + "</div>",
             unsafe_allow_html=True,
         )
-    st.caption("등락률은 각 지표의 마지막 거래일 종가 기준입니다(국내 휴장일엔 직전 거래일, 해외 지수는 현지 날짜 기준). "
-               f"시황 조회 {mo.get('기준시각', '-')}")
+    st.markdown(_briefing_note("등락률은 각 지표의 마지막 거래일 종가 기준입니다(국내 휴장일엔 직전 거래일, 해외 지수는 현지 날짜 기준). "
+                               f"시황 조회 {_esc(mo.get('기준시각', '-'))}"), unsafe_allow_html=True)
 
     # ── ③ 내 보유종목 (숫자만, 판단 열 없음) ──
     st.markdown(_briefing_section_title("📈 내 보유종목 (주식·ETF)"), unsafe_allow_html=True)
-    grid = "1.6fr 1fr 1.2fr"
+    grid = "2fr 1fr 1fr"
     body_rows = []
     mismatch = False
     for r in sorted(rows, key=lambda x: -x["비중"]):
@@ -5429,10 +5443,13 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
         + "".join(body_rows) + total_row + "</div>",
         unsafe_allow_html=True,
     )
+    notes = []
     if mismatch:
-        st.caption("* 표시 종목은 등락률의 기준일이 위 '시세 기준일'과 다릅니다(데이터 지연 등).")
+        notes.append("* 표시 종목은 등락률의 기준일이 위 '시세 기준일'과 다릅니다(데이터 지연 등).")
     if is_holiday:
-        st.caption(f"오늘은 휴장일이라 등락률·변동은 직전 거래일({_fmt_md_weekday(base_day)}) 기준입니다. 오늘 변동이 아닙니다.")
+        notes.append(f"오늘은 휴장일이라 등락률·변동은 직전 거래일({_fmt_md_weekday(base_day)}) 기준입니다. 오늘 변동이 아닙니다.")
+    if notes:
+        st.markdown(_briefing_note("<br>".join(_esc(n) for n in notes)), unsafe_allow_html=True)
     with st.expander("ℹ️ 하루 평가금액 변동은 이렇게 계산합니다"):
         st.markdown(
             "- **계산식**: 현재 평가금액 − 현재 평가금액 ÷ (1 + 등락률). 전일 종가로 되돌렸을 때와의 차이를 근사한 값입니다.\n"
@@ -5453,8 +5470,9 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
         if len(news) > _BRIEF_NEWS_VISIBLE:
             with st.expander(f"기사 {len(news) - _BRIEF_NEWS_VISIBLE}건 더 보기"):
                 st.markdown("".join(_news_item_html(n) for n in news[_BRIEF_NEWS_VISIBLE:]), unsafe_allow_html=True)
-        st.caption(f"종목당 최근 {_BRIEF_NEWS_PER_STOCK}건까지, 같은 기사는 한 번만 표시합니다. '관련 종목'은 네이버 증권이 "
-                   "그 종목 뉴스로 분류했다는 뜻이며, 기사의 주인공이 다른 회사일 수 있으니 원문을 확인하세요.")
+        st.markdown(_briefing_note(f"종목당 최근 {_BRIEF_NEWS_PER_STOCK}건까지, 같은 기사는 한 번만 표시합니다. '관련 종목'은 "
+                                   "네이버 증권이 그 종목 뉴스로 분류했다는 뜻이며, 기사의 주인공이 다른 회사일 수 있으니 "
+                                   "원문을 확인하세요."), unsafe_allow_html=True)
     else:
         st.caption(f"최근 {_BRIEF_RECENT_DAYS}일 이내 기사가 없거나 불러오지 못했습니다.")
 
@@ -5475,10 +5493,11 @@ def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
                  help="켜면 AI(Claude)가 위 기사 제목·공시를 요약합니다. 끄면 AI를 호출하지 않습니다."):
         _render_briefing_ai_section(rows, mo, status, now)
     else:
-        st.caption("꺼져 있으면 AI를 호출하지 않습니다. 켜면 종목별 중요도·판단·요약, 확인해볼 것, AI 의견을 "
-                   "근거 기사 링크와 함께 보여줍니다(틀릴 수 있음).")
+        st.markdown(_briefing_note("꺼져 있으면 AI를 호출하지 않습니다. 켜면 종목별 중요도·판단·요약, 확인해볼 것, AI 의견을 "
+                                   "근거 기사 링크와 함께 보여줍니다(틀릴 수 있음)."), unsafe_allow_html=True)
 
-    st.caption("※ 매매 판단은 사용자 결정입니다. 이 브리핑은 참고용이며, 자세한 내용은 '🗞️ 오늘의 리포트' 탭에서 확인하세요.")
+    st.markdown(_briefing_note("※ 매매 판단은 사용자 결정입니다. 이 브리핑은 참고용이며, 자세한 내용은 '🗞️ 오늘의 리포트' 탭에서 확인하세요."),
+                unsafe_allow_html=True)
     if st.button("닫기", key="morning_briefing_close"):
         st.rerun()  # 다이얼로그 안에서 st.rerun()을 호출하면 팝업이 닫힌다
 
@@ -7075,18 +7094,18 @@ def render_trades(trade_df):
     with st.expander("📥 거래내역 파일로 가져오기 (베타)"):
         st.caption("가져온 거래는 지금처럼 내 개인 구글시트의 '거래이력' 탭 맨 아래에 추가됩니다. 시트는 그대로이며 "
                    "기존 행은 수정·삭제되지 않습니다. 시트에 직접 입력하는 기존 방식도 그대로 쓸 수 있습니다.")
-        import_mode = st.radio(
-            "파일 종류", ["미래에셋증권 [0650] 거래내역 (CSV)", "기타 증권사 (열 직접 지정, CSV·엑셀)"],
-            horizontal=True, key="trade_import_mode",
-        )
-        if import_mode.startswith("미래에셋"):
-            st.caption(
-                "미래에셋증권 PC 홈페이지/HTS의 \"[0650] 거래내역 조회\" 화면에서 받은 CSV 파일을 "
-                "올리면 매수·매도 내역을 한 번에 불러옵니다. 배당금·이체 등 매매가 아닌 내역은 자동으로 제외됩니다."
-            )
-            uploaded = st.file_uploader("CSV 파일 선택", type=["csv"], key="mirae_csv_uploader")
-            if uploaded is not None:
-                parsed_df, stats = parse_mirae_asset_csv(uploaded.getvalue())
+        # [2026-10-09, v2.1.17] Jone 피드백: 미래에셋 양식을 "기준"처럼 먼저 내세울 이유가 없다 →
+        # 파일 종류를 고르는 라디오 버튼을 없애고 업로더 하나로 통일. 올린 파일이 미래에셋증권 [0650]
+        # 양식이면 자동 인식해 전용 파서로 바로 읽고, 그 외 파일은 열 직접 지정 방식으로 읽는다.
+        st.caption("증권사 홈페이지·HTS에서 거래내역을 CSV 또는 엑셀(.xlsx)로 내려받아 올려주세요. 파일의 열(거래일자·"
+                   "종목코드 등)을 직접 지정해서 불러오며, 일부 증권사 양식(미래에셋증권 [0650])은 자동으로 인식합니다. "
+                   "파일은 앱에 따로 보관되지 않습니다.")
+        uploaded = st.file_uploader("CSV 또는 엑셀 파일 선택", type=["csv", "xlsx"], key="trade_import_uploader")
+        if uploaded is not None:
+            file_bytes = uploaded.getvalue()
+            if uploaded.name.lower().endswith(".csv") and _is_mirae_0650_csv(file_bytes):
+                st.info("미래에셋증권 [0650] 거래내역 양식으로 자동 인식했습니다. 열 지정 없이 바로 불러옵니다.")
+                parsed_df, stats = parse_mirae_asset_csv(file_bytes)
                 if "오류" in stats:
                     st.error(f"⚠️ {stats['오류']}")
                 elif parsed_df.empty:
@@ -7098,8 +7117,8 @@ def render_trades(trade_df):
                         st.caption("제외 사유: " + ", ".join(f"{k} {v}건" for k, v in stats["제외사유"].items()))
                     _render_import_preview_and_save(parsed_df, trade_df, key_prefix="mirae_csv",
                                                     default_account="미래에셋증권")
-        else:
-            _render_generic_trade_import(trade_df)
+            else:
+                _render_generic_trade_import(trade_df, uploaded)
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
