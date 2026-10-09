@@ -32,6 +32,8 @@ import time
 import secrets as pysecrets
 import csv  # 미래에셋 거래내역 CSV 가져오기용 (2026-10-08 추가)
 import io
+import json  # 아침 브리핑 팝업의 AI 종합 응답(JSON) 파싱용 (2026-10-08 추가)
+import html as html_lib  # 브리핑 팝업에 들어가는 외부/AI 텍스트를 HTML 이스케이프하기 위함
 import requests  # DART corpCode.xml 다운로드용 (2026-08-12 추가)
 import zipfile
 import xml.etree.ElementTree as ET
@@ -55,7 +57,12 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.14"
+APP_VERSION = "v2.1.15"
+# [2026-10-08] v2.1.14 → v2.1.15: "오늘의 투자 브리핑" 팝업 추가. 앱을 열면(세션당 하루 한 번)
+# 시황·가장 중요한 뉴스·내 보유종목(오늘 평가금액 변동 포함)·오늘 확인할 것·AI 의견을 한
+# 장으로 보여주고, 헤더의 "📊 오늘의 브리핑" 버튼으로 언제든 다시 열 수 있다. 종목별 AI
+# 브리핑·시황·수급은 "오늘의 리포트" 탭과 같은 캐시를 재사용하고, 새 AI 호출은 포트폴리오
+# 종합 1회(장전/장중/장후별 최대 3번 안팎)뿐. 매매 행동 제안은 기존 원칙대로 넣지 않음.
 # [2026-10-08] v2.1.12 → v2.1.13: 거래이력 화면에 "미래에셋증권 거래내역 CSV 가져오기"
 # 추가 (베타). 실제 내보내기 파일로 구조·파싱 정확도를 직접 검증(41건 100% 정확 추출,
 # 제외돼야 할 225건도 정상 제외). 파서가 뽑은 값을 바로 저장하지 않고 미리보기에서
@@ -2133,6 +2140,86 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> d
     except Exception as e:
         logging.warning("보유종목 전체 요약 브리핑 실패 [%s]: %s", code, e)
         return {"중요도": "-", "판단": "⚪", "본문": ""}
+
+# ============================================================
+# 아침 브리핑 팝업용 포트폴리오 단위 AI 종합 — [2026-10-08 신규]
+# ============================================================
+# Jone 요청(2026-10-08): "오늘의 리포트" 탭 안에 흩어져 있어 매일 확인하기 번거로우니,
+# 앱을 열면 그날의 시황·주요 뉴스·리포트를 종합해서 팝업으로 알려주는 방식으로 만들고 싶다.
+# 종목별 브리핑(중요도·판단·본문)은 이미 만들어져 있어(generate_holdings_overview_briefing,
+# 24시간 캐시) 그대로 재사용하고, 여기서는 "전체를 한 번에 보고 시황 한 줄 + 오늘 확인할
+# 것 + 의견 한마디"만 추가로 AI에게 받는다 — 사용자당 하루 1번 정도의 추가 호출.
+# [원칙 유지] ChatGPT 제안 형식 중 매수·매도 성격의 "투자 행동"은 넣지 않는다(기존
+# "매매 권유 금지" 원칙과 동일한 선). "의견"은 어느 종목의 정보 변화가 포트폴리오에서
+# 더 눈여겨볼 만한지 알려주는 수준으로만 쓰도록 프롬프트에서 제한했다.
+def _portfolio_summary_uncached(payload_json: str) -> dict:
+    """Anthropic API를 호출해 {"시황", "확인할것", "의견"}을 만든다. 실패하면 예외를 던진다.
+    (예외를 던지는 이유: 이 함수를 st.cache_data로 감싸는데, 일시적 API 오류로 만든 빈 결과가
+    24시간 동안 캐시에 남아 하루 종일 AI 종합이 비어 보이는 사고를 막기 위함 — Streamlit은
+    예외가 난 호출은 캐시하지 않는다.)"""
+    api_key = st.secrets["anthropic"]["api_key"]  # 없으면 KeyError → 바깥 래퍼가 처리
+    prompt = f"""아래는 한 개인 투자자의 보유종목에 대해 오늘 수집된 데이터입니다(JSON).
+이를 바탕으로 아침 브리핑에 들어갈 세 가지를 한국어로 작성해주세요.
+
+{payload_json}
+
+출력은 아래 JSON 하나만, 다른 설명·마크다운 없이 출력하세요:
+{{"시황": "...", "확인할것": ["...", "..."], "의견": "..."}}
+
+작성 규칙:
+- "시황": 위 시황 수치(지수·환율·수급 등장하는 것만)를 근거로 한 문장(60자 이내). 수치에 없는 원인은 추측하지 말 것
+- "확인할것": 보유종목 브리핑에 실제로 언급된 이슈에 한해, 오늘 추가로 확인해볼 만한 항목을
+  "종목명 + 확인할 내용" 형태로 최대 3개(각 25자 이내). 언급된 이슈가 없으면 빈 배열 []
+- "의견": 1~2문장. 오늘 포트폴리오 관점에서 어느 종목의 정보 변화가 더 눈여겨볼 만한지 비교해서
+  알려주는 수준으로만 작성(비중·당일 변동·브리핑 근거 사용). 특이사항이 없으면
+  "오늘은 포트폴리오에 영향을 줄 만한 뚜렷한 변화가 없습니다."라고 쓸 것
+- 위 데이터에 없는 내용은 절대 추측하지 말 것
+- 매수·매도·보유 유지·비중 조절 같은 행동 제안이나 권유는 절대 하지 말 것"""
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 500,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        timeout=25,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    m = re.search(r"\{.*\}", text, flags=re.DOTALL)  # 혹시 앞뒤에 붙은 코드펜스·설명 제거
+    parsed = json.loads(m.group(0) if m else text)
+    checks = parsed.get("확인할것") or []
+    return {
+        "시황": str(parsed.get("시황", "")).strip(),
+        "확인할것": [str(c).strip() for c in checks if str(c).strip()][:3],
+        "의견": str(parsed.get("의견", "")).strip(),
+    }
+
+@st.cache_data(ttl=86400)
+def _portfolio_summary_cached(cache_key: str, _payload_json: str) -> dict:
+    """캐시 키는 cache_key 하나뿐이다. 이름이 밑줄(_)로 시작하는 인자는 Streamlit이 캐시 키
+    계산에서 제외하므로, 장중에 계속 바뀌는 시세 숫자가 담긴 _payload_json은 키에 영향을 주지
+    않는다 — 안 그러면 시세가 바뀔 때마다 캐시가 깨져 AI 호출이 불필요하게 늘어난다."""
+    return _portfolio_summary_uncached(_payload_json)
+
+def generate_portfolio_briefing_summary(payload: dict, cache_key: str) -> dict:
+    """payload(dict)를 JSON 문자열로 바꿔 AI 종합을 가져온다. cache_key는 호출부가 만든
+    "날짜|장 시간대(장전/장중/장후)|종목별 브리핑 지문"이라 같은 시간대 안에서는 같은 결과를
+    재사용하고, 시간대가 바뀌거나 종목별 브리핑 내용이 바뀌면 새로 만든다(하루 최대 3번 안팎).
+    API 키 미설정·네트워크 오류·응답 형식 오류 등 어떤 실패든 빈 결과를 돌려주고(캐시되지
+    않음) 팝업은 그 부분만 숨긴 채 나머지(숫자 기반 섹션)를 그대로 보여준다."""
+    try:
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return _portfolio_summary_cached(cache_key, payload_json)
+    except Exception as e:
+        logging.warning("포트폴리오 브리핑 AI 종합 실패: %s", e)
+        return {"시황": "", "확인할것": [], "의견": ""}
 
 @st.cache_data(ttl=1800)
 def _get_naver_raw(kind: str, item_code: str) -> dict:
@@ -4419,6 +4506,256 @@ def render_daily_report(holdings_df: pd.DataFrame):
             st.caption("애널리스트 리포트 없음")
 
 
+# ============================================================
+# 아침 브리핑 팝업 — [2026-10-08 신규]
+# ============================================================
+# Jone 요청: "오늘의 리포트" 탭 안에 있어 확인하기 번거롭고 내용이 분산돼 가독성이 떨어지니,
+# 앱을 열면 그날의 시황·주요 뉴스·리포트를 종합해서 한 장의 팝업으로 보여주길 원함.
+# 새로 만드는 건 "화면 구성 + 포트폴리오 단위 AI 종합 1회"뿐이고, 종목별 뉴스·공시·AI
+# 브리핑(중요도/판단)·시황·수급은 "오늘의 리포트" 탭이 이미 쓰는 캐시된 함수를 그대로 재사용한다
+# (같은 캐시를 공유하므로 탭을 먼저 봤든 팝업을 먼저 봤든 AI 호출은 중복되지 않는다).
+# 탭의 자세한 화면은 그대로 두고, 팝업은 "아침에 30초 안에 훑어보는 요약본"의 역할이다.
+_BRIEF_STARS = {"A": "★★★★★", "B": "★★★", "C": "★"}
+_BRIEF_IMPORTANCE_RANK = {"A": 3, "B": 2, "C": 1}
+_BRIEF_SENTIMENT_LABEL = {"🟢": "긍정", "🟡": "중립", "🔴": "부정", "⚪": "판단 불가"}
+_WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
+
+def _market_phase_bucket() -> str:
+    """AI 종합 캐시 키에 쓰는 장 시간대(서울시간 기준). 시황 문장이 아침 장전 수치로 하루 종일
+    굳어버리지 않도록, 장전(09시 전)/장중(~15:30)/장후로 나눠 시간대마다 한 번씩만 새로 만든다."""
+    now = datetime.now(KST)
+    if now.hour < 9:
+        return "장전"
+    if now < now.replace(hour=15, minute=30, second=0, microsecond=0):
+        return "장중"
+    return "장후"
+
+def _fmt_won_delta(delta) -> str:
+    """원 단위 증감액을 +/-부호와 함께 읽기 쉽게(만원 단위) 표시."""
+    if delta is None:
+        return "-"
+    if abs(delta) < 0.5:
+        return "0원"
+    if abs(delta) >= 10000:
+        return f"{delta / 1e4:+,.0f}만원"
+    return f"{delta:+,.0f}원"
+
+def _delta_color(delta) -> str:
+    if delta is None or delta == 0:
+        return "var(--text-secondary,#888)"
+    return _UP_COLOR if delta > 0 else _DOWN_COLOR
+
+def _build_morning_briefing_rows(holdings_df: pd.DataFrame) -> tuple[list[dict], float]:
+    """보유종목(종목코드 단위로 계좌 합산)별 브리핑 행과 총 평가금액을 만든다. 뉴스·공시·AI
+    브리핑은 모두 캐시된 함수 호출이라 이미 만들어진 값이면 즉시 돌아온다."""
+    grouped = holdings_df.groupby(["종목코드", "종목명"], as_index=False)["평가금액"].sum()
+    grouped = grouped[grouped["평가금액"] > 0].reset_index(drop=True)
+    if grouped.empty:
+        return [], 0.0
+    total_value = float(grouped["평가금액"].sum())
+    tickers = tuple(sorted({t for t in (get_asset_ticker(c) for c in grouped["종목코드"]) if t}))
+    day_change = get_day_change(tickers) if tickers else {}
+
+    rows = []
+    for _, r in grouped.iterrows():
+        code, name, value = r["종목코드"], r["종목명"], float(r["평가금액"])
+        ticker = get_asset_ticker(code)
+        pct = (day_change.get(ticker, {}) if ticker else {}).get("change_pct")
+        brief = generate_holdings_overview_briefing(code, name, get_daily_stock_report(code, name))
+        # 오늘 평가금액 변동 = 현재 평가금액 − (현재 평가금액 ÷ (1 + 등락률)) — 시세 기준 근사값
+        delta = value - value / (1 + pct / 100) if pct is not None and pct > -100 else None
+        rows.append({
+            "코드": code, "종목명": name, "비중": value / total_value * 100,
+            "등락률": pct, "변동액": delta,
+            "중요도": brief.get("중요도", "-"), "판단": brief.get("판단", "⚪"),
+            "본문": brief.get("본문", ""),
+        })
+    return rows, total_value
+
+def _brief_bullets(body: str) -> list[str]:
+    """브리핑 본문(마크다운 불릿)에서 불릿 문장들만 뽑아낸다."""
+    out = []
+    for line in body.split("\n"):
+        s = line.strip()
+        if s.startswith("- ") or s.startswith("• "):
+            s = s[2:].strip()
+        if s:
+            out.append(s)
+    return out
+
+def _esc(text) -> str:
+    """AI·외부 사이트에서 온 문자열을 HTML에 넣기 전에 이스케이프(HTML 주입 방지)."""
+    return html_lib.escape(str(text))
+
+def _briefing_section_title(text: str) -> str:
+    return f"<div style='font-size:15px;font-weight:700;margin:18px 0 8px;'>{text}</div>"
+
+@st.dialog("📊 오늘의 투자 브리핑", width="large")
+def show_morning_briefing_dialog(holdings_df: pd.DataFrame):
+    now = datetime.now(KST)
+    st.caption(f"{now:%Y.%m.%d} ({_WEEKDAY_KO[now.weekday()]}) · 시황·뉴스·리포트 종합 (주식·ETF 기준)")
+
+    if holdings_df.empty:
+        st.info("보유 중인 종목이 없어 브리핑을 만들 수 없습니다.")
+        return
+
+    with st.spinner("오늘의 브리핑을 준비하고 있어요... (하루 첫 실행은 조금 걸릴 수 있습니다)"):
+        rows, total_value = _build_morning_briefing_rows(holdings_df)
+        mo = get_market_overview()
+
+        market_payload = {}
+        for key in ("코스피", "코스닥", "나스닥", "S&P500", "필라델피아반도체", "원달러환율", "VIX"):
+            v = mo.get(key)
+            if v and v.get("값") is not None:
+                market_payload[key] = {
+                    "값": round(v["값"], 2),
+                    "등락률": round(v["등락률"], 2) if v.get("등락률") is not None else None,
+                }
+        flow = mo.get("코스피_수급")
+        if flow:
+            market_payload["코스피수급_억원"] = {k: round((flow.get(k) or 0) / 1e8) for k in ("외국인", "기관", "개인")}
+
+        payload = {
+            "날짜": f"{now:%Y-%m-%d}",
+            "시황": market_payload,
+            "보유종목": [
+                {"종목명": r["종목명"], "비중_퍼센트": round(r["비중"], 1),
+                 "당일등락률": round(r["등락률"], 2) if r["등락률"] is not None else None,
+                 "중요도": r["중요도"], "판단": _BRIEF_SENTIMENT_LABEL.get(r["판단"], "판단 불가"),
+                 "브리핑": r["본문"]}
+                for r in rows
+            ],
+        }
+        # 캐시 키: 같은 날·같은 장 시간대·같은 종목별 브리핑 내용이면 AI 종합을 재사용
+        fingerprint = hashlib.md5(
+            "|".join(f"{r['코드']}{r['중요도']}{r['판단']}{r['본문']}" for r in rows).encode("utf-8")
+        ).hexdigest()[:12]
+        summary = generate_portfolio_briefing_summary(
+            payload, f"{now:%Y-%m-%d}|{_market_phase_bucket()}|{fingerprint}"
+        )
+
+    ai_ok = any(r["중요도"] in _BRIEF_IMPORTANCE_RANK for r in rows)
+
+    # ── 시황 ──
+    st.markdown(_briefing_section_title("🌐 오늘의 시황"), unsafe_allow_html=True)
+    chips = []
+    for key in ("코스피", "코스닥", "나스닥", "S&P500", "필라델피아반도체", "원달러환율"):
+        v = mo.get(key)
+        if not v or v.get("값") is None:
+            continue
+        chips.append(
+            "<div style='background:rgba(128,128,128,0.08);border-radius:8px;padding:6px 10px;min-width:104px;'>"
+            f"<div style='font-size:11px;color:var(--text-secondary,#888);'>{_esc(key)}</div>"
+            f"<div style='font-size:14px;font-weight:700;'>{v['값']:,.2f}</div>"
+            f"{_change_badge_html(v.get('등락률'))}</div>"
+        )
+    if chips:
+        st.markdown(
+            "<div style='display:flex;flex-wrap:wrap;gap:8px;'>" + "".join(chips) + "</div>",
+            unsafe_allow_html=True,
+        )
+    if flow:
+        parts = []
+        for k in ("외국인", "기관", "개인"):
+            val = (flow.get(k) or 0) / 1e8
+            color = _UP_COLOR if val > 0 else _DOWN_COLOR if val < 0 else "inherit"
+            parts.append(f"{k} <span style='color:{color};font-weight:600;'>{val:+,.0f}</span>")
+        st.markdown(
+            "<div style='font-size:12px;margin-top:8px;color:var(--text-secondary,#888);'>"
+            f"코스피 수급(억원, {_esc(flow.get('날짜', ''))}) · " + " · ".join(parts) + "</div>",
+            unsafe_allow_html=True,
+        )
+    if summary.get("시황"):
+        st.markdown(
+            f"<div style='font-size:13px;margin-top:8px;'>💬 {_esc(summary['시황'])}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── 오늘 가장 중요한 뉴스 ──
+    # 정렬: ① AI가 매긴 중요도(A>B>C) ② 오늘 평가금액 변동 크기 — AI가 대부분 B로만 분류해도
+    # "내 자산에 오늘 실제로 영향이 컸던 종목"이 위로 오도록 객관적인 숫자를 2차 기준으로 쓴다.
+    st.markdown(_briefing_section_title("🔥 오늘 가장 중요한 뉴스"), unsafe_allow_html=True)
+    candidates = [r for r in rows if r["중요도"] in ("A", "B")]
+    candidates.sort(key=lambda r: (-_BRIEF_IMPORTANCE_RANK[r["중요도"]], -abs(r["변동액"] or 0)))
+    if not ai_ok:
+        st.caption("AI 브리핑을 불러오지 못했습니다 (API 키 미설정 또는 일시적 오류). 아래 시세 정보는 정상입니다.")
+    elif not candidates:
+        st.caption("오늘은 특별히 중요한 뉴스가 없습니다 (모든 보유종목이 중요도 C).")
+    circled = ["①", "②", "③"]
+    for i, r in enumerate(candidates[:3]):
+        bullets = [_esc(b) for b in _brief_bullets(r["본문"])]
+        headline = bullets[0] if bullets else "(요약 없음)"
+        extra = "".join(f"<div style='font-size:13px;margin-top:2px;'>→ {b}</div>" for b in bullets[1:])
+        senti = _BRIEF_SENTIMENT_LABEL.get(r["판단"], "판단 불가")
+        st.markdown(
+            "<div style='padding:10px 12px;border-radius:10px;background:rgba(128,128,128,0.08);margin-bottom:8px;'>"
+            f"<div style='font-weight:700;'>{circled[i]} {_esc(r['종목명'])} "
+            f"<span style='color:#e5b73b;font-weight:400;'>{_BRIEF_STARS[r['중요도']]}</span> {r['판단']}</div>"
+            f"<div style='font-size:13.5px;margin-top:4px;'>{headline}</div>{extra}"
+            "<div style='font-size:12px;margin-top:6px;color:var(--text-secondary,#888);'>"
+            f"→ 보유자 관점: {senti} · 비중 {r['비중']:.0f}% · 오늘 평가금액 "
+            f"<span style='color:{_delta_color(r['변동액'])};font-weight:600;'>{_fmt_won_delta(r['변동액'])}</span>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── 내 보유종목 ──
+    st.markdown(_briefing_section_title("📈 내 보유종목"), unsafe_allow_html=True)
+    grid = "1.5fr 0.9fr 1.1fr 0.9fr"
+    body_rows = []
+    for r in sorted(rows, key=lambda x: -x["비중"]):
+        body_rows.append(
+            f"<div style='display:grid;grid-template-columns:{grid};padding:7px 0;"
+            "border-top:1px solid rgba(128,128,128,0.15);font-size:13.5px;align-items:center;'>"
+            f"<div style='font-weight:600;'>{_esc(r['종목명'])} "
+            f"<span style='font-weight:400;font-size:11px;color:var(--text-secondary,#888);'>{r['비중']:.0f}%</span></div>"
+            f"<div style='text-align:right;'>{_change_badge_html(r['등락률']) or '-'}</div>"
+            f"<div style='text-align:right;color:{_delta_color(r['변동액'])};font-weight:600;'>{_fmt_won_delta(r['변동액'])}</div>"
+            f"<div style='text-align:center;'>{r['판단']} {_BRIEF_SENTIMENT_LABEL.get(r['판단'], '')}</div></div>"
+        )
+    valid = [r["변동액"] for r in rows if r["변동액"] is not None]
+    total_delta = sum(valid) if valid else None
+    total_pct = (total_delta / (total_value - total_delta) * 100) if total_delta is not None and total_value != total_delta else None
+    total_row = ""
+    if total_delta is not None:
+        total_row = (
+            f"<div style='display:grid;grid-template-columns:{grid};padding:8px 0 4px;"
+            "border-top:2px solid rgba(128,128,128,0.3);font-size:13.5px;font-weight:700;align-items:center;'>"
+            "<div>합계</div>"
+            f"<div style='text-align:right;'>{_change_badge_html(total_pct) or '-'}</div>"
+            f"<div style='text-align:right;color:{_delta_color(total_delta)};'>{_fmt_won_delta(total_delta)}</div><div></div></div>"
+        )
+    st.markdown(
+        "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
+        f"<div style='display:grid;grid-template-columns:{grid};padding:8px 0;font-size:12px;"
+        "color:var(--text-secondary,#888);'><div>종목(비중)</div><div style='text-align:right;'>당일 등락</div>"
+        "<div style='text-align:right;'>오늘 평가금액 변동</div><div style='text-align:center;'>판단</div></div>"
+        + "".join(body_rows) + total_row + "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption("🟢 긍정 · 🟡 중립 · 🔴 부정 · ⚪ 판단 불가 — AI가 오늘 수집된 뉴스·공시만 보고 분류한 참고용 정보입니다. "
+               "평가금액 변동은 현재 시세 기준 근사값입니다.")
+
+    # ── 오늘 확인할 것 / AI 의견 ──
+    if summary.get("확인할것"):
+        st.markdown(_briefing_section_title("⚠️ 오늘 확인할 것"), unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:13.5px;line-height:1.7;'>"
+            + "".join(f"• {_esc(c)}<br>" for c in summary["확인할것"]) + "</div>",
+            unsafe_allow_html=True,
+        )
+    if summary.get("의견"):
+        st.markdown(_briefing_section_title("🤖 AI 의견"), unsafe_allow_html=True)
+        st.markdown(
+            "<div style='padding:12px 14px;border-radius:10px;background:rgba(46,116,181,0.10);"
+            f"font-size:14px;line-height:1.7;'>“{_esc(summary['의견'])}”</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.caption("※ 매매 판단은 사용자 결정입니다. 이 브리핑은 참고용이며, 자세한 내용은 '🗞️ 오늘의 리포트' 탭에서 확인하세요.")
+    if st.button("닫기", key="morning_briefing_close"):
+        st.rerun()  # 다이얼로그 안에서 st.rerun()을 호출하면 팝업이 닫힌다
+
 def main(spreadsheet_id: str):
     # 헤더
     col_title, col_time = st.columns([4, 1])
@@ -4430,7 +4767,8 @@ def main(spreadsheet_id: str):
         st.markdown(f"<div style='text-align:right;color:gray;font-size:0.8rem;padding-top:1rem'>{now_kst()} 기준</div>",
                     unsafe_allow_html=True)
         if st.button("로그아웃", key="logout_btn"):
-            for k in ("logged_in", "user_name", "user_email", "spreadsheet_id", "oauth_credentials", "is_admin"):
+            for k in ("logged_in", "user_name", "user_email", "spreadsheet_id", "oauth_credentials", "is_admin",
+                      "morning_briefing_shown"):
                 st.session_state.pop(k, None)
             st.query_params.clear()
             st.rerun()
@@ -4456,7 +4794,7 @@ def main(spreadsheet_id: str):
         if ticker:
             tickers.append(ticker)
 
-    col_refresh, _ = st.columns([1, 5])
+    col_refresh, col_brief, _ = st.columns([1, 1, 4])
     with col_refresh:
         if st.button("🔄 시세 새로고침", key="refresh_btn"):
             st.cache_data.clear()
@@ -4466,6 +4804,13 @@ def main(spreadsheet_id: str):
 
     prices, 시세기준시각 = get_prices(tuple(tickers)) if tickers else ({}, None)
     holdings_df = enrich_with_prices(holdings_df, prices)
+
+    # [2026-10-08] 언제든 아침 브리핑 팝업을 다시 열어볼 수 있는 버튼. 자동 팝업은 세션당 하루 한 번만
+    # 뜨므로, 닫은 뒤 다시 보고 싶을 때 쓴다. 평가금액이 필요해 시세 반영 이후에 그린다
+    # (자리는 위에서 st.columns로 미리 확보해 시세 새로고침 버튼 옆에 나란히 보이게 했다).
+    with col_brief:
+        if st.button("📊 오늘의 브리핑", key="morning_briefing_btn"):
+            show_morning_briefing_dialog(holdings_df)
 
     # 시세 반영 현황 표시 (조회 실패 시 경고)
     if tickers and not prices:
@@ -4511,6 +4856,18 @@ def main(spreadsheet_id: str):
         render_data_mgmt(nonstock_df)
     elif selected_main_tab == "🔧 관리자 메뉴" and is_admin_user:
         render_admin_panel()
+
+    # ── [2026-10-08] 아침 브리핑 자동 팝업 (세션당 하루 한 번) ──
+    # main() 맨 끝에서 호출해야 하는 이유: 탭 화면이 먼저 그려진 상태에서 팝업이 뜨고, 브리핑을
+    # 만드는 시간(하루 첫 실행 시 AI 호출 때문에 수 초~수십 초)은 팝업 안의 스피너로 보이게 하려는 것.
+    # 표시 기록을 "먼저" 남기는 것도 중요하다 — 안 그러면 팝업 안에서 버튼을 눌러 화면이 다시
+    # 실행될 때마다 같은 팝업이 또 열리려 한다. 다른 팝업(앱 정보·업데이트 내역)은 전부 버튼
+    # 클릭으로만 열리므로, 한 번 실행 중에 두 팝업이 동시에 열려 생기는 오류는 없다.
+    # [한계] 기록이 session_state라 브라우저를 새로고침하면(새 세션) 같은 날에도 다시 뜬다.
+    today_key = datetime.now(KST).strftime("%Y-%m-%d")
+    if not holdings_df.empty and st.session_state.get("morning_briefing_shown") != today_key:
+        st.session_state["morning_briefing_shown"] = today_key
+        show_morning_briefing_dialog(holdings_df)
 
 
 # ============================================================
