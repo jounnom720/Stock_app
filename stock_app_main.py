@@ -57,7 +57,11 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.21"
+APP_VERSION = "v2.1.22"
+# [2026-10-26] v2.1.21 → v2.1.22: AI 호출 3곳(종목 상세 브리핑·보유종목 전체 요약·브리핑 팝업 AI 종합)에
+#  temperature=0 추가. 기본값(1.0)에서는 같은 기사로도 다시 만들 때마다 중요도·판단이 달라졌음
+#  (Jone 실측 10/26: 한화오션 A·부정 → 배포 후 재생성 B·중립, 삼성전자 C·중립 → B·긍정).
+#  0이어도 완전히 같은 답이 보장되지는 않지만 흔들림이 크게 줄어든다.
 # [2026-10-26] v2.1.20 → v2.1.21: "오늘의 리포트" 탭 UI 개선(Jone 선택: ①역할 분리 + ②표에서 바로 이동).
 #  ① 시황 카드·수급 표는 브리핑 팝업과 겹치므로 탭 상단의 접힌 펼치기(기본 닫힘)로 옮겼다.
 #     탭은 "보유종목 전체 요약 → 종목 상세 리포트" 순서의 "종목 깊게 보기" 화면이 된다.
@@ -2571,6 +2575,7 @@ def generate_stock_daily_summary(code: str, name: str, report: dict) -> str:
             json={
                 "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 500,
+                "temperature": 0,  # [v2.1.22] 같은 입력이면 같은 분류가 나오도록 무작위성 제거
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=20,
@@ -2714,6 +2719,7 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> d
             json={
                 "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 220,
+                "temperature": 0,  # [v2.1.22] 같은 입력이면 같은 분류가 나오도록 무작위성 제거
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=20,
@@ -2774,6 +2780,7 @@ def _portfolio_summary_uncached(payload_json: str) -> dict:
         json={
             "model": "claude-haiku-4-5-20251001",
             "max_tokens": 500,
+            "temperature": 0,  # [v2.1.22] 같은 입력이면 같은 분류가 나오도록 무작위성 제거
             "messages": [{"role": "user", "content": prompt}],
         },
         timeout=25,
