@@ -57,7 +57,20 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.19"
+APP_VERSION = "v2.1.21"
+# [2026-10-26] v2.1.20 → v2.1.21: "오늘의 리포트" 탭 UI 개선(Jone 선택: ①역할 분리 + ②표에서 바로 이동).
+#  ① 시황 카드·수급 표는 브리핑 팝업과 겹치므로 탭 상단의 접힌 펼치기(기본 닫힘)로 옮겼다.
+#     탭은 "보유종목 전체 요약 → 종목 상세 리포트" 순서의 "종목 깊게 보기" 화면이 된다.
+#  ② 보유종목 전체 요약을 HTML 표 → 행 선택이 되는 st.dataframe으로 바꾸고, 행을 누르면 바로 아래
+#     종목 상세 리포트의 종목 선택이 그 종목으로 바뀐다. 종목별 펼치기 9개는 "핵심 요약" 열로 합쳤다.
+#     표는 중요도(A→B→C) 순으로 정렬. 상승=빨강/하락=파랑 색은 pandas Styler로 유지.
+# [2026-10-26] v2.1.19 → v2.1.20: 가져온 거래 묶음 되돌리기(배치 삭제) 추가.
+#  - 파일로 가져와 저장할 때 비고에 묶음 표시를 붙인다: "파일 가져오기 #YYYY-MM-DD HH:MM:SS"(KST 저장 시각).
+#    시트 열 구조는 그대로(새 열 추가 없음) — 비고 칸만 쓰므로 기존 사용자 시트에 영향 없음.
+#  - 거래이력 탭에 "↩️ 가져온 거래 되돌리기" 추가: 묶음 선택 → 지울 행 미리보기 → 확인 체크 → 삭제.
+#    삭제 직전에 시트를 새로 읽어 행 수가 화면과 다르면 중단(그사이 시트가 바뀐 경우 엉뚱한 행 삭제 방지).
+#  - v2.1.19 이전에 가져온 행(비고 "CSV 가져오기"/"파일 가져오기", 시각 없음)은 계좌별 한 묶음으로 보여준다.
+#  - 비고를 직접 고친 행은 묶음에서 빠진다(비고가 정확히 같은 행만 지움).
 # [2026-10-26] v2.1.18 → v2.1.19: ETF 판단 보정 — ETF는 AI 응답과 무관하게 판단을 항상 "중립(🟡)"으로 고정.
 #  ETF 관련 뉴스는 운용사 홍보성 기사(순자산 돌파·수익률 1위·신규 상장 등)가 대부분이라 AI가 긍정(🟢) 쪽으로
 #  치우치는 문제가 있었음(Jone 선택: 프롬프트 규칙이 아니라 코드로 고정 — 결과가 확실하고 예측 가능).
@@ -641,6 +654,9 @@ def _render_import_preview_and_save(parsed_df: pd.DataFrame, trade_df: pd.DataFr
             return
         to_save["운용사"] = account_name
         to_save["거래일자"] = to_save["거래일자"].apply(lambda v: normalize_import_date(v) or str(v).strip())
+        # [2026-10-26, v2.1.20] 묶음 되돌리기용 표시 — 이번 저장분 전체에 같은 비고를 붙인다.
+        batch_tag = f"{IMPORT_BATCH_PREFIX}{datetime.now(KST):%Y-%m-%d %H:%M:%S}"
+        to_save["비고"] = batch_tag
         spreadsheet = get_spreadsheet(st.session_state.get("spreadsheet_id", ""))
         if spreadsheet is None:
             st.error("개인 시트를 열지 못했습니다. 잠시 후 다시 시도해주세요.")
@@ -654,12 +670,133 @@ def _render_import_preview_and_save(parsed_df: pd.DataFrame, trade_df: pd.DataFr
             load_all_data.clear()
             st.success(f"{len(rows_to_write)}건을 '{account_name}' 계좌로 거래이력에 저장했습니다. "
                        "화면 상단에서 다른 탭으로 이동했다가 돌아오면 반영된 걸 확인할 수 있습니다. "
-                       "잘못 저장했다면 구글시트 '거래이력' 탭에서 비고가 '가져오기'인 행을 지우면 됩니다.")
+                       f"잘못 저장했다면 아래 '↩️ 가져온 거래 되돌리기'에서 '{batch_tag[len(IMPORT_BATCH_PREFIX):]}' "
+                       "묶음을 골라 한 번에 지울 수 있습니다.")
         except gspread.exceptions.WorksheetNotFound:
             st.error("'거래이력' 시트를 찾을 수 없습니다.")
         except Exception as e:
             logging.warning("거래내역 가져오기 저장 실패: %s", e)
             st.error(f"저장 중 오류가 발생했습니다: {e}")
+
+# ============================================================
+# 가져온 거래 묶음 되돌리기 — [2026-10-26 신규, v2.1.20]
+# ============================================================
+# 파일로 가져온 거래를 잘못 저장했을 때(계좌를 잘못 고름, 같은 파일을 두 번 저장 등) 구글시트를 열어
+# 한 줄씩 지우지 않고 앱에서 "저장 한 번 = 한 묶음" 단위로 지울 수 있게 한다.
+# 묶음 구분은 새 열 없이 비고 칸으로만 한다: 저장 시각이 붙은 "파일 가져오기 #YYYY-MM-DD HH:MM:SS".
+IMPORT_BATCH_PREFIX = "파일 가져오기 #"
+# v2.1.19 이전 버전이 붙이던 비고(저장 시각 없음) — 계좌별로 한 묶음으로만 구분 가능.
+_LEGACY_IMPORT_NOTES = ("CSV 가져오기", "파일 가져오기")
+
+def list_import_batches(trade_df: pd.DataFrame) -> list[dict]:
+    """거래이력에서 가져오기로 저장된 행을 묶음별로 모은다(최근 묶음이 먼저).
+    반환: [{"비고", "계좌", "건수", "매수", "매도", "기간", "레이블", "구버전"}]"""
+    if trade_df is None or trade_df.empty or "비고" not in trade_df.columns:
+        return []
+    df = trade_df.copy()
+    df["_비고"] = df["비고"].fillna("").astype(str).str.strip()
+    df["_계좌"] = df["운용사"].fillna("").astype(str).str.strip() if "운용사" in df.columns else ""
+    mask = df["_비고"].str.startswith(IMPORT_BATCH_PREFIX) | df["_비고"].isin(_LEGACY_IMPORT_NOTES)
+    df = df[mask]
+    batches = []
+    for (note, account), g in df.groupby(["_비고", "_계좌"], sort=False):
+        legacy = not note.startswith(IMPORT_BATCH_PREFIX)
+        dates = sorted(str(d)[:10] for d in g["거래일자"] if str(d).strip()) if "거래일자" in g.columns else []
+        period = f"{dates[0]} ~ {dates[-1]}" if dates else "-"
+        kinds = g["거래구분"].astype(str).str.strip() if "거래구분" in g.columns else pd.Series(dtype=str)
+        n_buy, n_sell = int((kinds == "매수").sum()), int((kinds == "매도").sum())
+        when = "이전 버전에서 가져온 거래(저장 시각 없음)" if legacy else f"{note[len(IMPORT_BATCH_PREFIX):][:16]} 저장"
+        batches.append({
+            "비고": note, "계좌": account, "건수": len(g), "매수": n_buy, "매도": n_sell,
+            "기간": period, "구버전": legacy,
+            "레이블": f"{when} · {account or '(계좌 없음)'} · {len(g)}건 (매수 {n_buy}·매도 {n_sell}, 거래일 {period})",
+        })
+    # 새 묶음은 저장 시각 내림차순(최근 것이 맨 위), 구버전 묶음은 맨 뒤
+    new = sorted((b for b in batches if not b["구버전"]), key=lambda b: b["비고"], reverse=True)
+    old = [b for b in batches if b["구버전"]]
+    return new + old
+
+def delete_import_batch(spreadsheet_id: str, note: str, account: str, expected_count: int) -> tuple[bool, str]:
+    """거래이력 시트에서 비고·운용사가 정확히 일치하는 행만 지운다.
+    삭제 직전에 시트를 캐시 없이 새로 읽어, 지울 행 수가 화면에서 확인한 수(expected_count)와
+    다르면 아무것도 지우지 않고 중단한다(그사이 시트가 바뀌어 엉뚱한 행을 지우는 것 방지).
+    모든 삭제는 batch_update 한 번으로 보낸다 — 구글 API가 요청 묶음을 한꺼번에 처리하므로
+    일부만 지워진 채 멈추는 일이 없다. 아래쪽 행부터 지워 행 번호가 밀리지 않게 한다."""
+    spreadsheet = get_spreadsheet(spreadsheet_id)
+    if spreadsheet is None:
+        return False, "개인 시트를 열지 못했습니다. 잠시 후 다시 시도해주세요."
+    try:
+        ws = _call_with_retry(spreadsheet.worksheet, "거래이력")
+        values = _call_with_retry(ws.get_all_values)
+    except gspread.exceptions.WorksheetNotFound:
+        return False, "'거래이력' 시트를 찾을 수 없습니다."
+    except Exception as e:
+        logging.warning("되돌리기용 거래이력 읽기 실패: %s", e)
+        return False, f"거래이력을 읽는 중 오류가 발생했습니다: {e}"
+    if not values:
+        return False, "거래이력 시트가 비어 있습니다."
+    header = [str(h).strip() for h in values[0]]
+    if "비고" not in header or "운용사" not in header:
+        return False, "거래이력 시트에 '비고' 또는 '운용사' 열이 없습니다."
+    ni, ai = header.index("비고"), header.index("운용사")
+
+    def _cell(row, i):
+        return str(row[i]).strip() if i < len(row) else ""
+
+    target_rows = [idx for idx, row in enumerate(values[1:], start=2)
+                   if _cell(row, ni) == note and _cell(row, ai) == account]
+    if len(target_rows) != expected_count:
+        return False, (f"시트의 해당 행 수({len(target_rows)}건)가 화면에서 확인한 수({expected_count}건)와 달라 "
+                       "삭제하지 않았습니다. 다른 탭으로 이동했다가 돌아와(새로 불러온 뒤) 다시 확인해주세요.")
+    if not target_rows:
+        return False, "지울 행이 없습니다."
+    requests_body = [{"deleteDimension": {"range": {"sheetId": ws.id, "dimension": "ROWS",
+                                                    "startIndex": r - 1, "endIndex": r}}}
+                     for r in sorted(target_rows, reverse=True)]
+    try:
+        _call_with_retry(spreadsheet.batch_update, {"requests": requests_body})
+    except Exception as e:
+        logging.warning("가져오기 묶음 삭제 실패: %s", e)
+        return False, f"삭제 중 오류가 발생했습니다(시트는 바뀌지 않았습니다): {e}"
+    return True, f"{len(target_rows)}건을 거래이력에서 지웠습니다."
+
+def _render_import_undo(trade_df: pd.DataFrame):
+    """거래이력 탭의 "↩️ 가져온 거래 되돌리기" 화면. 가져온 묶음이 없으면 아무것도 그리지 않는다."""
+    done_msg = st.session_state.pop("import_undo_done_msg", None)
+    if done_msg:
+        st.success(done_msg)
+    batches = list_import_batches(trade_df)
+    if not batches:
+        return
+    with st.expander(f"↩️ 가져온 거래 되돌리기 ({len(batches)}묶음)"):
+        st.caption("파일로 가져와 저장한 거래를 저장 한 번 단위(묶음)로 지웁니다. 직접 입력한 거래는 목록에 나오지 않습니다. "
+                   "비고 칸을 직접 고친 행은 묶음에서 빠집니다.")
+        labels = [b["레이블"] for b in batches]
+        choice = st.selectbox("지울 묶음", labels, index=0, key="import_undo_sel")
+        b = batches[labels.index(choice)]
+        if b["구버전"]:
+            st.info("이전 버전에서 가져온 거래는 저장 시각이 기록되지 않아, 같은 계좌로 여러 번 가져왔다면 "
+                    "모두 한 묶음으로 보입니다. 아래 목록을 꼭 확인해주세요.")
+        rows = trade_df[(trade_df["비고"].fillna("").astype(str).str.strip() == b["비고"])
+                        & (trade_df["운용사"].fillna("").astype(str).str.strip() == b["계좌"])]
+        show_cols = [c for c in ["거래일자", "종목명", "거래구분", "거래수량", "거래단가", "운용사"] if c in rows.columns]
+        st.dataframe(rows[show_cols].rename(columns={"운용사": "계좌"}), hide_index=True, width="stretch",
+                     height=min(400, 50 + 35 * len(rows)))
+        key_suffix = hashlib.md5(f"{b['비고']}|{b['계좌']}".encode("utf-8")).hexdigest()[:8]
+        confirm = st.checkbox(f"위 {b['건수']}건을 거래이력에서 지웁니다. (지운 뒤에는 앱에서 되살릴 수 없습니다)",
+                              key=f"import_undo_confirm_{key_suffix}")
+        if st.button("🗑️ 이 묶음 지우기", key=f"import_undo_btn_{key_suffix}", disabled=not confirm):
+            with st.spinner("지우는 중..."):
+                ok, msg = delete_import_batch(st.session_state.get("spreadsheet_id", ""),
+                                              b["비고"], b["계좌"], b["건수"])
+            if ok:
+                load_sheet.clear()
+                load_all_data.clear()
+                st.session_state["import_undo_done_msg"] = (
+                    f"✅ {msg} (구글시트의 '버전 기록'에서 이전 상태로 되돌릴 수는 있습니다.)")
+                st.rerun()
+            else:
+                st.error(msg)
 
 def _is_mirae_0650_csv(file_bytes: bytes) -> bool:
     """미래에셋증권 [0650] 거래내역 CSV 양식인지(헤더 2줄 구조) 확인한다 — 자동 인식용.
@@ -4789,7 +4926,7 @@ def render_daily_report(holdings_df: pd.DataFrame):
     반영 — 네이버 증권 스타일을 참고한 시안을 먼저 승인받고, 카드 기반 레이아웃으로
     전면 재설계함. st.metric 대신 커스텀 HTML 카드/배지를 써서 상승=빨강/하락=파랑을
     앱 전체와 통일했다."""
-    st.markdown('<div class="section-title">오늘의 시황 · 종목 리포트</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">오늘의 종목 리포트</div>', unsafe_allow_html=True)
     # [2026-10-09, v2.1.16] 상단에 시세 기준 문구(휴장 여부 포함) — 대시보드 배너·브리핑 팝업과 동일.
     _rep_status = get_market_day_status()
     (st.info if _rep_status.get("휴장") is True else st.caption)(
@@ -4798,80 +4935,81 @@ def render_daily_report(holdings_df: pd.DataFrame):
     st.caption("공시(DART)·뉴스·애널리스트 리포트는 참고용 정보이며, 투자 판단의 근거로 쓰기엔 부족할 수 있습니다.")
 
     # ── 시황 ──
-    with st.spinner("시황 데이터 불러오는 중..."):
-        mo = get_market_overview()
+    # [2026-10-26, v2.1.21] 시황·수급은 브리핑 팝업에도 있으므로 기본으로 접어 둔다(역할 분리).
+    with st.expander("🌐 국내·해외 시황 · 수급 (브리핑 팝업과 같은 내용 — 눌러서 펼치기)", expanded=False):
+        with st.spinner("시황 데이터 불러오는 중..."):
+            mo = get_market_overview()
 
-    st.markdown("##### 🌐 국내·해외 시황")
+        st.markdown("##### 🌐 국내·해외 시황")
 
-    # [2026-10-08 재설계, Jone이 "시안B(압축 카드형)" 선택 — 네이버/증권플러스 스타일
-    # 시안 2개를 먼저 Visualizer로 보여드리고 고른 것] 기존 정사각형 카드(라벨→값→배지→
-    # 스파크라인, 한 줄 6개)에서 스파크라인을 빼고 카드를 더 작고 조밀하게 바꿔, 숫자
-    # 자체에 집중하고 한 줄에 더 많은 지표가 들어오게 했다. 추세 미니 차트 관련 함수
-    # (_daily_trend_svg, _get_index_spark_svg)는 당장 안 쓰지만, 나중에 다시 필요할 수
-    # 있어 코드는 그대로 남겨둔다(죽은 코드 아님 — 호출만 안 할 뿐).
-    ALL_MARKET_KEYS = [
-        "코스피", "코스닥",
-        "다우존스", "S&P500", "나스닥", "필라델피아반도체",
-        "니케이225", "상하이종합", "항셍지수", "VIX",
-        "원달러환율", "달러인덱스", "WTI", "브렌트유", "국제금", "미국채10년",
-    ]
-    MARKET_CARDS_PER_ROW = 8  # [2026-10-08] 스파크라인을 빼서 카드가 작아진 만큼 6 → 8열로 늘림
+        # [2026-10-08 재설계, Jone이 "시안B(압축 카드형)" 선택 — 네이버/증권플러스 스타일
+        # 시안 2개를 먼저 Visualizer로 보여드리고 고른 것] 기존 정사각형 카드(라벨→값→배지→
+        # 스파크라인, 한 줄 6개)에서 스파크라인을 빼고 카드를 더 작고 조밀하게 바꿔, 숫자
+        # 자체에 집중하고 한 줄에 더 많은 지표가 들어오게 했다. 추세 미니 차트 관련 함수
+        # (_daily_trend_svg, _get_index_spark_svg)는 당장 안 쓰지만, 나중에 다시 필요할 수
+        # 있어 코드는 그대로 남겨둔다(죽은 코드 아님 — 호출만 안 할 뿐).
+        ALL_MARKET_KEYS = [
+            "코스피", "코스닥",
+            "다우존스", "S&P500", "나스닥", "필라델피아반도체",
+            "니케이225", "상하이종합", "항셍지수", "VIX",
+            "원달러환율", "달러인덱스", "WTI", "브렌트유", "국제금", "미국채10년",
+        ]
+        MARKET_CARDS_PER_ROW = 8  # [2026-10-08] 스파크라인을 빼서 카드가 작아진 만큼 6 → 8열로 늘림
 
-    def _card_grid(keys, cols_per_row):
-        cols = st.columns(cols_per_row)
-        i = 0
-        for key in keys:
-            v = mo.get(key)
-            if not v or v.get("값") is None:
-                continue
-            with cols[i % cols_per_row]:
-                st.markdown(
-                    _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률")),
-                    unsafe_allow_html=True,
-                )
-            i += 1
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        def _card_grid(keys, cols_per_row):
+            cols = st.columns(cols_per_row)
+            i = 0
+            for key in keys:
+                v = mo.get(key)
+                if not v or v.get("값") is None:
+                    continue
+                with cols[i % cols_per_row]:
+                    st.markdown(
+                        _metric_card_html(key, f"{v['값']:,.2f}", v.get("등락률")),
+                        unsafe_allow_html=True,
+                    )
+                i += 1
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    _card_grid(ALL_MARKET_KEYS, MARKET_CARDS_PER_ROW)
+        _card_grid(ALL_MARKET_KEYS, MARKET_CARDS_PER_ROW)
 
-    # ── 코스피/코스닥 수급 ──
-    flow_rows = []
-    for key in ("코스피_수급", "코스닥_수급"):
-        flow = mo.get(key)
-        if flow:
-            flow_rows.append({
-                "시장": key.replace("_수급", ""),
-                "외국인": (flow.get("외국인") or 0) / 1e8,
-                "기관": (flow.get("기관") or 0) / 1e8,
-                "개인": (flow.get("개인") or 0) / 1e8,
-            })
-    if flow_rows:
-        st.markdown("##### 💹 코스피·코스닥 수급 (억원)")
+        # ── 코스피/코스닥 수급 ──
+        flow_rows = []
+        for key in ("코스피_수급", "코스닥_수급"):
+            flow = mo.get(key)
+            if flow:
+                flow_rows.append({
+                    "시장": key.replace("_수급", ""),
+                    "외국인": (flow.get("외국인") or 0) / 1e8,
+                    "기관": (flow.get("기관") or 0) / 1e8,
+                    "개인": (flow.get("개인") or 0) / 1e8,
+                })
+        if flow_rows:
+            st.markdown("##### 💹 코스피·코스닥 수급 (억원)")
 
-        def _flow_cell(v: float) -> str:
-            color = _UP_COLOR if v > 0 else _DOWN_COLOR if v < 0 else "inherit"
-            return f"<div style='text-align:right;color:{color};font-weight:600;'>{v:+,.0f}</div>"
+            def _flow_cell(v: float) -> str:
+                color = _UP_COLOR if v > 0 else _DOWN_COLOR if v < 0 else "inherit"
+                return f"<div style='text-align:right;color:{color};font-weight:600;'>{v:+,.0f}</div>"
 
-        rows_html = "".join(
-            "<div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;padding:8px 0;"
-            "border-top:1px solid rgba(128,128,128,0.15);font-size:14px;align-items:center;'>"
-            f"<div style='font-weight:600;'>{r['시장']}</div>"
-            f"{_flow_cell(r['외국인'])}{_flow_cell(r['기관'])}{_flow_cell(r['개인'])}"
-            "</div>"
-            for r in flow_rows
-        )
-        st.markdown(
-            "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
-            "<div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;padding:8px 0;"
-            "font-size:12px;color:var(--text-secondary,#888);'>"
-            "<div>시장</div><div style='text-align:right;'>외국인</div>"
-            "<div style='text-align:right;'>기관</div><div style='text-align:right;'>개인</div></div>"
-            f"{rows_html}</div>",
-            unsafe_allow_html=True,
-        )
+            rows_html = "".join(
+                "<div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;padding:8px 0;"
+                "border-top:1px solid rgba(128,128,128,0.15);font-size:14px;align-items:center;'>"
+                f"<div style='font-weight:600;'>{r['시장']}</div>"
+                f"{_flow_cell(r['외국인'])}{_flow_cell(r['기관'])}{_flow_cell(r['개인'])}"
+                "</div>"
+                for r in flow_rows
+            )
+            st.markdown(
+                "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
+                "<div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;padding:8px 0;"
+                "font-size:12px;color:var(--text-secondary,#888);'>"
+                "<div>시장</div><div style='text-align:right;'>외국인</div>"
+                "<div style='text-align:right;'>기관</div><div style='text-align:right;'>개인</div></div>"
+                f"{rows_html}</div>",
+                unsafe_allow_html=True,
+            )
 
-    st.caption(f"기준시각: {mo.get('기준시각', '-')}")
-    st.divider()
+        st.caption(f"기준시각: {mo.get('기준시각', '-')}")
 
     # ── [2026-09-24 신규] 보유종목 전체 요약 ──
     # Jone 요청(2026-09-23 대화): 종목을 하나씩 선택해야 보던 걸 보유종목 전체에 대해
@@ -4922,75 +5060,11 @@ def render_daily_report(holdings_df: pd.DataFrame):
                     "투자의견": ov_consensus.get("투자의견_참고라벨") or "-",
                 })
 
-        # 표 (위 "코스피·코스닥 수급" 표와 동일한 HTML 그리드 스타일 재사용)
-        def _ov_price_cell(v) -> str:
-            if v is None:
-                return "<div style='text-align:right;color:var(--text-secondary,#888);'>-</div>"
-            return f"<div style='text-align:right;'>{v:,.0f}원</div>"
-
-        def _ov_opinion_cell(v: str) -> str:
-            color = _UP_COLOR if v in ("적극매수", "매수") else _DOWN_COLOR if v in ("매도", "비중축소") else "inherit"
-            return f"<div style='text-align:right;color:{color};font-weight:600;'>{v}</div>"
-
-        # [2026-10-08 추가] 중요도(A/B/C) 배지 — A는 눈에 띄게 강조, B/C는 차분하게.
-        _IMPORTANCE_STYLE = {
-            "A": (_UP_COLOR, "rgba(224,99,94,0.15)"),
-            "B": ("var(--text-secondary,#888)", "rgba(128,128,128,0.15)"),
-            "C": ("var(--text-secondary,#888)", "rgba(128,128,128,0.08)"),
-        }
-
-        def _ov_importance_cell(v: str) -> str:
-            color, bg = _IMPORTANCE_STYLE.get(v, ("var(--text-secondary,#888)", "rgba(128,128,128,0.08)"))
-            return (
-                f"<div style='text-align:center;'><span style='display:inline-block;padding:1px 8px;"
-                f"border-radius:6px;font-weight:700;color:{color};background:{bg};'>{v}</span></div>"
-            )
-
-        def _ov_sentiment_cell(v: str) -> str:
-            return f"<div style='text-align:center;font-size:15px;'>{v}</div>"
-
-        overview_rows_html = "".join(
-            "<div style='display:grid;grid-template-columns:1.2fr 1fr 0.9fr 0.6fr 0.6fr 1fr 0.9fr;padding:8px 0;"
-            "border-top:1px solid rgba(128,128,128,0.15);font-size:14px;align-items:center;'>"
-            f"<div style='font-weight:600;'>{row['종목명']}</div>"
-            f"{_ov_price_cell(row['현재가'])}"
-            f"<div style='text-align:right;'>{_change_badge_html(row['등락률']) or '-'}</div>"
-            f"{_ov_importance_cell(row['중요도'])}"
-            f"{_ov_sentiment_cell(row['판단'])}"
-            f"{_ov_price_cell(row['목표주가'])}"
-            f"{_ov_opinion_cell(row['투자의견'])}"
-            "</div>"
-            for row in overview_rows
-        )
-        st.markdown(
-            "<div style='background:rgba(128,128,128,0.08);border-radius:10px;padding:4px 12px;'>"
-            "<div style='display:grid;grid-template-columns:1.2fr 1fr 0.9fr 0.6fr 0.6fr 1fr 0.9fr;padding:8px 0;"
-            "font-size:12px;color:var(--text-secondary,#888);'>"
-            "<div>종목명</div><div style='text-align:right;'>현재가</div>"
-            "<div style='text-align:right;'>등락률</div>"
-            "<div style='text-align:center;'>중요도</div><div style='text-align:center;'>판단</div>"
-            "<div style='text-align:right;'>목표주가</div>"
-            "<div style='text-align:right;'>투자의견</div></div>"
-            f"{overview_rows_html}</div>",
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            "목표주가·투자의견은 네이버 증권 컨센서스 기준(참고용)이며, ETF는 컨센서스가 없어 '-'로 표시됩니다. "
-            "중요도·판단은 AI가 오늘 수집된 뉴스·공시만 보고 분류한 참고용 정보이며, 매매 신호가 아닙니다."
-        )
-        # [2026-10-08 추가, Jone 요청] "판단" 열의 이모티콘 4종이 무슨 뜻인지 표 아래 범례로 명시.
-        st.caption("🟢 긍정 · 🟡 중립 · 🔴 부정 · ⚪ 판단 불가(데이터 부족 또는 AI 응답 실패) · "
-                   "ETF는 관련 기사가 대부분 운용사 홍보성이라 판단을 항상 🟡 중립으로 표시합니다.")
-
-        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
-        # [2026-10-08 재설계, Jone 요청] 기존엔 종목마다 "✨ OOO 압축 브리핑"이라는 똑같은
-        # 제목이 8번 반복돼서 어떤 종목이 실제로 중요한지 펼쳐보기 전까진 알 수 없었다.
-        # 이제는 브리핑의 첫 번째 불릿(핵심 한 줄)을 펼침 버튼 제목 자체로 써서, 펼치지
-        # 않아도 핵심은 이미 보이고, 제목 자체가 "더 보기" 버튼 역할을 겸하게 했다.
-        def _headline_from_brief(body: str, max_len: int = 46) -> str:
-            """브리핑 본문(불릿 목록)에서 첫 번째 줄만 뽑아 펼침 버튼 제목으로 쓸 수 있게
-            다듬는다. 너무 길면 말줄임표로 자른다."""
+        # [2026-10-26, v2.1.21 재설계, Jone 선택 ①+②] HTML 표 + 종목별 펼치기 9개 → 행 선택이 되는
+        # st.dataframe 하나로 합침. 브리핑 첫 줄은 "핵심 요약" 열로 옮겨 펼치지 않아도 보이게 했고,
+        # 행을 누르면 바로 아래 "종목 상세 리포트"의 종목 선택이 그 종목으로 바뀐다.
+        def _headline_from_brief(body: str, max_len: int = 60) -> str:
+            """브리핑 본문(불릿 목록)에서 첫 번째 줄만 뽑아 표의 "핵심 요약" 칸에 쓴다."""
             for line in body.split("\n"):
                 stripped = line.strip()
                 if stripped.startswith("- "):
@@ -4999,21 +5073,98 @@ def render_daily_report(holdings_df: pd.DataFrame):
                     return stripped if len(stripped) <= max_len else stripped[:max_len].rstrip() + "…"
             return ""
 
-        for row in overview_rows:
-            ov_code, ov_name = row["종목코드"], row["종목명"]
-            ov_brief_body = overview_briefs.get(ov_code, "")
-            headline = _headline_from_brief(ov_brief_body)
-            label = f"{row['판단']} {ov_name} — {headline}" if headline else f"{row['판단']} {ov_name} (요약 없음)"
-            with st.expander(label):
-                if ov_brief_body:
-                    st.markdown(_brief_markdown_to_html(ov_brief_body), unsafe_allow_html=True)
-                else:
-                    st.caption("요약을 만들지 못했습니다 (Anthropic API 키 미설정 또는 일시적 오류).")
+        _IMPORTANCE_ORDER = {"A": 0, "B": 1, "C": 2}
+        overview_rows.sort(key=lambda r: (_IMPORTANCE_ORDER.get(r["중요도"], 3), str(r["종목명"])))
+        ov_df = pd.DataFrame([{
+            "판단": r["판단"],
+            "종목명": r["종목명"],
+            "중요도": r["중요도"],
+            "현재가": r["현재가"],
+            "등락률": r["등락률"],
+            "핵심 요약": _headline_from_brief(overview_briefs.get(r["종목코드"], "")) or "(요약 없음)",
+            "목표주가": r["목표주가"],
+            "투자의견": r["투자의견"],
+        } for r in overview_rows])
+        ov_labels = [f"{r['종목명']} ({r['종목코드']})" for r in overview_rows]
+
+        def _sign_color(v):
+            # 등락률 칸은 아래에서 "▲ 1.20%" 같은 글자로 바꿔 넣으므로 화살표로 색을 정한다.
+            v = str(v)
+            return (f"color:{_UP_COLOR};font-weight:600" if v.startswith("▲")
+                    else f"color:{_DOWN_COLOR};font-weight:600" if v.startswith("▼") else "")
+
+        def _opinion_color(v):
+            return (f"color:{_UP_COLOR};font-weight:600" if v in ("적극매수", "매수")
+                    else f"color:{_DOWN_COLOR};font-weight:600" if v in ("매도", "비중축소") else "")
+
+        def _importance_color(v):
+            return f"color:{_UP_COLOR};font-weight:700" if v == "A" else ""
+
+        def _fmt_won(v):
+            return "-" if v is None or pd.isna(v) else f"{v:,.0f}원"
+
+        def _fmt_pct(v):
+            if v is None or pd.isna(v):
+                return "-"
+            arrow = "▲" if v > 0 else "▼" if v < 0 else ""
+            return f"{arrow} {abs(v):.2f}%" if arrow else "0.00%"
+
+        # 빈 값이 표에 "None"으로 보이지 않도록 숫자 칸은 미리 글자로 바꿔 넣는다.
+        ov_df["현재가"] = ov_df["현재가"].apply(_fmt_won)
+        ov_df["목표주가"] = ov_df["목표주가"].apply(_fmt_won)
+        ov_df["등락률"] = ov_df["등락률"].apply(_fmt_pct)
+        ov_styled = (
+            ov_df.style
+            .map(_sign_color, subset=["등락률"])
+            .map(_opinion_color, subset=["투자의견"])
+            .map(_importance_color, subset=["중요도"])
+        )
+        st.caption("👆 행을 누르면 바로 아래 '종목 상세 리포트'가 그 종목으로 바뀝니다. 중요도 A → B → C 순으로 정렬됩니다.")
+        ov_event = st.dataframe(
+            ov_styled,
+            hide_index=True,
+            width="stretch",
+            on_select="rerun",
+            selection_mode="single-row",
+            key="daily_report_overview_table",
+            column_config={
+                "판단": st.column_config.TextColumn("판단", width="small"),
+                "종목명": st.column_config.TextColumn("종목명", width="medium"),
+                "중요도": st.column_config.TextColumn("중요도", width="small"),
+                "현재가": st.column_config.TextColumn("현재가", width="small"),
+                "등락률": st.column_config.TextColumn("등락률", width="small"),
+                "핵심 요약": st.column_config.TextColumn("핵심 요약", width="large",
+                                                     help="AI가 오늘 수집된 기사 제목·공시로 만든 한 줄 요약(참고용)"),
+                "목표주가": st.column_config.TextColumn("목표주가", width="small"),
+                "투자의견": st.column_config.TextColumn("투자의견", width="small"),
+            },
+        )
+        # 표에서 새로 고른 행만 아래 선택 상자에 반영한다. 같은 선택이 계속 유지되는 동안에는 덮어쓰지 않아서,
+        # 사용자가 아래 선택 상자로 다른 종목을 골라도 표 선택이 그걸 되돌리지 않는다.
+        try:
+            _sel_rows = list(ov_event.selection.rows) if ov_event is not None else []
+        except Exception:
+            _sel_rows = []
+        if _sel_rows and 0 <= _sel_rows[0] < len(ov_labels):
+            _picked = ov_labels[_sel_rows[0]]
+            if st.session_state.get("_daily_report_last_pick") != _picked:
+                st.session_state["_daily_report_last_pick"] = _picked
+                st.session_state["daily_report_stock_select"] = _picked
+        else:
+            st.session_state.pop("_daily_report_last_pick", None)
+
+        st.caption(
+            "목표주가·투자의견은 네이버 증권 컨센서스 기준(참고용)이며, ETF는 컨센서스가 없어 '-'로 표시됩니다. "
+            "중요도·판단은 AI가 오늘 수집된 뉴스·공시만 보고 분류한 참고용 정보이며, 매매 신호가 아닙니다."
+        )
+        # [2026-10-08 추가, Jone 요청] "판단" 열의 이모티콘 4종이 무슨 뜻인지 표 아래 범례로 명시.
+        st.caption("🟢 긍정 · 🟡 중립 · 🔴 부정 · ⚪ 판단 불가(데이터 부족 또는 AI 응답 실패) · "
+                   "ETF는 관련 기사가 대부분 운용사 홍보성이라 판단을 항상 🟡 중립으로 표시합니다.")
 
     st.divider()
 
     # ── 종목별 리포트 ──
-    st.markdown("##### 📰 보유 종목 리포트")
+    st.markdown("##### 🔎 종목 상세 리포트")
     if holdings_df.empty:
         st.info("보유 중인 종목이 없어 종목별 리포트를 표시할 수 없습니다.")
         return
@@ -5023,7 +5174,11 @@ def render_daily_report(holdings_df: pd.DataFrame):
         f"{row['종목명']} ({row['종목코드']})": (row["종목코드"], row["종목명"])
         for _, row in stock_options.iterrows()
     }
-    selected_label = st.selectbox("리포트를 볼 종목 선택", list(code_by_label.keys()), key="daily_report_stock_select")
+    # 표에서 고른 종목이 목록에 없으면(보유종목 변경 직후 등) 선택값을 지워 오류를 막는다.
+    if st.session_state.get("daily_report_stock_select") not in code_by_label:
+        st.session_state.pop("daily_report_stock_select", None)
+    selected_label = st.selectbox("리포트를 볼 종목 선택 (위 표에서 행을 눌러도 바뀝니다)",
+                                  list(code_by_label.keys()), key="daily_report_stock_select")
 
     if not selected_label:
         return
@@ -7161,6 +7316,9 @@ def render_trades(trade_df):
                                                     default_account="미래에셋증권")
             else:
                 _render_generic_trade_import(trade_df, uploaded)
+
+    # [2026-10-26, v2.1.20] 가져온 거래 묶음 되돌리기 (가져온 묶음이 있을 때만 표시)
+    _render_import_undo(trade_df)
 
     if trade_df.empty:
         st.info("거래이력이 없습니다.")
