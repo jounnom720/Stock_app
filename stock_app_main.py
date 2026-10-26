@@ -57,7 +57,12 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.18"
+APP_VERSION = "v2.1.19"
+# [2026-10-26] v2.1.18 → v2.1.19: ETF 판단 보정 — ETF는 AI 응답과 무관하게 판단을 항상 "중립(🟡)"으로 고정.
+#  ETF 관련 뉴스는 운용사 홍보성 기사(순자산 돌파·수익률 1위·신규 상장 등)가 대부분이라 AI가 긍정(🟢) 쪽으로
+#  치우치는 문제가 있었음(Jone 선택: 프롬프트 규칙이 아니라 코드로 고정 — 결과가 확실하고 예측 가능).
+#  중요도·요약 문장은 AI 결과를 그대로 쓰고, AI 호출 실패 시에는 기존처럼 ⚪(판단 불가)를 유지한다.
+#  ETF 구분은 get_asset_type()(ASSET_MASTER 등록 유형 → 미등록이면 국내 ETF 브랜드명)을 그대로 쓴다.
 # [2026-10-09] v2.1.17 → v2.1.18: 휴장일 안내 문구를 "휴장일로 보입니다" → "휴장일입니다"로 단정(Jone 피드백).
 #  야후 조회가 실패해 pykrx로 휴장을 판단한 경우에도 직전 거래일 날짜를 pykrx로 구해 문구에 표시한다.
 # [2026-10-09] v2.1.16 → v2.1.17 (배포 후 Jone 피드백 반영):
@@ -2443,6 +2448,7 @@ def generate_stock_daily_summary(code: str, name: str, report: dict) -> str:
 
 # [2026-10-08 추가] 중요도/판단 태그 해석표. ChatGPT가 제안한 "텔레그램 기반 투자 브리핑"
 # 형식 중 "중요도 A/B/C"·"판단 🟢긍정/🟡중립/🔴부정" 부분만 Jone이 채택(대화 2026-10-08).
+# [2026-10-26, v2.1.19] ETF는 판단을 항상 중립으로 고정(_apply_etf_neutral_judgment 참고).
 # "투자 행동"(보유/추가매도 등 매매 제안) 항목은 기존 설계 원칙("매수·매도 권유 안 함")과
 # 정면으로 부딪혀서 의도적으로 제외함 — generate_stock_daily_summary()의 "투자 조언이나
 # 매수/매도 권유는 하지 말 것" 규칙과 동일한 선을 여기서도 유지.
@@ -2470,6 +2476,21 @@ def _parse_overview_briefing(raw_text: str) -> dict:
         "판단": sentiment or "⚪",
         "본문": "\n".join(body_lines).strip(),
     }
+
+def _apply_etf_neutral_judgment(code: str, name: str, brief: dict) -> dict:
+    """[2026-10-26, v2.1.19 신규] ETF 판단 보정. ETF 관련 뉴스는 대부분 운용사 홍보성 기사
+    (순자산 돌파·수익률 1위·신규 상장 등)라서 AI가 판단을 긍정(🟢) 쪽으로 치우치게 붙이는 문제가
+    있었다. Jone 결정(2026-10-26)에 따라 프롬프트 규칙이 아니라 코드에서 ETF의 판단을 항상
+    중립(🟡)으로 고정한다. 중요도·본문은 AI 결과를 그대로 둔다.
+    AI 호출 자체가 실패한 경우(본문이 비어 있고 판단이 ⚪)에는 실패 사실이 가려지지 않도록
+    ⚪(판단 불가)를 그대로 유지한다."""
+    if get_asset_type(code, name) != "ETF":
+        return brief
+    if brief.get("판단") == "⚪" and not brief.get("본문"):
+        return brief
+    fixed = dict(brief)
+    fixed["판단"] = _OVERVIEW_SENTIMENT_EMOJI["중립"]
+    return fixed
 
 @st.cache_data(ttl=86400)
 def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> dict:
@@ -2563,7 +2584,8 @@ def generate_holdings_overview_briefing(code: str, name: str, report: dict) -> d
         resp.raise_for_status()
         data = resp.json()
         text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-        return _parse_overview_briefing(text.strip())
+        # [2026-10-26, v2.1.19] ETF는 판단을 중립으로 고정 (함수 코드가 바뀌어 기존 24시간 캐시는 자동 무효화됨)
+        return _apply_etf_neutral_judgment(code, name, _parse_overview_briefing(text.strip()))
     except Exception as e:
         logging.warning("보유종목 전체 요약 브리핑 실패 [%s]: %s", code, e)
         return {"중요도": "-", "판단": "⚪", "본문": ""}
@@ -4957,7 +4979,8 @@ def render_daily_report(holdings_df: pd.DataFrame):
             "중요도·판단은 AI가 오늘 수집된 뉴스·공시만 보고 분류한 참고용 정보이며, 매매 신호가 아닙니다."
         )
         # [2026-10-08 추가, Jone 요청] "판단" 열의 이모티콘 4종이 무슨 뜻인지 표 아래 범례로 명시.
-        st.caption("🟢 긍정 · 🟡 중립 · 🔴 부정 · ⚪ 판단 불가(데이터 부족 또는 AI 응답 실패)")
+        st.caption("🟢 긍정 · 🟡 중립 · 🔴 부정 · ⚪ 판단 불가(데이터 부족 또는 AI 응답 실패) · "
+                   "ETF는 관련 기사가 대부분 운용사 홍보성이라 판단을 항상 🟡 중립으로 표시합니다.")
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
@@ -5351,8 +5374,9 @@ def _render_briefing_ai_section(rows: list[dict], mo: dict, status: dict, now: d
                                                        "언론사": d.get("제출인"), "날짜": d.get("날짜")},
                                                       show_related=False) for d in used_disc),
                             unsafe_allow_html=True)
-    st.caption("중요도·판단은 AI가 기사 제목·공시만 보고 붙인 참고용 분류이며, 아직 보정되지 않아 긍정(🟢) 쪽으로 "
-               "치우칠 수 있습니다. 'AI에 입력된 제목 전체'는 AI가 본 자료이고, 그중 무엇을 근거로 썼는지는 "
+    st.caption("중요도·판단은 AI가 기사 제목·공시만 보고 붙인 참고용 분류이며, 개별 주식은 아직 보정되지 않아 "
+               "긍정(🟢) 쪽으로 치우칠 수 있습니다. ETF는 관련 기사가 대부분 운용사 홍보성이라 판단을 항상 "
+               "🟡 중립으로 표시합니다. 'AI에 입력된 제목 전체'는 AI가 본 자료이고, 그중 무엇을 근거로 썼는지는 "
                "AI 문장과 직접 대조해야 합니다.")
 
 @st.dialog("📊 오늘의 투자 브리핑", width="large")
