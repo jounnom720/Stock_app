@@ -57,7 +57,11 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.23"
+APP_VERSION = "v2.1.24"
+# [2026-10-27] v2.1.23 → v2.1.24: "누적 총손익(평가손익 + 실현손익)" 카드 추가(Jone 요청).
+#  손실 종목을 일부 팔자 "투자원금"이 판 주식의 원가만큼 줄고 평가손익은 좋아 보여서, 매매 자체로 재산이
+#  줄거나 는 것처럼 오해하기 쉬웠다. 대시보드의 작은 캡션을 [평가손익 | 실현손익 | 누적 총손익] 카드 3개로
+#  바꾸고, 보유 종목 탭에도 계좌 필터를 따르는 "누적 총손익" 카드와 원금 설명을 추가했다.
 # [2026-10-27] v2.1.22 → v2.1.23 (Jone 실사용 피드백 — 미래에셋 "주문체결" 엑셀로 가져오기 시도):
 #  ① 가져오기 화면에서 항목을 하나 고를 때마다 펼치기가 접히던 문제 수정. 원인: 탭 위쪽 경고(거래이력 점검·
 #     시세 조회 실패) 개수가 실행마다 달라지면 Streamlit이 아래 펼치기를 "새 요소"로 보고 접는다(실측 재현).
@@ -5926,7 +5930,7 @@ def main(spreadsheet_id: str):
     if selected_main_tab == "📈 통합 대시보드":
         render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=trade_df, transfer_df=transfer_df)
     elif selected_main_tab == "💼 보유 종목":
-        render_holdings(holdings_df, prices, nonstock_df, 시세기준시각=시세기준시각)
+        render_holdings(holdings_df, prices, nonstock_df, 시세기준시각=시세기준시각, trade_df=trade_df)
     elif selected_main_tab == "📐 기술적 분석":
         render_technical_analysis(holdings_df, trade_df)
     elif selected_main_tab == "🗞️ 오늘의 리포트":
@@ -6175,6 +6179,30 @@ def calc_asset_summary(holdings_df, nonstock_df, trade_df=None, transfer_df=None
     }
 
 
+def render_total_pnl_cards(unrealized: float, realized: float, label_suffix: str = "",
+                           show_unrealized: bool = True):
+    """[v2.1.24 신규] [평가손익(보유 중) | 실현손익(매도로 확정) | 누적 총손익] 카드 3개와 설명 한 줄."""
+    total = unrealized + realized
+    sfx = f" ({label_suffix})" if label_suffix else ""
+    cards = [
+        ("평가손익 · 보유 중" + sfx, unrealized, "아직 팔지 않은 주식의 손익"),
+        ("실현손익 · 매도로 확정" + sfx, realized, "이미 판 주식에서 확정된 손익"),
+        ("누적 총손익" + sfx, total, "평가손익 + 실현손익"),
+    ]
+    if not show_unrealized:  # 위에 평가손익 카드가 이미 있는 화면(보유 종목 탭)에서는 중복을 뺀다
+        cards = cards[1:]
+    cols = st.columns(3)
+    for col, (label, value, note) in zip(cols, cards):
+        with col:
+            st.markdown(
+                '<div class="metric-card" style="background:var(--card-bg);border:1px solid var(--card-border)">'
+                f'<div class="metric-label">{label}</div>'
+                f'<div class="metric-value" style="color:{color_pnl(value)}">{fmt_money_full(value)}</div>'
+                f'<div style="font-size:0.75rem;color:var(--text-dim2);margin-top:2px">{note}</div>'
+                '</div>', unsafe_allow_html=True)
+    st.caption("💡 주식을 팔면 그 주식의 원가가 '투자원금'에서 빠지고, 손익은 '평가손익'에서 '실현손익'으로 옮겨 갑니다. "
+               "매매만으로 재산이 늘거나 줄지는 않으니(거래세·수수료 제외) 성과는 '누적 총손익'으로 보세요.")
+
 def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None, transfer_df=None):
 
     # [2026-08-19 추가, 2026-09-22 문구 갱신] 장 시작 전(09:00 KST 이전)/장 마감 후
@@ -6217,7 +6245,7 @@ def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None
     tdf_eval, tdf_cost, tdf_pct = s["tdf_eval"], s["tdf_cost"], s["tdf_pct"]
     cash_eval = s["cash_eval"]
     total_eval, total_cost, total_pnl, total_pct = s["total_eval"], s["total_cost"], s["total_pnl"], s["total_pct"]
-    realized_total, grand_total_pnl = s["realized_total"], s["grand_total_pnl"]
+    realized_total = s["realized_total"]  # 누적 총손익(grand_total_pnl)은 render_total_pnl_cards가 직접 더해 보여준다
 
     # ── 히어로 카드: 원금 → 평가금액 → 손익 한눈에 + 비중 바 ──
     st.markdown('<div class="section-title">통합 자산 현황</div>', unsafe_allow_html=True)
@@ -6269,11 +6297,10 @@ def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None
     st.markdown(hero_html, unsafe_allow_html=True)
 
     # 미실현 + 실현(매도·이체로 이미 확정된) 손익을 함께 보여줘서 "체감 수익"과 화면 숫자 차이를 없앰
+    # [v2.1.24] 작은 캡션 → 카드 3개로 키움. 팔면 손익이 "평가"에서 "실현"으로 옮겨 갈 뿐 합계는 그대로라는 걸
+    # 한눈에 보이게 하는 것이 목적(손실 종목 매도 후 투자원금이 줄어 손실이 난 것처럼 보이던 오해 해소).
     if realized_total != 0:
-        st.caption(
-            f"미실현 {fmt_money_full(total_pnl)} + 실현손익(매도·이체) {fmt_money_full(realized_total)} "
-            f"= 누적 총손익 {fmt_money_full(grand_total_pnl)}"
-        )
+        render_total_pnl_cards(total_pnl, realized_total, label_suffix="전체 자산")
 
     # ── 계좌별 현황 ──
     st.markdown('<div class="section-title">계좌별 현황</div>', unsafe_allow_html=True)
@@ -6563,7 +6590,7 @@ def render_dashboard(holdings_df, nonstock_df, monthly_df, prices, trade_df=None
 # ============================================================
 # 탭2: 보유 종목 상세
 # ============================================================
-def render_holdings(holdings_df, prices, nonstock_df=None, 시세기준시각=None):
+def render_holdings(holdings_df, prices, nonstock_df=None, 시세기준시각=None, trade_df=None):
     st.markdown('<div class="section-title">보유 종목 상세</div>', unsafe_allow_html=True)
 
     if holdings_df.empty:
@@ -6639,6 +6666,18 @@ def render_holdings(holdings_df, prices, nonstock_df=None, 시세기준시각=No
             <div class="metric-label">평가손익 ({선택계좌})</div>
             <div class="metric-value" style="color:{color_pnl(filt_pnl)}">{fmt_money_full(filt_pnl)} ({fmt_pct(filt_pct)})</div>
         </div>""", unsafe_allow_html=True)
+
+    # [v2.1.24] 실현손익(매도로 확정)까지 더한 누적 총손익 — 계좌 필터를 그대로 따른다
+    filt_realized = 0
+    if trade_df is not None and not trade_df.empty:
+        _rz = calc_realized_pnl(trade_df)
+        if not _rz.empty:
+            if 선택계좌 != "전체":
+                _rz = _rz[_rz["계좌"] == 선택계좌]
+            filt_realized = int(_rz["실현손익"].sum()) if not _rz.empty else 0
+    if filt_realized != 0:
+        st.markdown('<div class="ui-gap-md"></div>', unsafe_allow_html=True)
+        render_total_pnl_cards(filt_pnl, filt_realized, label_suffix=선택계좌, show_unrealized=False)
 
     # ETF 먼저, 그 다음 주식 — 각 그룹 내에서는 투자원금(매입금액) 큰 순서
     def _type_rank(row):
