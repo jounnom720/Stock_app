@@ -57,7 +57,17 @@ PLOTLY_CONFIG = {
     # '차트 자체'를 확대/축소하게 되고, 페이지 전체가 커지는 문제가 사라진다.
     "scrollZoom": True,
 }
-APP_VERSION = "v2.1.22"
+APP_VERSION = "v2.1.23"
+# [2026-10-27] v2.1.22 → v2.1.23 (Jone 실사용 피드백 — 미래에셋 "주문체결" 엑셀로 가져오기 시도):
+#  ① 가져오기 화면에서 항목을 하나 고를 때마다 펼치기가 접히던 문제 수정. 원인: 탭 위쪽 경고(거래이력 점검·
+#     시세 조회 실패) 개수가 실행마다 달라지면 Streamlit이 아래 펼치기를 "새 요소"로 보고 접는다(실측 재현).
+#     경고를 항상 존재하는 컨테이너 안에 넣어 위치를 고정하고, 파일이 올라와 있으면 펼치기를 열린 상태로 그린다.
+#  ② 날짜 열·종목코드 열이 없는 파일 지원: 날짜는 직접 지정(파일 이름의 261027 같은 숫자로 기본값 추정),
+#     종목코드는 종목명으로 찾기(내 거래이력·등록 종목 기준). 못 찾은 종목은 미리보기에서 코드를 직접 입력,
+#     코드가 빈 행이 저장 대상이면 저장을 막는다.
+#  ③ 수량 열 추정에 "체결량" 추가, 주문량·주문가를 고르면 부분 체결 주의 안내.
+#  ④ 데이터 관리 "서식 통일"이 거래이력 종목코드 열을 텍스트 서식으로 바꾸고, 앞자리 0이 빠진 코드
+#     (예: 5930)를 6자리(005930)로 고친다 — 시트에 직접 005930을 입력하면 숫자 5930으로 바뀌던 문제.
 # [2026-10-26] v2.1.21 → v2.1.22: AI 호출 3곳(종목 상세 브리핑·보유종목 전체 요약·브리핑 팝업 AI 종합)에
 #  temperature=0 추가. 기본값(1.0)에서는 같은 기사로도 다시 만들 때마다 중요도·판단이 달라졌음
 #  (Jone 실측 10/26: 한화오션 A·부정 → 배포 후 재생성 B·중립, 삼성전자 C·중립 → B·긍정).
@@ -389,11 +399,41 @@ _IMPORT_FIELD_GUESS = {
     "거래구분": ("거래구분", "매매구분", "거래종류", "거래유형", "매수매도", "매수/매도", "구분", "적요", "type"),
     "종목코드": ("종목코드", "종목번호", "단축코드", "상품코드", "코드", "티커", "ticker", "symbol"),
     "종목명": ("종목명", "상품명", "종목", "name"),
-    "거래수량": ("거래수량", "체결수량", "매매수량", "수량", "qty", "quantity"),
-    "거래단가": ("거래단가", "체결단가", "매매단가", "단가", "체결가", "가격", "price"),
+    "거래수량": ("거래수량", "체결수량", "체결량", "매매수량", "수량", "qty", "quantity"),
+    "거래단가": ("거래단가", "체결단가", "체결가", "매매단가", "단가", "가격", "price"),
 }
 _IMPORT_REQUIRED_FIELDS = ("거래일자", "거래구분", "종목코드", "거래수량", "거래단가")
 _IMPORT_NEW_ACCOUNT_OPTION = "➕ 새 계좌 이름 직접 입력"
+# [v2.1.23] 날짜·종목코드 열이 없는 파일(예: 미래에셋 '주문체결' 엑셀)용 특수 선택지
+_IMPORT_NO_DATE_OPTION = "(파일에 날짜 없음 — 아래에서 날짜 지정)"
+_IMPORT_NO_CODE_OPTION = "(파일에 코드 없음 — 종목명으로 찾기)"
+
+def _guess_date_from_filename(filename: str) -> date | None:
+    """파일 이름의 "20261027"·"261027" 같은 숫자에서 거래일을 추정한다(없으면 None)."""
+    name = str(filename or "")
+    for pat, century in ((r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)", False), (r"(?<!\d)(\d{2})(\d{2})(\d{2})(?!\d)", True)):
+        m = re.search(pat, name)
+        if m:
+            y = int(m.group(1)) + (2000 if century else 0)
+            try:
+                return date(y, int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                continue
+    return None
+
+def _name_key(name) -> str:
+    """종목명 비교용: 공백 제거 + 대문자."""
+    return re.sub(r"\s", "", str(name or "")).upper()
+
+def build_name_to_code_map(trade_df: pd.DataFrame) -> dict:
+    """종목명 → 종목코드 사전. 내 거래이력에 있던 종목을 우선하고, 앱에 등록된 종목(ASSET_MASTER)으로 보완."""
+    m = {_name_key(meta["name"]): code for code, meta in ASSET_MASTER.items()}
+    if trade_df is not None and not trade_df.empty and {"종목명", "종목코드"} <= set(trade_df.columns):
+        for name, code in zip(trade_df["종목명"], trade_df["종목코드"]):
+            c = normalize_import_code(code)
+            if c and str(name).strip():
+                m[_name_key(name)] = c
+    return m
 
 def _decode_text_bytes(file_bytes: bytes) -> str | None:
     """CSV 바이트를 CP949 → UTF-8(BOM) → UTF-8 순서로 디코딩(국내 증권사 파일은 대부분 CP949)."""
@@ -503,7 +543,8 @@ def _int_if_whole(x: float):
     return int(round(x)) if abs(x - round(x)) < 1e-9 else float(x)
 
 def parse_generic_trade_table(table: pd.DataFrame, mapping: dict, buy_values: list[str],
-                              sell_values: list[str]) -> tuple[pd.DataFrame, dict]:
+                              sell_values: list[str], fixed_date: str | None = None,
+                              name_to_code: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """사용자가 지정한 열(mapping: 필드명→열이름)로 표를 거래이력 시트 형식으로 변환한다.
     거래구분 열의 값 중 buy_values는 매수, sell_values는 매도로 보고 나머지 행은 건너뛴다.
     반환: (DataFrame[REQUIRED_SHEET_HEADERS["거래이력"]], 통계 dict)"""
@@ -521,14 +562,21 @@ def parse_generic_trade_table(table: pd.DataFrame, mapping: dict, buy_values: li
         if 구분 is None:
             _skip(f"매수·매도 아님({kind or '빈 값'})")
             continue
-        d = normalize_import_date(r[mapping["거래일자"]])
+        # [v2.1.23] 날짜 열이 없는 파일은 화면에서 지정한 날짜(fixed_date)를 쓴다
+        d = normalize_import_date(r[mapping["거래일자"]]) if mapping.get("거래일자") else fixed_date
         if d is None:
             _skip("날짜 인식 실패")
             continue
-        code = normalize_import_code(r[mapping["종목코드"]])
-        if code is None:
-            _skip("종목코드 인식 실패")
-            continue
+        raw_name_for_code = str(r[name_col]).strip() if name_col else ""
+        if mapping.get("종목코드"):
+            code = normalize_import_code(r[mapping["종목코드"]])
+            if code is None:
+                _skip("종목코드 인식 실패")
+                continue
+        else:
+            # [v2.1.23] 종목코드 열이 없는 파일: 종목명으로 찾고, 못 찾으면 빈 코드로 두어
+            # 미리보기에서 사용자가 직접 입력하게 한다(저장 단계에서 빈 코드 행은 저장을 막음).
+            code = (name_to_code or {}).get(_name_key(raw_name_for_code), "")
         qty = _to_import_number(r[mapping["거래수량"]])
         price = _to_import_number(r[mapping["거래단가"]])
         if qty is None or price is None:
@@ -540,7 +588,8 @@ def parse_generic_trade_table(table: pd.DataFrame, mapping: dict, buy_values: li
             continue
         raw_name = str(r[name_col]).strip() if name_col else ""
         parsed.append({
-            "종목코드": code, "종목명": resolve_stock_name(code, raw_name) or "(확인 필요)",
+            "종목코드": code,
+            "종목명": (resolve_stock_name(code, raw_name) if code else raw_name) or "(확인 필요)",
             "거래일자": d, "거래구분": 구분, "거래수량": _int_if_whole(qty), "거래단가": _int_if_whole(price),
             "운용사": "", "비고": "파일 가져오기",
         })
@@ -655,6 +704,13 @@ def _render_import_preview_and_save(parsed_df: pd.DataFrame, trade_df: pd.DataFr
             return
         if not account_name:
             st.warning("계좌(운용사) 이름을 입력해주세요.")
+            return
+        # [v2.1.23] 종목코드가 빈 행은 저장하지 않는다(보유종목 계산이 종목코드 기준이라 빈 코드는 오류가 됨)
+        to_save["종목코드"] = to_save["종목코드"].apply(lambda v: normalize_import_code(v) or str(v or "").strip())
+        blank = to_save[to_save["종목코드"] == ""]
+        if not blank.empty:
+            st.warning("종목코드가 비어 있는 행이 있습니다: " + ", ".join(sorted(set(blank["종목명"].astype(str))))
+                       + " — 표의 '종목코드' 칸에 6자리 코드(예: 005930)를 입력하거나 '저장' 체크를 해제해주세요.")
             return
         to_save["운용사"] = account_name
         to_save["거래일자"] = to_save["거래일자"].apply(lambda v: normalize_import_date(v) or str(v).strip())
@@ -837,24 +893,47 @@ def _render_generic_trade_import(trade_df: pd.DataFrame, uploaded):
     st.markdown("**각 항목이 파일의 어느 열인지 지정해주세요**")
     mapping = {}
     field_cols = st.columns(3)
+    special = {"거래일자": _IMPORT_NO_DATE_OPTION, "종목코드": _IMPORT_NO_CODE_OPTION}
+    no_date = no_code = False
     for i, field in enumerate(_IMPORT_REQUIRED_FIELDS + ("종목명",)):
         required = field in _IMPORT_REQUIRED_FIELDS
         placeholder = "(선택)" if required else "(없음 — 코드로 자동 조회)"
-        opts = [placeholder] + columns
+        opts = [placeholder] + columns + ([special[field]] if field in special else [])
         guess = _guess_import_column(columns, field)
         with field_cols[i % 3]:
             sel = st.selectbox(field + (" *" if required else ""), opts,
                                index=opts.index(guess) if guess in opts else 0, key=f"generic_map_{field}")
-        if sel != placeholder:
+        if field == "거래일자" and sel == _IMPORT_NO_DATE_OPTION:
+            no_date = True
+        elif field == "종목코드" and sel == _IMPORT_NO_CODE_OPTION:
+            no_code = True
+        elif sel != placeholder:
             mapping[field] = sel
-    missing = [f for f in _IMPORT_REQUIRED_FIELDS if f not in mapping]
+    st.caption("💡 파일에 날짜나 종목코드 열이 없으면 각 목록 맨 아래의 '(파일에 … 없음)'을 고르세요.")
+
+    fixed_date = None
+    if no_date:
+        default_d = _guess_date_from_filename(uploaded.name) or datetime.now(KST).date()
+        picked = st.date_input("이 파일의 거래일", value=default_d, key="generic_fixed_date",
+                               help="파일 이름의 숫자(예: 261027)로 추정한 날짜입니다. 다르면 바꿔주세요. "
+                                    "파일의 모든 거래에 이 날짜가 들어갑니다.")
+        fixed_date = picked.strftime("%Y-%m-%d")
+    if no_code and "종목명" not in mapping:
+        st.info("종목코드 없이 가져오려면 '종목명' 열을 지정해주세요(종목명으로 코드를 찾습니다).")
+        return
+
+    missing = [f for f in _IMPORT_REQUIRED_FIELDS
+               if f not in mapping and not (f == "거래일자" and no_date) and not (f == "종목코드" and no_code)]
     if missing:
         st.info("필수 항목(*)을 지정해주세요: " + ", ".join(missing))
         return
-    chosen = [mapping[f] for f in _IMPORT_REQUIRED_FIELDS]
+    chosen = [mapping[f] for f in _IMPORT_REQUIRED_FIELDS if f in mapping]
     if len(set(chosen)) != len(chosen):
         st.warning("서로 다른 필수 항목에 같은 열이 지정됐습니다. 열 지정을 확인해주세요.")
         return
+    if any("주문" in str(mapping.get(f, "")) for f in ("거래수량", "거래단가")):
+        st.warning("수량·단가에 '주문' 열을 고르셨습니다. 일부만 체결된 주문은 실제 거래와 달라지니, "
+                   "가능하면 '체결량'·'체결가' 열을 골라주세요.")
 
     kinds = [v for v in pd.unique(table[mapping["거래구분"]].astype(str).str.strip()) if v][:60]
 
@@ -873,7 +952,9 @@ def _render_generic_trade_import(trade_df: pd.DataFrame, uploaded):
         st.info("매수 또는 매도로 볼 값을 하나 이상 골라주세요.")
         return
 
-    parsed_df, stats = parse_generic_trade_table(table, mapping, buy_values, sell_values)
+    parsed_df, stats = parse_generic_trade_table(
+        table, mapping, buy_values, sell_values, fixed_date=fixed_date,
+        name_to_code=build_name_to_code_map(trade_df) if no_code else None)
     if parsed_df.empty:
         st.warning("조건에 맞는 매수·매도 거래를 찾지 못했습니다. 열 지정과 매수/매도 값을 확인해주세요.")
         if stats["제외사유"]:
@@ -882,6 +963,13 @@ def _render_generic_trade_import(trade_df: pd.DataFrame, uploaded):
     st.success(f"매수 {stats['매수']}건, 매도 {stats['매도']}건을 찾았습니다 (제외 {stats['제외']}건).")
     if stats["제외사유"]:
         st.caption("제외 사유: " + ", ".join(f"{k} {v}건" for k, v in stats["제외사유"].items()))
+    if no_code:
+        unresolved = sorted(set(parsed_df.loc[parsed_df["종목코드"] == "", "종목명"].astype(str)))
+        if unresolved:
+            st.warning("종목명으로 종목코드를 찾지 못했습니다: " + ", ".join(unresolved)
+                       + " — 아래 표의 '종목코드' 칸에 6자리 코드를 직접 입력해주세요.")
+        else:
+            st.caption("✅ 모든 종목의 코드를 종목명으로 찾았습니다(내 거래이력·등록 종목 기준). 표에서 한 번 더 확인해주세요.")
     _render_import_preview_and_save(parsed_df, trade_df, key_prefix="generic_import")
 
 
@@ -1099,6 +1187,28 @@ def _normalize_date_values_in_sheet(sh) -> list:
             touched.append(sheet_name)
     return touched
 
+def _normalize_stock_codes_in_sheet(sh) -> list:
+    """[v2.1.23] 거래이력 종목코드 열에서 앞자리 0이 빠진 숫자 코드(예: 5930)를 6자리 텍스트(005930)로
+    고쳐 쓴다. 이미 올바른 값과 인식할 수 없는 값은 건드리지 않는다. RAW로 써서 텍스트로 저장된다."""
+    try:
+        ws = sh.worksheet("거래이력")
+    except gspread.exceptions.WorksheetNotFound:
+        return []
+    all_values = _call_with_retry(ws.get_all_values)
+    if len(all_values) < 2 or "종목코드" not in all_values[0]:
+        return []
+    ci = all_values[0].index("종목코드")
+    col_letter = gspread.utils.rowcol_to_a1(1, ci + 1).rstrip("0123456789")
+    updates = []
+    for r, row in enumerate(all_values[1:], start=2):
+        raw = str(row[ci]).strip() if ci < len(row) else ""
+        if re.fullmatch(r"\d{1,5}", raw.replace(",", "")):
+            updates.append({"range": f"{col_letter}{r}", "values": [[raw.replace(",", "").zfill(6)]]})
+    if updates:
+        _call_with_retry(ws.batch_update, updates, value_input_option="RAW")
+        return ["거래이력"]
+    return []
+
 def _apply_column_formatting(sh) -> list:
     """이미 열려 있는 gspread Spreadsheet 객체(sh)에 금액 천단위 콤마·정렬·글꼴 서식을 일괄 적용.
     신규 사용자의 시트를 처음 만들 때(_initialize_sheet_structure)와, 기존 사용자가
@@ -1142,6 +1252,22 @@ def _apply_column_formatting(sh) -> list:
 
         for i, col_name in enumerate(header):
             kind = rules.get(str(col_name).strip(), "text")
+            # [v2.1.23] 종목코드는 '일반 텍스트' 서식으로 고정 — 시트에 005930을 직접 입력해도
+            # 숫자 5930으로 바뀌지 않게 한다(이미 숫자로 들어간 값은 _normalize_stock_codes_in_sheet가 고침).
+            if str(col_name).strip() == "종목코드":
+                requests.append({
+                    "repeatCell": {
+                        "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": last_row,
+                                  "startColumnIndex": i, "endColumnIndex": i + 1},
+                        "cell": {"userEnteredFormat": {
+                            "numberFormat": {"type": "TEXT"},
+                            "horizontalAlignment": "CENTER",
+                            "textFormat": {**BASE_FONT, "bold": False},
+                        }},
+                        "fields": "userEnteredFormat(numberFormat,horizontalAlignment,textFormat)",
+                    }
+                })
+                continue
 
             # [수정] "거래이력" 시트의 "거래단가" 컬럼만 예외적으로 소수점이 있을 수 있다
             # (해외 종목 원화 미환산 원본 달러 가격, 예: 230.5). 그 외 모든 금액 컬럼은
@@ -1279,11 +1405,14 @@ def apply_sheet_formatting(spreadsheet_id: str) -> tuple[bool, str]:
             return False, "개인 시트를 열지 못했습니다."
         normalized = _normalize_date_values_in_sheet(spreadsheet)
         formatted = _apply_column_formatting(spreadsheet)
+        code_fixed = _normalize_stock_codes_in_sheet(spreadsheet)  # [v2.1.23] 서식(텍스트) 적용 뒤에 값 보정
         if not formatted:
             return False, "서식을 적용할 시트를 찾지 못했습니다."
         msg = f"서식 정리 완료: {', '.join(formatted)}"
         if normalized:
             msg += f" (날짜 값 통일: {', '.join(normalized)})"
+        if code_fixed:
+            msg += " (종목코드 앞자리 0 복원: 거래이력)"
         return True, msg
     except Exception as e:
         logging.warning("시트 서식 적용 실패: %s", e)
@@ -5730,8 +5859,11 @@ def main(spreadsheet_id: str):
         trade_df, nonstock_df, monthly_df, transfer_df, cashlog_df = load_all_data(spreadsheet_id)
 
     # 거래이력 사전 점검 (빈 셀, 거래구분 오타, 초과매도 등 흔한 입력 오류 안내)
+    # [v2.1.23] 경고 개수가 실행마다 달라져도 아래 화면 요소의 위치가 밀리지 않도록 항상 존재하는
+    # 컨테이너 안에 넣는다(위치가 밀리면 Streamlit이 아래 펼치기를 새 요소로 보고 접어버림).
+    _notice_box = st.container()
     for _msg in validate_trade_df(trade_df):
-        st.warning(_msg)
+        _notice_box.warning(_msg)
 
     # 보유 종목 계산
     holdings_df = calc_holdings(trade_df)
@@ -5763,8 +5895,9 @@ def main(spreadsheet_id: str):
             show_morning_briefing_dialog(holdings_df)
 
     # 시세 반영 현황 표시 (조회 실패 시 경고)
+    _price_notice_box = st.container()  # [v2.1.23] 위와 같은 이유로 위치 고정
     if tickers and not prices:
-        st.warning("⚠ 실시간 시세 조회에 실패했습니다. 잠시 후 '시세 새로고침'을 눌러주세요. (yfinance 서버 응답 없음)")
+        _price_notice_box.warning("⚠ 실시간 시세 조회에 실패했습니다. 잠시 후 '시세 새로고침'을 눌러주세요. (yfinance 서버 응답 없음)")
 
     # ──────────────────────────────────────────────
     # 탭 구성
@@ -7295,7 +7428,9 @@ def render_trades(trade_df):
     # [v2.1.16] "기타 증권사(열 직접 지정)" 방식 추가 — 관리자가 다른 사용자의 증권사 파일을
     # 받지 않고도 어느 증권사든 지원하기 위함(위 "범용 거래내역 가져오기" 섹션 주석 참고).
     # 미리보기·중복 감지·저장은 두 방식이 _render_import_preview_and_save()를 공통으로 쓴다.
-    with st.expander("📥 거래내역 파일로 가져오기 (베타)"):
+    # [v2.1.23] 파일이 올라와 있으면 펼친 상태로 그린다(항목 선택 중 접히는 문제 방지)
+    _import_open = st.session_state.get("trade_import_uploader") is not None
+    with st.expander("📥 거래내역 파일로 가져오기 (베타)", expanded=_import_open):
         st.caption("가져온 거래는 지금처럼 내 개인 구글시트의 '거래이력' 탭 맨 아래에 추가됩니다. 시트는 그대로이며 "
                    "기존 행은 수정·삭제되지 않습니다. 시트에 직접 입력하는 기존 방식도 그대로 쓸 수 있습니다.")
         # [2026-10-09, v2.1.17] Jone 피드백: 미래에셋 양식을 "기준"처럼 먼저 내세울 이유가 없다 →
